@@ -1,64 +1,39 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
 *.egg-info/
 dist/
 build/
 
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# Data files (too large for git)
+# Data (too large)
 *.npy
 *.npz
 *.h5
 *.hdf5
 *.keras
+*.pt
 *.pkl
-*.pickle
 
-# Model files
-models/*.keras
-models/*.h5
-models/*.pb
-
-# Data directories (use .gitkeep to track structure)
+# Directories
 data/raw/*
 data/processed/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-
-# Results and logs
+!data/*/.gitkeep
+models/*
+!models/.gitkeep
 results/*
-logs/*.out
-logs/*.err
-logs/*.log
-
-# Keep structure
 !results/.gitkeep
+logs/*
 !logs/.gitkeep
 
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
 
 # OS
 .DS_Store
-Thumbs.db
 
-# Temporary files
+# Temp
 *.tmp
 tmp/
-
-# TensorBoard logs
-**/logs/events.*
-
-# Conda
-.conda/
