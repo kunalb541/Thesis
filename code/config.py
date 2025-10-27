@@ -1,9 +1,23 @@
 """
 Configuration for systematic benchmarking experiments
-Goal: Test how different parameters affect binary vs PSPL classification
+
+This file contains all parameter sets for different experimental conditions.
+Modify these to create new experiments without changing core code.
+
+Author: Kunal Bhatia (kunal29bhatia@gmail.com)
+University of Heidelberg
 """
 
 import os
+
+# ============================================================================
+# PROJECT METADATA
+# ============================================================================
+
+PROJECT_NAME = "Microlensing Binary Classification"
+AUTHOR = "Kunal Bhatia"
+INSTITUTION = "University of Heidelberg"
+CONTACT = "kunal29bhatia@gmail.com"
 
 # ============================================================================
 # BENCHMARK EXPERIMENT SUITE
@@ -11,15 +25,17 @@ import os
 
 EXPERIMENTS = {
     # BASELINE: Wide range covering planetary to stellar binaries
+    # Represents realistic population for general classification
     'baseline': {
         'description': 'Baseline - wide range from planetary to stellar',
         'n_events': 1_000_000,
-        'cadence_mask_prob': 0.20,
-        'mag_error_std': 0.10,
+        'cadence_mask_prob': 0.20,  # 20% missing observations
+        'mag_error_std': 0.10,       # 0.1 mag photometric error
         'binary_params': 'baseline',
     },
     
     # DISTINCT: Clear caustic-crossing binaries (most distinguishable)
+    # Tests best-case performance with guaranteed caustic features
     'distinct': {
         'description': 'Distinct caustic-crossing events',
         'n_events': 200_000,
@@ -29,10 +45,12 @@ EXPERIMENTS = {
     },
     
     # CADENCE EXPERIMENTS
+    # Test how observation frequency affects performance
+    
     'cadence_dense': {
         'description': 'Dense observing cadence (LSST-like)',
         'n_events': 200_000,
-        'cadence_mask_prob': 0.05,
+        'cadence_mask_prob': 0.05,  # 5% missing - excellent coverage
         'mag_error_std': 0.10,
         'binary_params': 'baseline',
     },
@@ -40,17 +58,27 @@ EXPERIMENTS = {
     'cadence_sparse': {
         'description': 'Sparse cadence',
         'n_events': 200_000,
-        'cadence_mask_prob': 0.30,
+        'cadence_mask_prob': 0.30,  # 30% missing - poor coverage
+        'mag_error_std': 0.10,
+        'binary_params': 'baseline',
+    },
+    
+    'cadence_very_sparse': {
+        'description': 'Very sparse cadence',
+        'n_events': 200_000,
+        'cadence_mask_prob': 0.40,  # 40% missing - very poor coverage
         'mag_error_std': 0.10,
         'binary_params': 'baseline',
     },
     
     # PHOTOMETRIC ERROR EXPERIMENTS
+    # Test how measurement precision affects performance
+    
     'error_low': {
-        'description': 'Low photometric errors (space-based)',
+        'description': 'Low photometric errors (space-based quality)',
         'n_events': 200_000,
         'cadence_mask_prob': 0.20,
-        'mag_error_std': 0.05,
+        'mag_error_std': 0.05,  # Space-based (Roman, HST)
         'binary_params': 'baseline',
     },
     
@@ -58,11 +86,13 @@ EXPERIMENTS = {
         'description': 'High photometric errors',
         'n_events': 200_000,
         'cadence_mask_prob': 0.20,
-        'mag_error_std': 0.20,
+        'mag_error_std': 0.20,  # Poor ground-based conditions
         'binary_params': 'baseline',
     },
     
-    # PLANETARY vs STELLAR
+    # BINARY TYPE EXPERIMENTS
+    # Test performance across different mass ratio regimes
+    
     'planetary': {
         'description': 'Planetary systems (q << 1)',
         'n_events': 200_000,
@@ -83,6 +113,30 @@ EXPERIMENTS = {
 # ============================================================================
 # BINARY PARAMETERS - COVERING PLANETARY TO STELLAR SYSTEMS
 # ============================================================================
+#
+# Key Parameters:
+#   s:     Separation between masses (Einstein radii)
+#          - s < 0.5:   close binary, small caustics
+#          - s ~ 0.8-1.5: wide binary, LARGEST caustics (optimal)
+#          - s > 2:     very wide, small separated caustics
+#
+#   q:     Mass ratio (m2/m1)
+#          - q << 1:    planetary (Jupiter/Sun ~ 0.001)
+#          - q ~ 0.5-1: stellar binary (near equal mass)
+#
+#   u0:    Impact parameter (Einstein radii) - MOST IMPORTANT
+#          - u0 < 0.15: high caustic crossing probability
+#          - u0 > 0.3:  fundamentally PSPL-like (physical limit!)
+#
+#   rho:   Source size (Einstein radii)
+#          - Small rho: sharp caustic features
+#          - Large rho: smoothed features
+#
+#   alpha: Trajectory angle (radians)
+#   tE:    Einstein crossing time (days)
+#   t0:    Time of closest approach (days)
+#
+# ============================================================================
 
 # BASELINE: Wide range from planetary to stellar (realistic population)
 BINARY_PARAMS_BASELINE = {
@@ -96,9 +150,10 @@ BINARY_PARAMS_BASELINE = {
 }
 
 # DISTINCT: Clear caustic-crossing binaries (maximally distinguishable from PSPL)
+# Designed to test best-case performance with guaranteed distinctive features
 BINARY_PARAMS_DISTINCT = {
     's_min': 0.8, 's_max': 1.5,       # Wide binary region (s~1, largest caustics)
-    'q_min': 0.01, 'q_max': 0.5,      # Asymmetric (more features)
+    'q_min': 0.01, 'q_max': 0.5,      # Asymmetric (more distinctive features)
     'u0_min': 0.001, 'u0_max': 0.15,  # Small u0 -> MUST cross caustics
     'rho_min': 0.0001, 'rho_max': 0.01,  # Small source -> sharp features
     'alpha_min': 0, 'alpha_max': 3.14159,
@@ -107,6 +162,7 @@ BINARY_PARAMS_DISTINCT = {
 }
 
 # PLANETARY: Planet-hosting systems
+# Models planetary microlensing events (e.g., Jupiter-mass planets)
 BINARY_PARAMS_PLANETARY = {
     's_min': 0.5, 's_max': 3.0,       # Typical planetary separations
     'q_min': 0.0001, 'q_max': 0.01,   # Mass ratio << 1 (Jupiter/Sun ~ 0.001)
@@ -118,6 +174,7 @@ BINARY_PARAMS_PLANETARY = {
 }
 
 # STELLAR: Equal-mass or near-equal binary stars
+# Models stellar binary lenses
 BINARY_PARAMS_STELLAR = {
     's_min': 0.3, 's_max': 5.0,       # Wide range of stellar separations
     'q_min': 0.3, 'q_max': 1.0,       # Near-equal to equal mass
@@ -128,6 +185,7 @@ BINARY_PARAMS_STELLAR = {
     't0_min': 0, 't0_max': 1000,
 }
 
+# Dictionary mapping parameter set names to configurations
 BINARY_PARAM_SETS = {
     'baseline': BINARY_PARAMS_BASELINE,
     'distinct': BINARY_PARAMS_DISTINCT,
@@ -136,58 +194,199 @@ BINARY_PARAM_SETS = {
 }
 
 # ============================================================================
-# DEFAULT PARAMETERS
+# DEFAULT SIMULATION PARAMETERS
 # ============================================================================
 
+# Dataset size (for baseline)
 N_EVENTS_TOTAL = 1_000_000
 N_PSPL = 500_000
 N_BINARY = 500_000
-N_POINTS = 1500
-TIME_MIN = 0
-TIME_MAX = 1000
 
-# PSPL parameters (unchanged)
-PSPL_BASELINE_MIN = 19
-PSPL_BASELINE_MAX = 22
-PSPL_T0_MIN = 0
-PSPL_T0_MAX = 1000
-PSPL_U0_MIN = 0.01
-PSPL_U0_MAX = 1.0
-PSPL_TE_MIN = 10
-PSPL_TE_MAX = 150
+# Time series parameters
+N_POINTS = 1500         # Number of time points per light curve
+TIME_MIN = 0            # Start time (days)
+TIME_MAX = 1000         # End time (days)
 
-# Observational
-MAG_ERROR_STD = 0.1
-CADENCE_MASK_PROB = 0.2
-PAD_VALUE = 0
+# PSPL parameters (for single-lens events)
+PSPL_BASELINE_MIN = 19  # Minimum baseline magnitude
+PSPL_BASELINE_MAX = 22  # Maximum baseline magnitude
+PSPL_T0_MIN = 0         # Minimum t0
+PSPL_T0_MAX = 1000      # Maximum t0
+PSPL_U0_MIN = 0.01      # Minimum u0
+PSPL_U0_MAX = 1.0       # Maximum u0
+PSPL_TE_MIN = 10        # Minimum tE (days)
+PSPL_TE_MAX = 150       # Maximum tE (days)
 
-# CNN
-SEQUENCE_LENGTH = 1500
-NUM_CHANNELS = 1
+# Observational effects
+MAG_ERROR_STD = 0.1     # Photometric error (magnitudes)
+CADENCE_MASK_PROB = 0.2 # Fraction of missing observations
+PAD_VALUE = 0           # Value to use for missing data
 
-# Training
-TRAIN_SPLIT = 0.7
-VAL_SPLIT = 0.15
-TEST_SPLIT = 0.15
-BATCH_SIZE = 128
-EPOCHS = 50
-LEARNING_RATE = 1e-3
+# ============================================================================
+# CNN ARCHITECTURE PARAMETERS
+# ============================================================================
+
+SEQUENCE_LENGTH = 1500  # Must match N_POINTS
+NUM_CHANNELS = 1        # Single channel (flux/magnitude)
+
+# Architecture details (for TimeDistributedCNN)
+CONV1_FILTERS = 128
+CONV2_FILTERS = 64
+CONV3_FILTERS = 32
+FC1_UNITS = 64
+DROPOUT_RATE = 0.3
+
+# ============================================================================
+# TRAINING PARAMETERS
+# ============================================================================
+
+# Data splits
+TRAIN_SPLIT = 0.7   # 70% training
+VAL_SPLIT = 0.15    # 15% validation
+TEST_SPLIT = 0.15   # 15% test
+
+# Training hyperparameters
+BATCH_SIZE = 128        # Batch size (adjust for GPU memory)
+EPOCHS = 50             # Number of training epochs
+LEARNING_RATE = 1e-3    # Initial learning rate
+WEIGHT_DECAY = 0.0      # L2 regularization
+GRAD_CLIP = 1.0         # Gradient clipping threshold
+
+# Optimization
+OPTIMIZER = 'adam'      # Optimizer type
+LR_SCHEDULER = 'plateau'  # Learning rate scheduler
+LR_PATIENCE = 5         # Patience for ReduceLROnPlateau
+LR_FACTOR = 0.5         # Factor for LR reduction
+
+# Random seed (for reproducibility)
 RANDOM_SEED = 42
 
-# Paths (more flexible)
+# ============================================================================
+# PATHS
+# ============================================================================
+
+# Base directory (automatically detected)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Data directories
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
+PROCESSED_DIR = os.path.join(BASE_DIR, 'data', 'processed')
+
+# Output directories
 MODEL_DIR = os.path.join(BASE_DIR, 'models')
 RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+LOGS_DIR = os.path.join(BASE_DIR, 'logs')
 
+# Create directories if they don't exist
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(PROCESSED_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
 
-# VBMicrolensing
-VBM_REL_TOL = 1e-3
-VBM_TOL = 1e-3
+# ============================================================================
+# VBMICROLENSING PARAMETERS
+# ============================================================================
 
-# GPU settings (works for both AMD and NVIDIA)
-MIXED_PRECISION = True
-NUM_GPUS = 4  # Maximum available
+VBM_REL_TOL = 1e-3  # Relative tolerance for ray-tracing
+VBM_TOL = 1e-3      # Absolute tolerance
+
+# ============================================================================
+# GPU SETTINGS
+# ============================================================================
+# These are maximum values - actual usage detected automatically
+
+MIXED_PRECISION = True  # Use automatic mixed precision training
+NUM_GPUS = 4            # Maximum available GPUs (auto-detected)
+
+# ============================================================================
+# EVALUATION PARAMETERS
+# ============================================================================
+
+# Early detection checkpoints (fractions of event observed)
+EARLY_DETECTION_CHECKPOINTS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0]
+
+# Metrics to compute
+COMPUTE_ROC = True
+COMPUTE_PR = True
+COMPUTE_CONFUSION_MATRIX = True
+
+# ============================================================================
+# VISUALIZATION PARAMETERS
+# ============================================================================
+
+# Plot settings
+DPI = 300               # Resolution for saved plots
+FIGSIZE = (10, 6)       # Default figure size
+PLOT_STYLE = 'seaborn'  # Matplotlib style
+
+# Colors for plots
+COLOR_PSPL = 'blue'
+COLOR_BINARY = 'red'
+COLOR_TRAIN = '#2E86AB'
+COLOR_VAL = '#A23B72'
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+# Logging configuration
+LOG_LEVEL = 'INFO'      # DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
+
+# Console output
+VERBOSE = True          # Print progress to console
+PROGRESS_BAR = True     # Show tqdm progress bars
+
+# ============================================================================
+# EXPERIMENT TRACKING
+# ============================================================================
+
+# Whether to save intermediate checkpoints
+SAVE_CHECKPOINTS = True
+CHECKPOINT_FREQ = 10    # Save every N epochs
+
+# Whether to save best model only or all checkpoints
+SAVE_BEST_ONLY = True
+
+# Metrics to monitor for best model
+MONITOR_METRIC = 'val_acc'  # 'val_acc' or 'val_loss'
+MONITOR_MODE = 'max'         # 'max' or 'min'
+
+# ============================================================================
+# NOTES AND USAGE
+# ============================================================================
+
+"""
+USAGE EXAMPLES:
+
+1. Generate baseline dataset:
+   python simulate.py --output data/raw/events_baseline_1M.npz
+
+2. Train baseline model:
+   python train.py --data data/raw/events_baseline_1M.npz \\
+                   --output models/baseline.pt \\
+                   --experiment_name baseline
+
+3. Evaluate model:
+   python evaluate.py --model models/baseline.pt \\
+                      --data data/raw/events_baseline_1M.npz \\
+                      --output_dir results/baseline_eval \\
+                      --early_detection
+
+4. Run experiment from EXPERIMENTS dict:
+   experiment = EXPERIMENTS['cadence_dense']
+   python simulate.py --cadence {experiment['cadence_mask_prob']} ...
+
+PARAMETER TUNING:
+- Adjust BATCH_SIZE based on GPU memory (64, 128, 256, 512)
+- Increase EPOCHS for better convergence (50-100)
+- Adjust LEARNING_RATE if training is unstable (1e-4 to 1e-2)
+- Modify binary parameter ranges to test specific physics
+
+PHYSICAL INTERPRETATION:
+- u0 < 0.15: Binary likely detectable (crosses caustics)
+- u0 > 0.3:  Binary fundamentally PSPL-like (physical limit)
+- s ~ 1:     Optimal separation for largest caustics
+- Small rho: Sharp features (better for detection)
+"""

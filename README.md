@@ -2,7 +2,9 @@
 
 **Real-time classification of gravitational microlensing events (PSPL vs Binary) using 1D CNNs**
 
-Master's Thesis Project | Deep Learning for Astrophysics
+Master's Thesis Project | University of Heidelberg  
+**Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
+**Last Updated**: January 2025
 
 ---
 
@@ -14,14 +16,46 @@ This project uses deep learning to classify gravitational microlensing light cur
 
 ### Research Goals
 
-1. **Baseline Performance**: What accuracy can we achieve with a wide range of binary systems (planetary to stellar)?
-2. **Observational Effects**: How do missing data, photometric errors, and cadence affect performance?
-3. **Real-time Classification**: Can we detect binary events early for triggering follow-up observations?
-4. **Physical Limits**: Which binary configurations are fundamentally hard to distinguish from PSPL?
+1. **Baseline Performance**: Establish achievable accuracy across diverse binary systems
+2. **Observational Effects**: Quantify impact of missing data, photometric errors, and cadence
+3. **Real-time Classification**: Enable early detection for triggering follow-up observations
+4. **Physical Limits**: Identify which binary configurations are fundamentally hard to distinguish from PSPL
 
 ### Key Innovation
 
-**TimeDistributed CNN architecture** enables classification at each timestep, allowing real-time detection as observations arrive.
+**TimeDistributed CNN architecture** enables classification at each timestep, allowing real-time detection as observations arrive—critical for triggering follow-up observations before events complete.
+
+---
+
+## 📁 Repository Structure
+
+```
+Thesis/
+├── code/
+│   ├── config.py              # All experiment configurations
+│   ├── simulate.py            # Generate light curves (multiprocessing)
+│   ├── train.py               # PyTorch training (GPU-optimized)
+│   ├── evaluate.py            # Model evaluation + early detection
+│   ├── utils.py               # GPU detection, plotting, helpers
+│   └── preflight_check.py     # Pre-submission validation
+├── slurm/                     # HPC batch job scripts
+│   ├── train_baseline.sh      # Main training job
+│   └── interactive.sh         # Interactive GPU session
+├── docs/
+│   ├── RESEARCH_GUIDE.md      # Complete thesis workflow
+│   └── SETUP_GUIDE.md         # Installation and setup
+├── data/
+│   ├── raw/                   # Simulated datasets (.npz)
+│   └── processed/             # Preprocessed data (if needed)
+├── models/                    # Trained models (.pt files)
+├── results/                   # Experiment outputs
+│   └── [experiment]_*/        # Results for each run
+│       ├── best_model.pt
+│       ├── scaler.pkl
+│       ├── metrics.json
+│       └── *.png
+└── logs/                      # Training logs (SLURM outputs)
+```
 
 ---
 
@@ -34,7 +68,7 @@ This project uses deep learning to classify gravitational microlensing light cur
 - 64+ GB RAM for large datasets
 - Fast storage (SSD)
 
-**Or use CPU** (slower but functional for testing)
+**Or use CPU** (functional but slower for testing)
 
 **Software**:
 - Python 3.8+
@@ -47,8 +81,8 @@ This project uses deep learning to classify gravitational microlensing light cur
 
 #### 1. Clone Repository
 ```bash
-git clone <your-repo-url> thesis-microlens
-cd thesis-microlens
+git clone <your-repo-url> Thesis
+cd Thesis
 ```
 
 #### 2. Create Environment
@@ -60,7 +94,6 @@ conda activate microlens
 # Or using venv
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate  # Windows
 ```
 
 #### 3. Install Dependencies
@@ -111,9 +144,9 @@ python simulate.py \
     --n_pspl 500000 \
     --n_binary 500000 \
     --output ../data/raw/events_baseline_1M.npz \
-    --binary_difficulty baseline
+    --binary_params baseline
 
-# Check dataset
+# Verify dataset
 python -c "import numpy as np; d=np.load('../data/raw/events_baseline_1M.npz'); print(f'Shape: {d[\"X\"].shape}, Labels: {set(d[\"y\"])}')"
 ```
 
@@ -172,21 +205,6 @@ python evaluate.py \
 
 ---
 
-## 📊 Expected Baseline Results
-
-**Note**: These are reference ranges. Your actual results may vary.
-
-- **Accuracy**: 92-97% (depends on exact parameter distributions)
-- **ROC AUC**: 0.96-0.99
-- **Training time**: 6-30 hours (GPU dependent)
-
-**Physical interpretation**:
-- ~80-85% of binary events are distinguishable (small u₀, cross caustics)
-- ~15-20% are fundamentally PSPL-like (large u₀, miss caustics)
-- Planetary systems (q << 1) may be harder to detect than stellar (q ~ 1)
-
----
-
 ## 🔬 Advanced Experiments
 
 After baseline, systematically test:
@@ -198,7 +216,7 @@ python simulate.py \
     --n_pspl 100000 \
     --n_binary 100000 \
     --output ../data/raw/events_distinct.npz \
-    --binary_difficulty distinct
+    --binary_params distinct
 ```
 
 ### 2. Cadence Studies
@@ -223,43 +241,10 @@ python simulate.py --error 0.20 --output ../data/raw/events_error_high.npz
 ### 4. Planetary vs Stellar
 ```bash
 # Planetary systems only
-python simulate.py --binary_difficulty planetary --output ../data/raw/events_planetary.npz
+python simulate.py --binary_params planetary --output ../data/raw/events_planetary.npz
 
 # Stellar binaries only
-python simulate.py --binary_difficulty stellar --output ../data/raw/events_stellar.npz
-```
-
----
-
-## 🗂️ Repository Structure
-
-```
-thesis-microlens/
-├── code/
-│   ├── config.py          # All experiment configurations
-│   ├── simulate.py        # Generate light curves (multiprocessing)
-│   ├── train.py           # PyTorch training (GPU-optimized)
-│   ├── evaluate.py        # Model evaluation + early detection
-│   ├── utils.py           # GPU detection, plotting, helpers
-│   └── preflight_check.py # Pre-submission validation
-├── slurm/                 # Batch job scripts (for HPC clusters)
-│   ├── train_baseline.sh  # Main training job
-│   └── interactive.sh     # Get interactive GPU session
-├── docs/
-│   ├── THESIS_GUIDE.md    # Complete thesis workflow
-│   ├── PARAMETERS.md      # Binary parameter interpretation
-│   └── CLUSTER_SETUP.md   # HPC cluster setup (bwUniCluster 3.0)
-├── data/
-│   ├── raw/               # Simulated datasets (.npz files)
-│   └── processed/         # Preprocessed data (if needed)
-├── models/                # Trained models (.pt files)
-├── results/               # Experiment outputs
-│   └── baseline_*/        # Results for each run
-│       ├── best_model.pt
-│       ├── scaler.pkl
-│       ├── metrics.json
-│       └── *.png
-└── logs/                  # Training logs (SLURM outputs)
+python simulate.py --binary_params stellar --output ../data/raw/events_stellar.npz
 ```
 
 ---
@@ -366,7 +351,7 @@ tensorboard --logdir results/
 python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-**NVIDIA**: Install CUDA toolkit
+**NVIDIA**: Install CUDA toolkit  
 **AMD**: Install ROCm 6.0+
 
 ### Out of Memory
@@ -375,8 +360,6 @@ python -c "import torch; print(torch.cuda.is_available())"
 ```bash
 python train.py --batch_size 64  # or 32
 ```
-
-**Or enable gradient checkpointing** (add to `train.py`)
 
 ### Slow data loading
 
@@ -390,16 +373,24 @@ num_workers=8  # or more
 
 ---
 
+## 📚 Documentation
+
+- **[Research Guide](docs/RESEARCH_GUIDE.md)**: Complete thesis workflow, experiment design, analysis plan
+- **[Setup Guide](docs/SETUP_GUIDE.md)**: Detailed installation for local and HPC systems
+- **[Pre-flight Check](code/preflight_check.py)**: Run before starting experiments
+
+---
+
 ## 📝 Citation
 
 If you use this code, please cite:
 
 ```bibtex
-@mastersthesis{yourlastname2025,
+@mastersthesis{bhatia2025,
   title={Real-time Classification of Gravitational Microlensing Events using Deep Learning},
-  author={Your Name},
+  author={Bhatia, Kunal},
   year={2025},
-  school={Your University}
+  school={University of Heidelberg}
 }
 ```
 
@@ -407,8 +398,18 @@ If you use this code, please cite:
 
 ## 📧 Contact
 
-**Project**: [Your Name] - [your.email@university.edu]  
-**HPC Support**: bwunicluster@lists.kit.edu (if using bwUniCluster)
+**Author**: Kunal Bhatia  
+**Email**: kunal29bhatia@gmail.com  
+**Institution**: University of Heidelberg  
+**Project**: Master's Thesis in Astrophysics
+
+---
+
+## 🎓 Acknowledgments
+
+- **VBMicrolensing**: Valerio Bozza for the ray-tracing library
+- **University of Heidelberg**: Compute resources and supervision
+- **Advisor**: [Your advisor's name]
 
 ---
 
@@ -418,22 +419,13 @@ This project is part of a Master's thesis. Code is provided for research and edu
 
 ---
 
-## 🎓 Acknowledgments
-
-- **VBMicrolensing**: Valerio Bozza for the ray-tracing library
-- **Compute resources**: [Your institution's compute cluster]
-- **Advisor**: [Your advisor's name]
-
----
-
-**Status**: Development version - baseline in progress  
+**Status**: Active development  
 **Last updated**: January 2025
 
 ---
 
 ## 🔗 Quick Links
 
-- [Complete Thesis Workflow](docs/THESIS_GUIDE.md)
-- [Binary Parameter Explanation](docs/PARAMETERS.md)
-- [HPC Cluster Setup](docs/CLUSTER_SETUP.md)
+- [Complete Research Workflow](docs/RESEARCH_GUIDE.md)
+- [Installation Guide](docs/SETUP_GUIDE.md)
 - [Pre-flight Checklist](code/preflight_check.py)
