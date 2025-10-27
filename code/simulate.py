@@ -1,5 +1,6 @@
 """
 Microlensing event simulation with configurable binary parameters and multiprocessing
+FIXED VERSION - Bug corrections applied
 
 This script generates realistic microlensing light curves using VBMicrolensing.
 Uses multiprocessing to parallelize event generation for significant speedup.
@@ -8,16 +9,9 @@ Performance:
 - Serial: ~12 hours for 1M events
 - Parallel (24 cores): ~2-3 hours for 1M events
 
-Usage:
-    # Basic usage (automatic CPU detection)
-    python simulate.py --n_pspl 500000 --n_binary 500000
-
-    # Control processes explicitly
-    python simulate.py --n_pspl 500000 --n_binary 500000 --n_processes 16
-    
-    # Different observational conditions
-    python simulate.py --n_pspl 100000 --n_binary 100000 \
-                       --cadence 0.05 --error 0.05 --binary_difficulty easy
+Author: Kunal Bhatia (kunal29bhatia@gmail.com)
+University of Heidelberg
+Last Updated: October 27, 2025
 """
 
 import numpy as np
@@ -28,7 +22,11 @@ from multiprocessing import Pool, cpu_count
 import os
 import time
 from functools import partial
+from typing import Tuple, Dict
 from config import *
+
+# Set random seed for reproducibility
+np.random.seed(RANDOM_SEED)
 
 # Global VBMicrolensing instance for worker processes
 _VBM = None
@@ -40,7 +38,7 @@ def init_worker():
     _VBM.RelTol = VBM_REL_TOL
     _VBM.Tol = VBM_TOL
 
-def generate_pspl_event_worker(args):
+def generate_pspl_event_worker(args: Tuple[int, int, float, float]) -> Tuple[np.ndarray, Dict[str, float]]:
     """
     Worker function for generating a single PSPL event
     
@@ -94,7 +92,7 @@ def generate_pspl_event_worker(args):
     
     return flux_padded, params
 
-def generate_binary_event_worker(args):
+def generate_binary_event_worker(args: Tuple[int, int, float, float, str]) -> Tuple[np.ndarray, Dict[str, float]]:
     """
     Worker function for generating a single Binary event
     
@@ -114,8 +112,8 @@ def generate_binary_event_worker(args):
     # Generate timestamps
     timestamps = np.linspace(TIME_MIN, TIME_MAX, n_points)
     
-    # Get parameter set
-    param_set = BINARY_PARAM_SETS.get(binary_params, BINARY_PARAMS_STANDARD)
+    # Get parameter set - FIXED: Changed BINARY_PARAMS_STANDARD to BINARY_PARAMS_BASELINE
+    param_set = BINARY_PARAM_SETS.get(binary_params, BINARY_PARAMS_BASELINE)
     
     # Sample binary parameters from specified ranges
     s = np.random.uniform(param_set['s_min'], param_set['s_max'])
@@ -134,6 +132,7 @@ def generate_binary_event_worker(args):
         magnifications = np.array(_VBM.BinaryLightCurve(params_vbm, timestamps)[0])
     except Exception as e:
         # Fallback: if VBMicrolensing fails, return PSPL-like curve
+        print(f"Warning: VBMicrolensing failed for seed {seed}, using PSPL fallback")
         u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
         magnifications = (u_t**2 + 2) / (u_t * np.sqrt(u_t**2 + 4))
 
@@ -155,11 +154,11 @@ def generate_binary_event_worker(args):
     
     return magnifications_padded, params
 
-def simulate_dataset(n_pspl, n_binary, output_file, 
-                    cadence_mask_prob=CADENCE_MASK_PROB,
-                    mag_error_std=MAG_ERROR_STD, 
-                    binary_params='standard',
-                    n_processes=None):
+def simulate_dataset(n_pspl: int, n_binary: int, output_file: str, 
+                    cadence_mask_prob: float = CADENCE_MASK_PROB,
+                    mag_error_std: float = MAG_ERROR_STD, 
+                    binary_params: str = 'baseline',
+                    n_processes: int = None) -> None:
     """
     Generate full dataset with multiprocessing
     
@@ -169,9 +168,16 @@ def simulate_dataset(n_pspl, n_binary, output_file,
         output_file: Where to save
         cadence_mask_prob: Fraction of missing observations (0-1)
         mag_error_std: Photometric error (magnitudes)
-        binary_params: 'standard', 'easy', or 'hard'
+        binary_params: 'baseline', 'distinct', 'planetary', or 'stellar'
         n_processes: Number of parallel processes (default: CPU count)
     """
+    
+    # Validate inputs
+    assert n_pspl > 0, "n_pspl must be positive"
+    assert n_binary > 0, "n_binary must be positive"
+    assert 0 <= cadence_mask_prob < 1, "cadence_mask_prob must be in [0, 1)"
+    assert mag_error_std > 0, "mag_error_std must be positive"
+    assert binary_params in BINARY_PARAM_SETS, f"Unknown binary_params: {binary_params}"
     
     # Determine number of processes
     if n_processes is None:
@@ -186,9 +192,10 @@ def simulate_dataset(n_pspl, n_binary, output_file,
     print(f"  Total events:       {n_pspl + n_binary:,}")
     print(f"  Cadence coverage:   {(1-cadence_mask_prob)*100:.0f}%")
     print(f"  Photometric error:  {mag_error_std:.3f} mag")
-    print(f"  Binary difficulty:  {binary_params}")
+    print(f"  Binary params:      {binary_params}")
     print(f"  CPU processes:      {n_processes}")
     print(f"  Output file:        {output_file}")
+    print(f"  Random seed:        {RANDOM_SEED}")
     print(f"{'='*80}\n")
     
     start_time = time.time()
@@ -200,7 +207,7 @@ def simulate_dataset(n_pspl, n_binary, output_file,
     
     # Prepare arguments for each PSPL event (use different seeds)
     pspl_args = [
-        (i * 2, N_POINTS, mag_error_std, cadence_mask_prob) 
+        (RANDOM_SEED + i * 2, N_POINTS, mag_error_std, cadence_mask_prob) 
         for i in range(n_pspl)
     ]
     
@@ -227,7 +234,7 @@ def simulate_dataset(n_pspl, n_binary, output_file,
     
     # Prepare arguments for each Binary event (use different seeds)
     binary_args = [
-        (i * 2 + 1, N_POINTS, mag_error_std, cadence_mask_prob, binary_params)
+        (RANDOM_SEED + i * 2 + 1, N_POINTS, mag_error_std, cadence_mask_prob, binary_params)
         for i in range(n_binary)
     ]
     
@@ -262,8 +269,15 @@ def simulate_dataset(n_pspl, n_binary, output_file,
     X = np.vstack([X_pspl, X_binary])
     y = np.array(['PSPL'] * n_pspl + ['Binary'] * n_binary)
     
+    # Validate data before saving
+    assert X.shape[0] == len(y), f"Mismatch: X has {X.shape[0]} samples, y has {len(y)}"
+    assert X.shape[1] == N_POINTS, f"Expected {N_POINTS} timesteps, got {X.shape[1]}"
+    assert X.shape[2] == 1, f"Expected 1 channel, got {X.shape[2]}"
+    assert np.isfinite(X).all(), "Data contains NaN or inf values"
+    
     # Shuffle for training
     print("Shuffling...")
+    np.random.seed(RANDOM_SEED)  # Ensure reproducible shuffle
     indices = np.random.permutation(len(X))
     X = X[indices]
     y = y[indices]
@@ -277,7 +291,16 @@ def simulate_dataset(n_pspl, n_binary, output_file,
         X=X, 
         y=y,
         pspl_params=pspl_params,
-        binary_params=binary_params_list
+        binary_params_list=binary_params_list,
+        config={
+            'n_pspl': n_pspl,
+            'n_binary': n_binary,
+            'cadence_mask_prob': cadence_mask_prob,
+            'mag_error_std': mag_error_std,
+            'binary_params': binary_params,
+            'random_seed': RANDOM_SEED,
+            'n_points': N_POINTS,
+        }
     )
     
     total_time = time.time() - start_time
@@ -310,13 +333,13 @@ Examples:
   # Control processes explicitly
   python simulate.py --n_pspl 500000 --n_binary 500000 --n_processes 16
   
-  # Dense cadence, low noise, easy binaries
+  # Dense cadence, low noise, distinct binaries
   python simulate.py --n_pspl 100000 --n_binary 100000 \\
-                     --cadence 0.05 --error 0.05 --binary_difficulty easy
+                     --cadence 0.05 --error 0.05 --binary_params distinct
   
-  # Sparse cadence, high noise, hard binaries  
+  # Sparse cadence, high noise, baseline binaries  
   python simulate.py --n_pspl 100000 --n_binary 100000 \\
-                     --cadence 0.40 --error 0.20 --binary_difficulty hard
+                     --cadence 0.40 --error 0.20 --binary_params baseline
         """
     )
     
@@ -330,9 +353,10 @@ Examples:
                        help='Fraction of missing observations (0-1, default: 0.2)')
     parser.add_argument('--error', type=float, default=MAG_ERROR_STD,
                        help='Photometric error in magnitudes (default: 0.1)')
-    parser.add_argument('--binary_difficulty', type=str, default='standard',
-                       choices=['standard', 'easy', 'hard'],
-                       help='Binary event difficulty (default: standard)')
+    # FIXED: Changed from binary_difficulty to binary_params with correct choices
+    parser.add_argument('--binary_params', type=str, default='baseline',
+                       choices=['baseline', 'distinct', 'planetary', 'stellar'],
+                       help='Binary parameter set (default: baseline)')
     parser.add_argument('--n_processes', type=int, default=None,
                        help=f'Number of parallel processes (default: auto-detect, currently {cpu_count()})')
     
@@ -355,7 +379,7 @@ Examples:
         output_file=args.output,
         cadence_mask_prob=args.cadence,
         mag_error_std=args.error,
-        binary_params=args.binary_difficulty,
+        binary_params=args.binary_params,
         n_processes=args.n_processes
     )
 
