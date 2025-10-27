@@ -1,0 +1,54 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Bhatia"
+    given-names: "Kunal"
+    email: "kunal29bhatia@gmail.com"
+    affiliation: "University of Heidelberg"
+    orcid: "https://orcid.org/0000-0000-0000-0000"  # Add your ORCID if you have one
+title: "Machine Learning for Microlensing Binary Classification: TimeDistributed CNN Implementation"
+version: 1.0.0
+date-released: 2025-10-27
+url: "https://github.com/YOUR_USERNAME/Thesis"
+repository-code: "https://github.com/YOUR_USERNAME/Thesis"
+license: MIT
+keywords:
+  - gravitational microlensing
+  - binary lenses
+  - machine learning
+  - deep learning
+  - convolutional neural networks
+  - time series classification
+  - exoplanets
+  - astronomy
+  - astrophysics
+abstract: >
+  A deep learning framework for automated classification of gravitational
+  microlensing events (PSPL vs Binary) using 1D Convolutional Neural Networks
+  with TimeDistributed architecture. Enables real-time classification as
+  observations accumulate, suitable for large-scale survey operations like
+  LSST and Roman Space Telescope.
+preferred-citation:
+  type: thesis
+  authors:
+    - family-names: "Bhatia"
+      given-names: "Kunal"
+      email: "kunal29bhatia@gmail.com"
+  title: "From Light Curves to Labels: Machine Learning in Microlensing"
+  year: 2025
+  institution: "University of Heidelberg"
+  thesis-type: "Master's thesis"
+  department: "Department of Physics and Astronomy"
+  # Add DOI when thesis is published:
+  # doi: "10.xxxx/xxxxx"
+references:
+  - type: article
+    authors:
+      - family-names: "Bozza"
+        given-names: "Valerio"
+    title: "VBMicrolensing: A Public Software for Microlensing Simulations"
+    year: 2010
+    journal: "Monthly Notices of the Royal Astronomical Society"
+    volume: 408
+    issue: 4
+    doi: "10.1111/j.1365-2966.2010.17265.x"
