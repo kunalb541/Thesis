@@ -1,223 +1,147 @@
 """
-Evaluation script for trained models
-Generates comprehensive metrics, confusion matrices, and ROC curves
+PyTorch evaluation script
 """
-
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_recall_curve
-from sklearn.preprocessing import StandardScaler
 import argparse
 import os
 import json
+import joblib
 
-def load_and_preprocess_test_data(data_path):
-    """Load and preprocess test data"""
-    print(f"Loading data from {data_path}...")
-    data = np.load(data_path)
-    X = data['X']
-    y = data['y']
+class TimeDistributedCNN(nn.Module):
+    def __init__(self, sequence_length=1500, num_channels=1, num_classes=2):
+        super().__init__()
+        self.conv1 = nn.Conv1d(num_channels, 128, kernel_size=5, padding=2)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.conv2 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.conv3 = nn.Conv1d(64, 32, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(32)
+        self.dropout = nn.Dropout(0.3)
+        self.relu = nn.ReLU()
+        self.fc1 = nn.Linear(32, 64)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.dropout(x)
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.dropout(x)
+        x = self.relu(self.bn3(self.conv3(x)))
+        x = self.dropout(x)
+        x = x.transpose(1, 2)
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+def plot_confusion_matrix(y_true, y_pred, save_path):
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['PSPL', 'Binary'],
+                yticklabels=['PSPL', 'Binary'])
+    plt.title('Confusion Matrix')
+    plt.ylabel('True')
+    plt.xlabel('Predicted')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+def plot_roc(y_true, y_probs, save_path):
+    fpr, tpr, _ = roc_curve(y_true, y_probs)
+    roc_auc = auc(fpr, tpr)
     
-    # Encode labels
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, lw=2, label=f'ROC (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], 'k--', lw=2)
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    return roc_auc
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', required=True)
+    parser.add_argument('--data', required=True)
+    parser.add_argument('--output_dir', required=True)
+    args = parser.parse_args()
+    
+    os.makedirs(args.output_dir, exist_ok=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Load data
+    data = np.load(args.data)
+    X, y = data['X'], data['y']
     label_map = {'PSPL': 0, 'Binary': 1}
     y_encoded = np.array([label_map[label] for label in y])
     
-    # Take only test split (last 15%)
+    # Test split (last 15%)
     n_test = int(0.15 * len(X))
     X_test = X[-n_test:]
     y_test = y_encoded[-n_test:]
     
-    # Standardize (should use saved scaler in production)
-    scaler = StandardScaler()
-    n_test, n_time, n_feat = X_test.shape
-    X_test_2d = X_test.reshape(-1, n_feat)
-    X_test_scaled = scaler.transform(X_test_2d).reshape(n_test, n_time, n_feat)
+    # Load scaler
+    scaler_path = args.model.replace('.pt', '_scaler.pkl')
+    if os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)
+    else:
+        scaler = StandardScaler()
+        scaler.fit(X_test.reshape(-1, X_test.shape[-1]))
     
-    return X_test_scaled, y_test
-
-def plot_confusion_matrix(y_true, y_pred, save_path):
-    """Plot and save confusion matrix"""
-    cm = confusion_matrix(y_true, y_pred)
-    
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=['PSPL', 'Binary'], 
-                yticklabels=['PSPL', 'Binary'])
-    plt.title('Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Confusion matrix saved to {save_path}")
-
-def plot_roc_curve(y_true, y_proba, save_path):
-    """Plot and save ROC curve"""
-    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
-    roc_auc = auc(fpr, tpr)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, color='darkorange', lw=2, 
-             label=f'ROC curve (AUC = {roc_auc:.3f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Receiver Operating Characteristic')
-    plt.legend(loc="lower right")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"ROC curve saved to {save_path}")
-    
-    return roc_auc
-
-def plot_precision_recall_curve(y_true, y_proba, save_path):
-    """Plot and save Precision-Recall curve"""
-    precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
-    pr_auc = auc(recall, precision)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(recall, precision, color='blue', lw=2, 
-             label=f'PR curve (AUC = {pr_auc:.3f})')
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.title('Precision-Recall Curve')
-    plt.legend(loc="lower left")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Precision-Recall curve saved to {save_path}")
-    
-    return pr_auc
-
-def evaluate_early_detection(model, X_test, y_test, output_dir):
-    """
-    Evaluate how early the model can detect binary events
-    Critical for real-time classification with TimeDistributed
-    """
-    print("\nEvaluating early detection capability...")
-    
-    # Make predictions at different time steps
-    time_steps = [100, 250, 500, 750, 1000, 1250, 1500]
-    accuracies = []
-    
-    for t in time_steps:
-        X_truncated = X_test[:, :t, :]
-        
-        # Pad to full length
-        X_padded = np.zeros((X_test.shape[0], 1500, X_test.shape[2]))
-        X_padded[:, :t, :] = X_truncated
-        
-        # Predict using last time step
-        y_pred_proba = model.predict(X_padded, verbose=0)
-        y_pred_proba_last = y_pred_proba[:, -1, 1]  # Probability of Binary class at last time step
-        y_pred = (y_pred_proba_last > 0.5).astype(int)
-        
-        acc = np.mean(y_pred == y_test)
-        accuracies.append(acc)
-        print(f"Time step {t:4d}: Accuracy = {acc:.4f}")
-    
-    # Plot early detection curve
-    plt.figure(figsize=(10, 6))
-    plt.plot(time_steps, accuracies, marker='o', linewidth=2, markersize=8)
-    plt.xlabel('Number of Observations')
-    plt.ylabel('Classification Accuracy')
-    plt.title('Early Detection Performance')
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    save_path = os.path.join(output_dir, 'early_detection.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Early detection plot saved to {save_path}")
-    
-    return dict(zip(time_steps, accuracies))
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', required=True, help='Path to trained model')
-    parser.add_argument('--data', required=True, help='Path to test data')
-    parser.add_argument('--output_dir', required=True, help='Directory to save results')
-    args = parser.parse_args()
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    X_test = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
     
     # Load model
-    print("=" * 80)
-    print("LOADING MODEL")
-    print("=" * 80)
-    print(f"Loading model from {args.model}...")
-    model = tf.keras.models.load_model(args.model)
-    model.summary()
+    checkpoint = torch.load(args.model, map_location=device)
+    model = TimeDistributedCNN(X_test.shape[1], X_test.shape[2])
     
-    # Load test data
-    print("=" * 80)
-    print("LOADING TEST DATA")
-    print("=" * 80)
-    X_test, y_test = load_and_preprocess_test_data(args.data)
-    print(f"Test data shape: {X_test.shape}")
-    print(f"Test labels shape: {y_test.shape}")
+    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
+        model = nn.DataParallel(model)
     
-    # Make predictions
-    print("=" * 80)
-    print("MAKING PREDICTIONS")
-    print("=" * 80)
-    y_pred_proba = model.predict(X_test, verbose=1)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model = model.to(device)
+    model.eval()
     
-    # For TimeDistributed output, use last time step predictions
-    y_pred_proba_last = y_pred_proba[:, -1, 1]  # Probability of Binary class at last time step
-    y_pred = (y_pred_proba_last > 0.5).astype(int)
+    # Predict
+    X_tensor = torch.FloatTensor(X_test).to(device)
+    with torch.no_grad():
+        outputs = model(X_tensor)
+        probs = torch.softmax(outputs[:, -1, :], dim=1)
+        _, preds = torch.max(probs, 1)
     
-    # Classification report
-    print("=" * 80)
-    print("CLASSIFICATION REPORT")
-    print("=" * 80)
+    y_pred = preds.cpu().numpy()
+    y_probs = probs[:, 1].cpu().numpy()
+    
+    # Metrics
+    accuracy = (y_test == y_pred).mean()
+    print(f"\nTest Accuracy: {accuracy:.4f}")
+    
     report = classification_report(y_test, y_pred, target_names=['PSPL', 'Binary'], digits=4)
     print(report)
     
-    # Save classification report
-    report_path = os.path.join(args.output_dir, 'classification_report.txt')
-    with open(report_path, 'w') as f:
+    # Save
+    with open(os.path.join(args.output_dir, 'report.txt'), 'w') as f:
         f.write(report)
-    print(f"Report saved to {report_path}")
     
-    # Plot confusion matrix
-    cm_path = os.path.join(args.output_dir, 'confusion_matrix.png')
-    plot_confusion_matrix(y_test, y_pred, cm_path)
+    plot_confusion_matrix(y_test, y_pred, os.path.join(args.output_dir, 'confusion_matrix.png'))
+    roc_auc = plot_roc(y_test, y_probs, os.path.join(args.output_dir, 'roc_curve.png'))
     
-    # Plot ROC curve
-    roc_path = os.path.join(args.output_dir, 'roc_curve.png')
-    roc_auc = plot_roc_curve(y_test, y_pred_proba_last, roc_path)
-    
-    # Plot Precision-Recall curve
-    pr_path = os.path.join(args.output_dir, 'precision_recall_curve.png')
-    pr_auc = plot_precision_recall_curve(y_test, y_pred_proba_last, pr_path)
-    
-    # Early detection evaluation
-    early_detection_results = evaluate_early_detection(model, X_test, y_test, args.output_dir)
-    
-    # Save all metrics
-    metrics = {
-        'roc_auc': float(roc_auc),
-        'pr_auc': float(pr_auc),
-        'early_detection': early_detection_results,
-        'classification_report': report
-    }
-    
-    metrics_path = os.path.join(args.output_dir, 'metrics.json')
-    with open(metrics_path, 'w') as f:
+    metrics = {'accuracy': float(accuracy), 'roc_auc': float(roc_auc)}
+    with open(os.path.join(args.output_dir, 'metrics.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
-    print(f"\nMetrics saved to {metrics_path}")
     
-    print("=" * 80)
-    print("EVALUATION COMPLETE!")
-    print("=" * 80)
+    print(f"\nResults saved to {args.output_dir}")
 
 if __name__ == "__main__":
     main()

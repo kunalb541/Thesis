@@ -1,15 +1,11 @@
 """
-TensorFlow training script for microlensing CNN classifier
-GPU-optimized for AMD MI300 with TimeDistributed architecture
-Compatible with the rest of the thesis-microlens codebase
+PyTorch training script for microlensing classifier
+Works with AMD ROCm GPUs
 """
-
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import (Conv1D, Dense, Dropout, Flatten, 
-                                      TimeDistributed, BatchNormalization)
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import argparse
@@ -17,161 +13,136 @@ import os
 import json
 import joblib
 from datetime import datetime
+from tqdm import tqdm
 
-# Set random seeds for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
-
-def setup_gpu():
-    """Configure GPU settings for AMD MI300"""
-    gpus = tf.config.list_physical_devices('GPU')
-    
-    if gpus:
-        try:
-            # Enable memory growth to avoid OOM errors
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            
-            print(f"✓ Found {len(gpus)} GPU(s)")
-            for i, gpu in enumerate(gpus):
-                print(f"  GPU {i}: {gpu}")
-            
-            # Enable mixed precision for faster training
-            policy = tf.keras.mixed_precision.Policy('mixed_float16')
-            tf.keras.mixed_precision.set_global_policy(policy)
-            print("✓ Mixed precision enabled (FP16)")
-            
-        except RuntimeError as e:
-            print(f"GPU setup error: {e}")
-    else:
-        print("⚠ WARNING: No GPUs detected! Training will be slow on CPU.")
-    
-    return len(gpus)
-
-def build_model(sequence_length=1500, num_channels=1, num_classes=2):
-    """
-    Build TimeDistributed 1D CNN for real-time classification
-    
-    Architecture:
-    - 3x Conv1D blocks with BatchNorm and Dropout
-    - TimeDistributed Dense layers for per-timestep classification
-    - Preserves temporal structure for early detection analysis
-    """
-    model = Sequential([
-        # First convolutional block
-        Conv1D(128, kernel_size=5, activation='relu', padding='same',
-               input_shape=(sequence_length, num_channels)),
-        BatchNormalization(),
-        Dropout(0.3),
+class TimeDistributedCNN(nn.Module):
+    """1D CNN with per-timestep classification"""
+    def __init__(self, sequence_length=1500, num_channels=1, num_classes=2):
+        super().__init__()
         
-        # Second convolutional block
-        Conv1D(64, kernel_size=3, activation='relu', padding='same'),
-        BatchNormalization(),
-        Dropout(0.3),
+        # Convolutional layers
+        self.conv1 = nn.Conv1d(num_channels, 128, kernel_size=5, padding=2)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.conv2 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.conv3 = nn.Conv1d(64, 32, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(32)
         
-        # Third convolutional block
-        Conv1D(32, kernel_size=3, activation='relu', padding='same'),
-        BatchNormalization(),
-        Dropout(0.3),
+        self.dropout = nn.Dropout(0.3)
+        self.relu = nn.ReLU()
         
-        # TimeDistributed classification head
-        # This applies Dense layer at EACH timestep for real-time classification
-        TimeDistributed(Flatten()),
-        TimeDistributed(Dense(64, activation='relu')),
-        TimeDistributed(Dropout(0.3)),
-        TimeDistributed(Dense(num_classes, activation='softmax'))
-    ])
-    
-    # Compile with categorical crossentropy for classification
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-        loss='categorical_crossentropy',
-        metrics=[
-            'accuracy',
-            tf.keras.metrics.Precision(name='precision'),
-            tf.keras.metrics.Recall(name='recall'),
-            tf.keras.metrics.AUC(name='auc')
-        ]
-    )
-    
-    return model
+        # Per-timestep classification
+        self.fc1 = nn.Linear(32, 64)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+    def forward(self, x):
+        # x: (batch, time, channels)
+        x = x.transpose(1, 2)  # (batch, channels, time)
+        
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.dropout(x)
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.dropout(x)
+        x = self.relu(self.bn3(self.conv3(x)))
+        x = self.dropout(x)
+        
+        x = x.transpose(1, 2)  # (batch, time, features)
+        
+        # Apply classification at each timestep
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)  # (batch, time, classes)
+        
+        return x
 
-def preprocess_data(X_train, X_val, X_test):
-    """
-    Standardize features using training set statistics
-    """
-    print("\nPreprocessing data...")
+class LightCurveDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.LongTensor(y)
     
-    # Flatten for scaling
-    n_train, n_time, n_feat = X_train.shape
-    X_train_flat = X_train.reshape(-1, n_feat)
+    def __len__(self):
+        return len(self.X)
     
-    # Fit scaler on training data
-    scaler = StandardScaler()
-    scaler.fit(X_train_flat)
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+def train_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    total_loss = 0
+    correct = 0
+    total = 0
     
-    # Transform all sets
-    X_train_scaled = scaler.transform(X_train_flat).reshape(n_train, n_time, n_feat)
+    for batch_x, batch_y in tqdm(loader, desc='Training'):
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
+        
+        optimizer.zero_grad()
+        outputs = model(batch_x)  # (batch, time, classes)
+        
+        # Use last timestep for loss
+        loss = criterion(outputs[:, -1, :], batch_y)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        _, predicted = torch.max(outputs[:, -1, :], 1)
+        total += batch_y.size(0)
+        correct += (predicted == batch_y).sum().item()
     
-    n_val = X_val.shape[0]
-    X_val_scaled = scaler.transform(X_val.reshape(-1, n_feat)).reshape(n_val, n_time, n_feat)
+    return total_loss / len(loader), correct / total
+
+def validate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    correct = 0
+    total = 0
     
-    n_test = X_test.shape[0]
-    X_test_scaled = scaler.transform(X_test.reshape(-1, n_feat)).reshape(n_test, n_time, n_feat)
+    with torch.no_grad():
+        for batch_x, batch_y in loader:
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+            
+            outputs = model(batch_x)
+            loss = criterion(outputs[:, -1, :], batch_y)
+            
+            total_loss += loss.item()
+            _, predicted = torch.max(outputs[:, -1, :], 1)
+            total += batch_y.size(0)
+            correct += (predicted == batch_y).sum().item()
     
-    print("✓ Data standardized")
-    
-    return X_train_scaled, X_val_scaled, X_test_scaled, scaler
+    return total_loss / len(loader), correct / total
 
 def main():
-    parser = argparse.ArgumentParser(description='Train microlensing classifier')
-    parser.add_argument('--data', required=True, help='Path to .npz data file')
-    parser.add_argument('--output', required=True, help='Path to save model (.keras)')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
-    parser.add_argument('--experiment_name', type=str, default='baseline', 
-                       help='Experiment name for tracking')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--experiment_name', type=str, default='baseline')
     args = parser.parse_args()
     
-    # Create output directory structure
+    # Setup
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"GPUs: {torch.cuda.device_count()}")
+    
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_base = os.path.dirname(os.path.dirname(args.output))
-    experiment_dir = os.path.join(results_base, 'results', f'{args.experiment_name}_{timestamp}')
-    os.makedirs(experiment_dir, exist_ok=True)
-    
-    print("=" * 80)
-    print("MICROLENSING BINARY CLASSIFICATION - TRAINING")
-    print("=" * 80)
-    print(f"Experiment: {args.experiment_name}")
-    print(f"Timestamp: {timestamp}")
-    print(f"Results directory: {experiment_dir}")
-    print("=" * 80)
-    
-    # Setup GPU
-    print("\nGPU SETUP")
-    print("-" * 80)
-    num_gpus = setup_gpu()
+    results_dir = f'../results/{args.experiment_name}_{timestamp}'
+    os.makedirs(results_dir, exist_ok=True)
     
     # Load data
-    print("\n" + "=" * 80)
-    print("LOADING DATA")
-    print("=" * 80)
-    print(f"Loading from: {args.data}")
-    
-    data = np.load(args.data, allow_pickle=True)
-    X = data['X']
-    y = data['y']
-    
-    print(f"Data shape: {X.shape}")
-    print(f"Labels: {np.unique(y, return_counts=True)}")
+    print(f"\nLoading {args.data}...")
+    data = np.load(args.data)
+    X, y = data['X'], data['y']
+    print(f"Shape: {X.shape}")
     
     # Encode labels
-    print("\nEncoding labels...")
     label_map = {'PSPL': 0, 'Binary': 1}
     y_encoded = np.array([label_map[label] for label in y])
     
-    # Split data: 70% train, 15% val, 15% test
-    print("\nSplitting data (70/15/15)...")
+    # Split
     X_temp, X_test, y_temp, y_test = train_test_split(
         X, y_encoded, test_size=0.15, random_state=42, stratify=y_encoded
     )
@@ -179,176 +150,70 @@ def main():
         X_temp, y_temp, test_size=0.1765, random_state=42, stratify=y_temp
     )
     
-    print(f"Train: {X_train.shape[0]:,} samples")
-    print(f"Val:   {X_val.shape[0]:,} samples")
-    print(f"Test:  {X_test.shape[0]:,} samples")
+    # Standardize
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+    X_val = scaler.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
+    X_test = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
     
-    # Preprocess
-    X_train, X_val, X_test, scaler = preprocess_data(X_train, X_val, X_test)
+    # Datasets
+    train_dataset = LightCurveDataset(X_train, y_train)
+    val_dataset = LightCurveDataset(X_val, y_val)
     
-    # Convert labels to categorical and repeat for TimeDistributed
-    print("\nPreparing labels for TimeDistributed architecture...")
-    y_train_cat = tf.keras.utils.to_categorical(y_train, num_classes=2)
-    y_val_cat = tf.keras.utils.to_categorical(y_val, num_classes=2)
-    y_test_cat = tf.keras.utils.to_categorical(y_test, num_classes=2)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
     
-    # Repeat labels for each timestep (TimeDistributed expects this)
-    y_train_repeated = np.repeat(y_train_cat[:, np.newaxis, :], X_train.shape[1], axis=1)
-    y_val_repeated = np.repeat(y_val_cat[:, np.newaxis, :], X_val.shape[1], axis=1)
-    y_test_repeated = np.repeat(y_test_cat[:, np.newaxis, :], X_test.shape[1], axis=1)
+    # Model
+    model = TimeDistributedCNN(X_train.shape[1], X_train.shape[2])
     
-    print(f"Train labels shape: {y_train_repeated.shape}")
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
     
-    # Build model
-    print("\n" + "=" * 80)
-    print("BUILDING MODEL")
-    print("=" * 80)
+    model = model.to(device)
     
-    model = build_model(
-        sequence_length=X_train.shape[1],
-        num_channels=X_train.shape[2],
-        num_classes=2
-    )
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
     
-    print("\nModel Architecture:")
-    model.summary()
+    # Training
+    print("\nTraining...")
+    best_val_acc = 0
+    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
     
-    total_params = model.count_params()
-    print(f"\nTotal parameters: {total_params:,}")
-    
-    # Callbacks
-    print("\n" + "=" * 80)
-    print("CONFIGURING CALLBACKS")
-    print("=" * 80)
-    
-    model_path = os.path.join(experiment_dir, 'best_model.keras')
-    
-    callbacks = [
-        EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            restore_best_weights=True,
-            verbose=1
-        ),
-        ModelCheckpoint(
-            filepath=model_path,
-            monitor='val_auc',
-            mode='max',
-            save_best_only=True,
-            verbose=1
-        ),
-        ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-6,
-            verbose=1
-        )
-    ]
-    
-    print("✓ Callbacks configured")
-    
-    # Train
-    print("\n" + "=" * 80)
-    print("TRAINING")
-    print("=" * 80)
-    print(f"Epochs: {args.epochs}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"Using {num_gpus} GPU(s)")
-    print("-" * 80)
-    
-    history = model.fit(
-        X_train, y_train_repeated,
-        validation_data=(X_val, y_val_repeated),
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    # Evaluate on test set
-    print("\n" + "=" * 80)
-    print("EVALUATION ON TEST SET")
-    print("=" * 80)
-    
-    test_results = model.evaluate(X_test, y_test_repeated, verbose=0)
-    
-    print("\nTest Results:")
-    print(f"  Loss:      {test_results[0]:.4f}")
-    print(f"  Accuracy:  {test_results[1]:.4f}")
-    print(f"  Precision: {test_results[2]:.4f}")
-    print(f"  Recall:    {test_results[3]:.4f}")
-    print(f"  AUC:       {test_results[4]:.4f}")
+    for epoch in range(args.epochs):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        
+        scheduler.step(val_loss)
+        
+        print(f"Epoch {epoch+1}/{args.epochs}")
+        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
+        print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+            }, os.path.join(results_dir, 'best_model.pt'))
     
     # Save artifacts
-    print("\n" + "=" * 80)
-    print("SAVING ARTIFACTS")
-    print("=" * 80)
+    joblib.dump(scaler, os.path.join(results_dir, 'scaler.pkl'))
     
-    # Save scaler
-    scaler_path = os.path.join(experiment_dir, 'scaler.pkl')
-    joblib.dump(scaler, scaler_path)
-    print(f"✓ Scaler saved: {scaler_path}")
+    with open(os.path.join(results_dir, 'history.json'), 'w') as f:
+        json.dump(history, f)
     
-    # Save configuration
-    config = {
-        'experiment_name': args.experiment_name,
-        'timestamp': timestamp,
-        'data_file': args.data,
-        'epochs': args.epochs,
-        'batch_size': args.batch_size,
-        'num_gpus': num_gpus,
-        'train_samples': int(len(X_train)),
-        'val_samples': int(len(X_val)),
-        'test_samples': int(len(X_test)),
-        'sequence_length': int(X_train.shape[1]),
-        'num_channels': int(X_train.shape[2]),
-    }
+    with open(os.path.join(results_dir, 'config.json'), 'w') as f:
+        json.dump(vars(args), f)
     
-    config_path = os.path.join(experiment_dir, 'experiment_config.json')
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-    print(f"✓ Config saved: {config_path}")
-    
-    # Save training history
-    history_dict = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-    history_path = os.path.join(experiment_dir, 'training_history.json')
-    with open(history_path, 'w') as f:
-        json.dump(history_dict, f, indent=2)
-    print(f"✓ History saved: {history_path}")
-    
-    # Save results summary
-    results = {
-        'test_loss': float(test_results[0]),
-        'test_accuracy': float(test_results[1]),
-        'test_precision': float(test_results[2]),
-        'test_recall': float(test_results[3]),
-        'test_auc': float(test_results[4]),
-        'best_epoch': int(np.argmin(history.history['val_loss'])) + 1,
-        'best_val_loss': float(min(history.history['val_loss'])),
-        'best_val_accuracy': float(max(history.history['val_accuracy'])),
-    }
-    
-    results_path = os.path.join(experiment_dir, 'results.json')
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f"✓ Results saved: {results_path}")
-    
-    # Copy model to specified output location
-    if args.output != model_path:
-        import shutil
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
-        shutil.copy(model_path, args.output)
-        print(f"✓ Model copied to: {args.output}")
-    
-    print("\n" + "=" * 80)
-    print("TRAINING COMPLETE!")
-    print("=" * 80)
-    print(f"Experiment directory: {experiment_dir}")
-    print(f"Best model: {model_path}")
-    print(f"Test accuracy: {test_results[1]:.4f}")
-    print(f"Test AUC: {test_results[4]:.4f}")
-    print("=" * 80)
+    print(f"\nDone! Results in {results_dir}")
 
 if __name__ == "__main__":
     main()
