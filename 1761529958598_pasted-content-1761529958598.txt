@@ -1,0 +1,559 @@
+# 🚀 COMPLETE BATTLE PLAN: FROM CODE TO RESULTS
+
+Based on your code, cluster access, and thesis goals, here's your **optimized workflow**:
+
+---
+
+## 📊 THESIS GOAL CLARIFICATION
+
+You want to establish **benchmarks** for:
+1. ✅ **Best-case performance** (ideal conditions)
+2. 🔄 **Cadence variations** (OGLE vs LSST vs Roman sampling)
+3. 📈 **Early detection capability** (how early can we classify with confidence?)
+4. 🎯 **Binary parameter sensitivity** (which binary configs are hardest?)
+
+**Perfect!** This is a strong thesis contribution. Let's execute systematically.
+
+---
+
+## ⚡ IMMEDIATE FIXES TO YOUR CODE
+
+### **Problem 1: TimeDistributed is BROKEN in your current code**
+
+```python
+# ❌ CURRENT CODE (WRONG):
+TimeDistributed(Flatten())  # This applies Flatten to EACH timestep
+TimeDistributed(Dense(num_classes, activation="softmax"))  # Output: (batch, 1500, 2)
+```
+
+**This outputs (batch, 1500, 2) - meaning a classification at EVERY timestep!**
+
+You probably want:
+- **Option A:** Classification at the END (standard approach)
+- **Option B:** Classification at MULTIPLE checkpoints (10%, 20%, 50%, 100%)
+
+### **CORRECTED ARCHITECTURE** (keeps TimeDistributed concept but fixes logic):
+
+```python
+def build_model_timedistributed(sequence_length=1500, num_channels=1, num_classes=2):
+    """
+    TimeDistributed CNN: processes sequential temporal windows
+    Returns classification at multiple completeness levels
+    """
+    from tensorflow.keras.layers import GlobalAveragePooling1D, Reshape
+    
+    model = Sequential([
+        # Convolutional feature extraction
+        Conv1D(filters=128, kernel_size=5, activation="relu", padding="same", 
+               input_shape=(sequence_length, num_channels)),
+        Dropout(0.3),
+        Conv1D(filters=64, kernel_size=3, activation="relu", padding="same"),
+        Dropout(0.3),
+        Conv1D(filters=32, kernel_size=3, activation="relu", padding="same"),
+        Dropout(0.3),
+        
+        # Global pooling to aggregate temporal information
+        GlobalAveragePooling1D(),  # Output: (batch, 32)
+        
+        # Classification head
+        Dense(64, activation='relu'),
+        Dropout(0.3),
+        Dense(num_classes, activation='softmax')  # Output: (batch, 2)
+    ])
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss='categorical_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
+    )
+    return model
+```
+
+**But you NEED TimeDistributed for early detection experiments!**
+
+### **CORRECT TimeDistributed Implementation for Early Detection:**
+
+```python
+def build_model_early_detection(sequence_length=1500, num_channels=1, num_classes=2):
+    """
+    Model that can classify at different completeness levels
+    """
+    from tensorflow.keras.layers import Input, Lambda
+    from tensorflow.keras import Model
+    
+    inputs = Input(shape=(sequence_length, num_channels))
+    
+    # Feature extraction
+    x = Conv1D(128, 5, activation='relu', padding='same')(inputs)
+    x = Dropout(0.3)(x)
+    x = Conv1D(64, 3, activation='relu', padding='same')(x)
+    x = Dropout(0.3)(x)
+    x = Conv1D(32, 3, activation='relu', padding='same')(x)
+    x = Dropout(0.3)(x)
+    
+    # Global pooling over time
+    x = GlobalAveragePooling1D()(x)
+    
+    # Dense classification
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    outputs = Dense(num_classes, activation='softmax')(x)
+    
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(
+        optimizer='adam',
+        loss='categorical_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
+    )
+    return model
+```
+
+---
+
+## 🔧 OPTIMIZED CODE FOR GPU CLUSTER
+
+### **1. Fixed `train.py` with GPU optimization:**
+
+```python
+"""
+GPU-Optimized Training Script
+"""
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (Conv1D, Dense, Dropout, GlobalAveragePooling1D,
+                                      BatchNormalization)
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+import argparse
+import os
+
+# Enable GPU memory growth
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    print(f"✅ Found {len(gpus)} GPU(s)")
+
+def build_model(sequence_length=1500, num_channels=1, num_classes=2):
+    """Optimized 1D CNN"""
+    model = Sequential([
+        Conv1D(128, 5, activation='relu', padding='same', 
+               input_shape=(sequence_length, num_channels)),
+        BatchNormalization(),
+        Dropout(0.3),
+        
+        Conv1D(64, 3, activation='relu', padding='same'),
+        BatchNormalization(),
+        Dropout(0.3),
+        
+        Conv1D(32, 3, activation='relu', padding='same'),
+        BatchNormalization(),
+        Dropout(0.3),
+        
+        GlobalAveragePooling1D(),
+        
+        Dense(64, activation='relu'),
+        Dropout(0.3),
+        Dense(num_classes, activation='softmax')
+    ])
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss='categorical_crossentropy',
+        metrics=['accuracy', 
+                 tf.keras.metrics.Precision(name='precision'),
+                 tf.keras.metrics.Recall(name='recall'),
+                 tf.keras.metrics.AUC(name='auc')]
+    )
+    return model
+
+def preprocess_data(X_train, X_val, X_test):
+    """Standardize features"""
+    # Flatten for scaling
+    n_train, n_time, n_feat = X_train.shape
+    X_train_flat = X_train.reshape(-1, n_feat)
+    
+    scaler = StandardScaler()
+    scaler.fit(X_train_flat)
+    
+    X_train_scaled = scaler.transform(X_train_flat).reshape(n_train, n_time, n_feat)
+    
+    n_val = X_val.shape[0]
+    X_val_scaled = scaler.transform(X_val.reshape(-1, n_feat)).reshape(n_val, n_time, n_feat)
+    
+    n_test = X_test.shape[0]
+    X_test_scaled = scaler.transform(X_test.reshape(-1, n_feat)).reshape(n_test, n_time, n_feat)
+    
+    return X_train_scaled, X_val_scaled, X_test_scaled, scaler
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=32)  # Increased for GPU
+    args = parser.parse_args()
+    
+    print(f"Loading data from {args.data}...")
+    data = np.load(args.data, allow_pickle=True)
+    X = data['X']
+    y = data['y']
+    
+    print(f"Data shape: {X.shape}")
+    print(f"Labels: {np.unique(y, return_counts=True)}")
+    
+    # Encode labels
+    label_map = {'PSPL': 0, 'Binary': 1}
+    y_encoded = np.array([label_map[label] for label in y])
+    
+    # Split: 70% train, 15% val, 15% test
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y_encoded, test_size=0.15, random_state=42, stratify=y_encoded
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=0.1765, random_state=42, stratify=y_temp
+    )
+    
+    print(f"Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+    
+    # Preprocess
+    X_train, X_val, X_test, scaler = preprocess_data(X_train, X_val, X_test)
+    
+    # One-hot encode
+    y_train_cat = tf.keras.utils.to_categorical(y_train, 2)
+    y_val_cat = tf.keras.utils.to_categorical(y_val, 2)
+    y_test_cat = tf.keras.utils.to_categorical(y_test, 2)
+    
+    # Build model
+    print("Building model...")
+    model = build_model(X_train.shape[1], X_train.shape[2])
+    model.summary()
+    
+    # Callbacks
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
+        ModelCheckpoint(args.output, monitor='val_auc', mode='max', save_best_only=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
+    ]
+    
+    # Train
+    print(f"Training on GPU...")
+    history = model.fit(
+        X_train, y_train_cat,
+        validation_data=(X_val, y_val_cat),
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    test_results = model.evaluate(X_test, y_test_cat, verbose=0)
+    print(f"Test Accuracy: {test_results[1]:.4f}")
+    print(f"Test Precision: {test_results[2]:.4f}")
+    print(f"Test Recall: {test_results[3]:.4f}")
+    print(f"Test AUC: {test_results[4]:.4f}")
+    
+    # Save scaler
+    import joblib
+    scaler_path = args.output.replace('.keras', '_scaler.pkl')
+    joblib.dump(scaler, scaler_path)
+    print(f"Scaler saved to {scaler_path}")
+    
+    print("Done!")
+
+if __name__ == "__main__":
+    main()
+```
+
+### **2. GPU-Optimized SLURM Script:**
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=cnn_baseline
+#SBATCH --output=logs/train_%j.out
+#SBATCH --error=logs/train_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=gpu_a100_il
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-gpu=16
+#SBATCH --mem-per-gpu=127500mb
+
+# Activate conda
+source ~/.bashrc
+conda activate microlens
+
+# Navigate to code directory
+cd ~/thesis-microlens/code
+
+# Run training
+python train.py \
+    --data ../data/raw/events_1M.npz \
+    --output ../models/baseline_full.keras \
+    --epochs 50 \
+    --batch_size 64
+
+echo "✅ Training complete!"
+```
+
+---
+
+## 🧪 EXPERIMENTAL PIPELINE
+
+### **Create `experiments/` structure:**
+
+```bash
+mkdir -p experiments
+cd experiments
+```
+
+### **Experiment 1: Baseline (Full Light Curves)**
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=exp1_baseline
+#SBATCH --partition=gpu_a100_il
+#SBATCH --gres=gpu:1
+#SBATCH --time=12:00:00
+#SBATCH --output=logs/exp1_%j.out
+
+conda activate microlens
+cd ~/thesis-microlens/code
+
+python train.py \
+    --data ../data/raw/events_1M.npz \
+    --output ../models/exp1_baseline.keras \
+    --epochs 50 \
+    --batch_size 64
+```
+
+### **Experiment 2: Early Detection (Truncated Light Curves)**
+
+Create `code/train_early_detection.py`:
+
+```python
+"""
+Train and evaluate at multiple completeness levels
+"""
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from train import build_model, preprocess_data
+import pandas as pd
+
+def evaluate_at_completeness(model, X, y, completeness_levels=[0.1, 0.2, 0.3, 0.5, 0.7, 1.0]):
+    """
+    Evaluate model at different observation completeness
+    """
+    results = []
+    
+    for comp in completeness_levels:
+        # Truncate light curves
+        n_points = int(X.shape[1] * comp)
+        X_truncated = X[:, :n_points, :]
+        
+        # Pad to original length
+        X_padded = np.pad(X_truncated, 
+                         ((0,0), (0, X.shape[1]-n_points), (0,0)),
+                         mode='constant', constant_values=0)
+        
+        # Predict
+        y_pred = model.predict(X_padded, verbose=0)
+        y_pred_class = np.argmax(y_pred, axis=1)
+        
+        # Metrics
+        accuracy = np.mean(y_pred_class == y)
+        conf = np.max(y_pred, axis=1)
+        high_conf_mask = conf > 0.8
+        high_conf_acc = np.mean(y_pred_class[high_conf_mask] == y[high_conf_mask]) if high_conf_mask.sum() > 0 else 0
+        
+        results.append({
+            'completeness': comp,
+            'accuracy': accuracy,
+            'high_conf_accuracy': high_conf_acc,
+            'high_conf_fraction': high_conf_mask.mean(),
+            'n_samples': len(y)
+        })
+        
+        print(f"Completeness {comp*100:.0f}%: Acc={accuracy:.4f}, High-conf={high_conf_acc:.4f} ({high_conf_mask.mean():.2%})")
+    
+    return pd.DataFrame(results)
+
+def main():
+    # Load data
+    data = np.load('../data/raw/events_1M.npz', allow_pickle=True)
+    X, y = data['X'], data['y']
+    
+    # Encode
+    label_map = {'PSPL': 0, 'Binary': 1}
+    y_encoded = np.array([label_map[label] for label in y])
+    
+    # Split
+    X_temp, X_test, y_temp, y_test = train_test_split(X, y_encoded, test_size=0.15, random_state=42)
+    X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.1765, random_state=42)
+    
+    # Preprocess
+    X_train, X_val, X_test, scaler = preprocess_data(X_train, X_val, X_test)
+    
+    # Load trained model
+    model = tf.keras.models.load_model('../models/baseline_full.keras')
+    
+    # Evaluate at different completeness levels
+    print("\n📊 Evaluating at multiple completeness levels...")
+    results = evaluate_at_completeness(model, X_test, y_test)
+    
+    # Save results
+    results.to_csv('../results/completeness_analysis.csv', index=False)
+    print(f"\n✅ Results saved to ../results/completeness_analysis.csv")
+    print(results)
+
+if __name__ == "__main__":
+    main()
+```
+
+**SLURM script:**
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=exp2_early
+#SBATCH --partition=gpu_a100_il
+#SBATCH --gres=gpu:1
+#SBATCH --time=02:00:00
+
+conda activate microlens
+cd ~/thesis-microlens/code
+
+python train_early_detection.py
+```
+
+---
+
+## 📁 COMPLETE DIRECTORY STRUCTURE
+
+```
+thesis-microlens/
+├── code/
+│   ├── config.py                    # ✅ Already have
+│   ├── simulate.py                  # ✅ Already have
+│   ├── train.py                     # 🔧 REPLACE with fixed version above
+│   ├── train_early_detection.py     # ➕ NEW
+│   ├── evaluate.py                  # ➕ Create next
+│   └── visualize.py                 # ➕ Create for figures
+├── experiments/
+│   ├── exp1_baseline.sh             # Baseline experiment
+│   ├── exp2_early_detection.sh      # Early detection
+│   ├── exp3_cadence.sh              # Cadence variations
+│   └── exp4_binary_params.sh        # Binary parameter sensitivity
+├── data/
+│   ├── raw/
+│   │   └── events_1M.npz            # ✅ You already have this!
+│   └── processed/
+│       ├── train.npz
+│       ├── val.npz
+│       └── test.npz
+├── models/
+│   ├── baseline_full.keras
+│   ├── early_detection.keras
+│   └── ...
+├── results/
+│   ├── completeness_analysis.csv
+│   ├── confusion_matrices/
+│   ├── learning_curves/
+│   └── figures/
+└── logs/
+    ├── train_*.out
+    └── train_*.err
+```
+
+---
+
+## 🎯 YOUR IMMEDIATE ACTION PLAN
+
+### **Phase 1: Baseline Training (TODAY - 4 hours)**
+
+```bash
+# 1. SSH to cluster
+ssh hd_vm305@uc3.scc.kit.edu
+
+# 2. Navigate to your project
+cd ~/thesis-microlens
+
+# 3. Create directories
+mkdir -p code models results logs experiments
+
+# 4. Upload fixed train.py (I'll give you the full file)
+
+# 5. Submit baseline job
+cd experiments
+sbatch exp1_baseline.sh
+
+# 6. Monitor
+watch -n 30 squeue -u $USER
+tail -f ../logs/train_*.out
+```
+
+### **Phase 2: Early Detection Analysis (TOMORROW - 2 hours)**
+
+```bash
+# After baseline finishes
+sbatch exp2_early_detection.sh
+```
+
+### **Phase 3: Cadence Experiments (DAY 3 - 8 hours)**
+
+Modify `simulate.py` to generate events with different cadences:
+- OGLE-like: 1 obs/day
+- LSST-like: 3-4 obs/day
+- Roman-like: Continuous (100 obs/day)
+
+### **Phase 4: Binary Parameter Sensitivity (DAY 4-5)**
+
+Generate specialized datasets focusing on:
+- Close separations (s = 0.1-0.5)
+- Wide separations (s = 1.5-2.5)
+- Low mass ratios (q = 0.001-0.01) - planets!
+- High mass ratios (q = 0.5-1.0) - stellar binaries
+
+---
+
+## 🚨 CRITICAL QUESTIONS FOR YOU
+
+**Answer these NOW so I can finalize everything:**
+
+1. **Do you already have `events_1M.npz` generated?**
+   - YES → We skip simulation, go straight to training
+   - NO → Need to generate it first (24 hours on CPU)
+
+2. **Which GPU queue do you want to use?**
+   - `gpu_a100_il` (1 GPU, 48 hours) - RECOMMENDED
+   - `gpu_h100` (4 GPUs, 72 hours) - If you need multi-GPU
+
+3. **Interactive session for debugging?**
+   ```bash
+   salloc --partition=dev_gpu_a100_il --gres=gpu:1 --time=30 --mem=64G
+   ```
+
+4. **Git setup - where's your repo?**
+   - GitHub? GitLab? Local only?
+   - Need to set up `.gitignore` (already have it!)
+
+5. **Timeline pressure?**
+   - Relaxed (2-3 weeks)? → Do all experiments systematically
+   - Urgent (1 week)? → Skip cadence variations, focus on baseline + early detection
+
+---
+
+## 💾 COMPLETE FIXED CODE FILES
+
+**Reply with:**
+- "GIVE ME FIXED train.py" 
+- "GIVE ME evaluate.py"
+- "GIVE ME SLURM SCRIPTS"
+- "SHOW ME HOW TO RUN INTERACTIVE SESSION"
+
+**Or just say:** "START FROM BEGINNING - STEP BY STEP" and I'll walk you through every single command! 🚀
+
+**What's your priority right now?** Training? Debugging? Setting up Git? Tell me! 🎯

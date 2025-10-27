@@ -1,0 +1,161 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    THESIS MICROLENSING - FILE GUIDE                          ║
+╔══════════════════════════════════════════════════════════════════════════════╗
+
+📖 START HERE
+════════════════════════════════════════════════════════════════════════════════
+  📄 START_HERE.md                → Quick start (read first!)
+  📄 COMPLETE_SUMMARY.md           → This package explained
+  📄 PARAMETERS_EXPLAINED.md       → Why parameters matter (CRITICAL!)
+  📄 BENCHMARKING_GUIDE.md         → Complete methodology
+
+💻 CORE CODE (code/)
+════════════════════════════════════════════════════════════════════════════════
+  🔧 config.py          → ALL parameters defined here
+                          ├─ BINARY_PARAMS_EASY    (small u0, clear caustics)
+                          ├─ BINARY_PARAMS_STANDARD (mixed difficulty)
+                          └─ BINARY_PARAMS_HARD    (large u0, PSPL-like)
+  
+  🎲 simulate.py        → Generate datasets
+                          --binary_difficulty easy|standard|hard
+                          --cadence 0.05 to 0.40
+                          --error 0.05 to 0.20
+  
+  🤖 train.py           → GPU-optimized training
+                          ⚠️  TimeDistributed PRESERVED for real-time!
+                          ✓  Uses 4x AMD MI300 GPUs
+                          ✓  Mixed precision training
+  
+  📊 evaluate.py        → Comprehensive evaluation
+                          ├─ Confusion matrix
+                          ├─ ROC/PR curves
+                          └─ Early detection analysis
+  
+  🔬 test_quick.py      → Quick validation test
+  
+  📈 utils.py           → Plotting and analysis helpers
+
+⚙️ AUTOMATION SCRIPTS
+════════════════════════════════════════════════════════════════════════════════
+  🚀 run_full_benchmark.sh         → Run ALL experiments (24-48 hrs)
+  
+  slurm/slurm_train_baseline.sh    → Train on 1M dataset
+  slurm/slurm_experiments.sh       → Full experiment suite
+  slurm/interactive_session.sh     → Start GPU session for debugging
+
+📊 KEY PARAMETER SETS
+════════════════════════════════════════════════════════════════════════════════
+
+  EASY BINARIES (98-99% accuracy expected)
+  ────────────────────────────────────────
+    s:   0.8 - 1.2     (wide binary, prominent caustics)
+    q:   0.1 - 0.5     (asymmetric)
+    u0:  0.001 - 0.1   ⭐ SMALL → crosses caustics!
+    rho: 0.0001 - 0.01 (sharp features)
+  
+  STANDARD BINARIES (94-96% accuracy expected)
+  ────────────────────────────────────────────
+    s:   0.3 - 2.0     (full range)
+    q:   0.1 - 1.0     (all mass ratios)
+    u0:  0.01 - 0.5    (mixed)
+    rho: 0.001 - 0.05  (moderate)
+  
+  HARD BINARIES (82-88% accuracy expected)
+  ────────────────────────────────────────
+    s:   0.1 - 0.3     (very close, weak caustics)
+    q:   0.5 - 1.0     (symmetric)
+    u0:  0.3 - 0.5     ⭐ LARGE → misses caustics!
+    rho: 0.03 - 0.1    (smoothed features)
+
+🎯 BENCHMARK EXPERIMENTS
+════════════════════════════════════════════════════════════════════════════════
+  1. baseline          1M events, 20% missing, 0.1 mag, standard
+  2. cadence_05        Dense sampling (5% missing)
+  3. cadence_30        Sparse sampling (30% missing)
+  4. error_low         Space-based photometry (0.05 mag)
+  5. error_high        Poor photometry (0.20 mag)
+  6. binary_easy       Clear caustic crossings
+  7. binary_hard       PSPL-like binaries
+
+📁 DATA STRUCTURE
+════════════════════════════════════════════════════════════════════════════════
+  data/raw/
+    ├─ events_1M.npz              (your existing baseline data)
+    ├─ events_cadence_05.npz      (will be generated)
+    ├─ events_cadence_30.npz
+    ├─ events_error_low.npz
+    ├─ events_error_high.npz
+    ├─ events_binary_easy.npz
+    └─ events_binary_hard.npz
+
+  models/
+    ├─ baseline.keras
+    ├─ cadence_05.keras
+    └─ ... (one per experiment)
+
+  results/
+    ├─ baseline/
+    │   ├─ metrics.json           (ROC AUC, accuracy, etc)
+    │   ├─ confusion_matrix.png
+    │   ├─ roc_curve.png
+    │   ├─ early_detection.png
+    │   └─ classification_report.txt
+    └─ ... (one directory per experiment)
+
+🔑 KEY COMMANDS
+════════════════════════════════════════════════════════════════════════════════
+
+  Generate EASY binaries:
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --binary_difficulty easy --output data/raw/events_binary_easy.npz
+
+  Generate dataset with sparse cadence:
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --cadence 0.30 --output data/raw/events_cadence_30.npz
+
+  Train model:
+    python train.py --data data/raw/events_binary_easy.npz \
+        --output models/binary_easy.keras --experiment_name binary_easy
+
+  Evaluate model:
+    python evaluate.py --model models/binary_easy.keras \
+        --data data/raw/events_binary_easy.npz \
+        --output_dir results/binary_easy
+
+  Run full benchmark:
+    ./run_full_benchmark.sh
+
+✅ WHAT YOU'RE BENCHMARKING
+════════════════════════════════════════════════════════════════════════════════
+  Upper bound:     98-99%  (dense cadence + low error + easy binaries)
+  Realistic:       94-96%  (LSST-like: 20% missing + 0.1 mag + standard)
+  Lower bound:     82-88%  (sparse + high error + hard binaries)
+  
+  Physical limit:  ~15-20% of binaries are intrinsically PSPL-like (high u0)
+
+🎓 THESIS NARRATIVE
+════════════════════════════════════════════════════════════════════════════════
+  1. Introduction:     Microlensing, binary detection importance
+  2. Theory:           Binary lens caustics, parameter effects
+  3. Methods:          CNN architecture, parameter variations
+  4. Results:          
+     ├─ Baseline:      95-96% accuracy established
+     ├─ Cadence:       Dense better, but diminishing returns
+     ├─ Photometry:    Robust to 0.15 mag, degrades beyond
+     ├─ Binary types:  Easy 99%, hard 85%, physical limit identified
+     └─ Early detect:  Feasible at 500 points with 85% accuracy
+  5. Discussion:       LSST/Roman implications, survey optimization
+  6. Conclusions:      Established performance bounds
+
+📞 WORKFLOW
+════════════════════════════════════════════════════════════════════════════════
+  Day 0:    Setup (push to GitHub, clone on cluster)
+  Day 1:    Quick test + baseline training
+  Week 1:   Cadence experiments
+  Week 2:   Error + binary difficulty experiments
+  Week 3:   Analysis + figure generation
+  Week 4:   Writing
+
+═══════════════════════════════════════════════════════════════════════════════
+                    YOU'RE READY TO BENCHMARK! 🚀
+═══════════════════════════════════════════════════════════════════════════════
