@@ -10,13 +10,22 @@ import os
 # ============================================================================
 
 EXPERIMENTS = {
-    # BASELINE: Standard parameters
+    # BASELINE: Wide range covering planetary to stellar binaries
     'baseline': {
-        'description': 'Baseline configuration',
+        'description': 'Baseline - wide range from planetary to stellar',
         'n_events': 1_000_000,
         'cadence_mask_prob': 0.20,
         'mag_error_std': 0.10,
-        'binary_params': 'standard',
+        'binary_params': 'baseline',
+    },
+    
+    # DISTINCT: Clear caustic-crossing binaries (most distinguishable)
+    'distinct': {
+        'description': 'Distinct caustic-crossing events',
+        'n_events': 200_000,
+        'cadence_mask_prob': 0.20,
+        'mag_error_std': 0.10,
+        'binary_params': 'distinct',
     },
     
     # CADENCE EXPERIMENTS
@@ -25,7 +34,7 @@ EXPERIMENTS = {
         'n_events': 200_000,
         'cadence_mask_prob': 0.05,
         'mag_error_std': 0.10,
-        'binary_params': 'standard',
+        'binary_params': 'baseline',
     },
     
     'cadence_sparse': {
@@ -33,7 +42,7 @@ EXPERIMENTS = {
         'n_events': 200_000,
         'cadence_mask_prob': 0.30,
         'mag_error_std': 0.10,
-        'binary_params': 'standard',
+        'binary_params': 'baseline',
     },
     
     # PHOTOMETRIC ERROR EXPERIMENTS
@@ -42,7 +51,7 @@ EXPERIMENTS = {
         'n_events': 200_000,
         'cadence_mask_prob': 0.20,
         'mag_error_std': 0.05,
-        'binary_params': 'standard',
+        'binary_params': 'baseline',
     },
     
     'error_high': {
@@ -50,79 +59,80 @@ EXPERIMENTS = {
         'n_events': 200_000,
         'cadence_mask_prob': 0.20,
         'mag_error_std': 0.20,
-        'binary_params': 'standard',
+        'binary_params': 'baseline',
     },
     
-    # BINARY DIFFICULTY EXPERIMENTS
-    'binary_easy': {
-        'description': 'Easy binaries (clear caustic crossings)',
+    # PLANETARY vs STELLAR
+    'planetary': {
+        'description': 'Planetary systems (q << 1)',
         'n_events': 200_000,
         'cadence_mask_prob': 0.20,
         'mag_error_std': 0.10,
-        'binary_params': 'easy',
+        'binary_params': 'planetary',
     },
     
-    'binary_hard': {
-        'description': 'Hard binaries (PSPL-like)',
+    'stellar': {
+        'description': 'Stellar binaries (q ~ 1)',
         'n_events': 200_000,
         'cadence_mask_prob': 0.20,
         'mag_error_std': 0.10,
-        'binary_params': 'hard',
-    },
-    
-    # EARLY DETECTION
-    'early_500': {
-        'description': 'Early detection (33% of event)',
-        'n_events': 200_000,
-        'n_points': 500,
-        'time_max': 333,
-        'cadence_mask_prob': 0.20,
-        'mag_error_std': 0.10,
-        'binary_params': 'standard',
+        'binary_params': 'stellar',
     },
 }
 
 # ============================================================================
-# BINARY PARAMETERS - KEY FOR DISTINGUISHABILITY!
+# BINARY PARAMETERS - COVERING PLANETARY TO STELLAR SYSTEMS
 # ============================================================================
 
-# STANDARD: Mixed difficulty (for baseline)
-BINARY_PARAMS_STANDARD = {
-    's_min': 0.3, 's_max': 2.0,
-    'q_min': 0.1, 'q_max': 1.0,
-    'u0_min': 0.01, 'u0_max': 0.5,
-    'rho_min': 0.001, 'rho_max': 0.05,
+# BASELINE: Wide range from planetary to stellar (realistic population)
+BINARY_PARAMS_BASELINE = {
+    's_min': 0.1, 's_max': 10.0,      # Very wide range: close to very wide binaries
+    'q_min': 0.001, 'q_max': 1.0,     # Planetary (0.001) to equal mass (1.0)
+    'u0_min': 0.001, 'u0_max': 1.0,   # All impact parameters
+    'rho_min': 0.0001, 'rho_max': 0.1,  # All source sizes
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 10, 'tE_max': 100,
+    'tE_min': 10, 'tE_max': 200,      # Wide range of timescales
     't0_min': 0, 't0_max': 1000,
 }
 
-# EASY: Clear caustic crossings (most distinguishable!)
-BINARY_PARAMS_EASY = {
-    's_min': 0.8, 's_max': 1.2,      # Wide binary
-    'q_min': 0.1, 'q_max': 0.5,      # Asymmetric
-    'u0_min': 0.001, 'u0_max': 0.1,  # SMALL u0 -> crosses caustics!
-    'rho_min': 0.0001, 'rho_max': 0.01,  # Sharp features
+# DISTINCT: Clear caustic-crossing binaries (maximally distinguishable from PSPL)
+BINARY_PARAMS_DISTINCT = {
+    's_min': 0.8, 's_max': 1.5,       # Wide binary region (s~1, largest caustics)
+    'q_min': 0.01, 'q_max': 0.5,      # Asymmetric (more features)
+    'u0_min': 0.001, 'u0_max': 0.15,  # Small u0 -> MUST cross caustics
+    'rho_min': 0.0001, 'rho_max': 0.01,  # Small source -> sharp features
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 10, 'tE_max': 100,
+    'tE_min': 20, 'tE_max': 150,
     't0_min': 0, 't0_max': 1000,
 }
 
-# HARD: PSPL-like (hardest to distinguish!)
-BINARY_PARAMS_HARD = {
-    's_min': 0.1, 's_max': 0.3,      # Very close binary
-    'q_min': 0.5, 'q_max': 1.0,      # Symmetric
-    'u0_min': 0.3, 'u0_max': 0.5,    # LARGE u0 -> misses caustics!
-    'rho_min': 0.03, 'rho_max': 0.1,  # Smoothed features
+# PLANETARY: Planet-hosting systems
+BINARY_PARAMS_PLANETARY = {
+    's_min': 0.5, 's_max': 3.0,       # Typical planetary separations
+    'q_min': 0.0001, 'q_max': 0.01,   # Mass ratio << 1 (Jupiter/Sun ~ 0.001)
+    'u0_min': 0.001, 'u0_max': 0.5,   # All impact parameters
+    'rho_min': 0.0001, 'rho_max': 0.05,
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 10, 'tE_max': 100,
+    'tE_min': 10, 'tE_max': 150,
+    't0_min': 0, 't0_max': 1000,
+}
+
+# STELLAR: Equal-mass or near-equal binary stars
+BINARY_PARAMS_STELLAR = {
+    's_min': 0.3, 's_max': 5.0,       # Wide range of stellar separations
+    'q_min': 0.3, 'q_max': 1.0,       # Near-equal to equal mass
+    'u0_min': 0.001, 'u0_max': 0.8,   # All impact parameters
+    'rho_min': 0.001, 'rho_max': 0.1,
+    'alpha_min': 0, 'alpha_max': 3.14159,
+    'tE_min': 20, 'tE_max': 200,
     't0_min': 0, 't0_max': 1000,
 }
 
 BINARY_PARAM_SETS = {
-    'standard': BINARY_PARAMS_STANDARD,
-    'easy': BINARY_PARAMS_EASY,
-    'hard': BINARY_PARAMS_HARD,
+    'baseline': BINARY_PARAMS_BASELINE,
+    'distinct': BINARY_PARAMS_DISTINCT,
+    'planetary': BINARY_PARAMS_PLANETARY,
+    'stellar': BINARY_PARAMS_STELLAR,
 }
 
 # ============================================================================
@@ -136,7 +146,7 @@ N_POINTS = 1500
 TIME_MIN = 0
 TIME_MAX = 1000
 
-# PSPL parameters
+# PSPL parameters (unchanged)
 PSPL_BASELINE_MIN = 19
 PSPL_BASELINE_MAX = 22
 PSPL_T0_MIN = 0
@@ -164,7 +174,7 @@ EPOCHS = 50
 LEARNING_RATE = 1e-3
 RANDOM_SEED = 42
 
-# Paths
+# Paths (more flexible)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 MODEL_DIR = os.path.join(BASE_DIR, 'models')
@@ -178,6 +188,6 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 VBM_REL_TOL = 1e-3
 VBM_TOL = 1e-3
 
-# GPU
+# GPU settings (works for both AMD and NVIDIA)
 MIXED_PRECISION = True
-NUM_GPUS = 4
+NUM_GPUS = 4  # Maximum available

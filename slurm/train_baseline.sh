@@ -1,102 +1,176 @@
 #!/bin/bash
-#SBATCH --job-name=train_baseline
-#SBATCH --partition=gpu_mi300
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-gpu=24
-#SBATCH --mem-per-gpu=128200mb
-#SBATCH --time=24:00:00
-#SBATCH --output=/u/hd_vm305/thesis-microlens/logs/train_baseline_%j.out
-#SBATCH --error=/u/hd_vm305/thesis-microlens/logs/train_baseline_%j.err
+#SBATCH --job-name=baseline_train
+#SBATCH --partition=gpu_mi300           # Change to your partition name
+#SBATCH --gres=gpu:4                    # Number of GPUs
+#SBATCH --cpus-per-gpu=24               # CPUs per GPU
+#SBATCH --mem-per-gpu=128G              # Memory per GPU
+#SBATCH --time=24:00:00                 # Max runtime
+#SBATCH --output=logs/baseline_%j.out
+#SBATCH --error=logs/baseline_%j.err
 
-# Exit on error
-set -e
+# ============================================================================
+# Microlensing Binary Classification - Baseline Training
+# Works for both AMD (ROCm) and NVIDIA (CUDA) GPUs
+# ============================================================================
+
+set -e  # Exit on error
 
 # Job info
 echo "=========================================="
-echo "MICROLENSING CLASSIFICATION - BASELINE TRAINING"
+echo "BASELINE TRAINING - WIDE PARAMETER RANGE"
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_NODELIST"
 echo "GPUs: $SLURM_GPUS"
-echo "Start time: $(date)"
+echo "Start: $(date)"
 echo "=========================================="
 
-# Define paths (using environment variables with defaults)
-PROJECT_DIR=${PROJECT_DIR:-/u/hd_vm305/thesis-microlens}
-DATA_FILE=${DATA_FILE:-$PROJECT_DIR/data/raw/events_1M.npz}
-MODEL_FILE=${MODEL_FILE:-$PROJECT_DIR/models/baseline_model.pt}
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Project directory (adjust if needed)
+PROJECT_DIR=${PROJECT_DIR:-$(pwd)}
+DATA_FILE=${DATA_FILE:-$PROJECT_DIR/data/raw/events_baseline_1M.npz}
 CODE_DIR=$PROJECT_DIR/code
 
-# Check if data exists
+echo ""
+echo "Project: $PROJECT_DIR"
+echo "Data: $DATA_FILE"
+echo ""
+
+# Check data exists
 if [ ! -f "$DATA_FILE" ]; then
-    echo "ERROR: Data file not found at $DATA_FILE"
-    echo "Please generate data first using:"
-    echo "  python $CODE_DIR/simulate.py --output $DATA_FILE"
+    echo "ERROR: Data file not found!"
+    echo "Expected: $DATA_FILE"
+    echo ""
+    echo "Generate it with:"
+    echo "  cd $CODE_DIR"
+    echo "  python simulate.py --output $DATA_FILE"
     exit 1
 fi
 
-# Load modules and activate environment
+# ============================================================================
+# Environment Setup
+# ============================================================================
+
 echo "Loading environment..."
+
+# Load modules (adjust for your system)
+# Uncomment the appropriate line:
+# module load cuda/12.1              # For NVIDIA systems
+# module load rocm/6.0               # For AMD systems
+# Or your cluster's module name:
+module load devel/cuda/12.1 || module load cuda || true
+
+# Activate conda/virtual environment
 source ~/.bashrc
-module load devel/cuda/12.1
-conda activate microlens
+conda activate microlens || source venv/bin/activate
 
-# Verify environment
-echo "Verifying Python environment..."
-python --version
-python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+# Verify Python
+echo "Python: $(python --version)"
+echo ""
 
-# Set environment variables for ROCm (AMD GPU)
-export ROCR_VISIBLE_DEVICES=0,1,2,3
-export HIP_VISIBLE_DEVICES=0,1,2,3
+# ============================================================================
+# GPU Detection and Configuration
+# ============================================================================
 
-# PyTorch optimizations
+echo "Detecting GPU backend..."
+python << EOF
+import sys
+sys.path.insert(0, '$CODE_DIR')
+from utils import detect_gpu_backend, check_gpu_availability, setup_gpu_environment
+
+backend = detect_gpu_backend()
+print(f"\nDetected: {backend.upper()}")
+
+num_gpus = check_gpu_availability()
+if num_gpus == 0:
+    print("\nERROR: No GPUs detected!")
+    sys.exit(1)
+
+setup_gpu_environment()
+print(f"\n✓ Ready to train on {num_gpus} GPU(s)")
+EOF
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: GPU detection failed!"
+    exit 1
+fi
+
+# Set environment variables for GPU
+# These are set by utils.py but we ensure they're exported
 export OMP_NUM_THREADS=24
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
-# Check GPU availability
-echo "=========================================="
-echo "GPU Information:"
-rocm-smi || echo "rocm-smi not available"
+# Check if AMD or NVIDIA
+if command -v rocm-smi &> /dev/null; then
+    echo ""
+    echo "AMD GPU Status:"
+    rocm-smi --showuse || true
+    export ROCR_VISIBLE_DEVICES=0,1,2,3
+    export HIP_VISIBLE_DEVICES=0,1,2,3
+elif command -v nvidia-smi &> /dev/null; then
+    echo ""
+    echo "NVIDIA GPU Status:"
+    nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
+    export CUDA_VISIBLE_DEVICES=0,1,2,3
+fi
+
 echo "=========================================="
 
-# Go to code directory
+# ============================================================================
+# Training
+# ============================================================================
+
 cd $CODE_DIR
 
-# Run training
-echo "Starting training..."
-echo "Data: $DATA_FILE"
-echo "Output: $MODEL_FILE"
+echo ""
+echo "Starting baseline training..."
+echo "Configuration:"
+echo "  - Dataset: Wide range (planetary to stellar)"
+echo "  - Events: 1M (500K PSPL + 500K Binary)"
+echo "  - Epochs: 50"
+echo "  - Batch size: 128 per GPU"
+echo "  - Mixed precision: Enabled"
 echo ""
 
 python train.py \
     --data "$DATA_FILE" \
-    --output "$MODEL_FILE" \
+    --output "$PROJECT_DIR/models/baseline.pt" \
     --epochs 50 \
     --batch_size 128 \
     --lr 1e-3 \
     --experiment_name baseline \
     --grad_clip 1.0
 
-# Check if training succeeded
-if [ $? -eq 0 ]; then
+TRAIN_STATUS=$?
+
+# ============================================================================
+# Post-Training
+# ============================================================================
+
+if [ $TRAIN_STATUS -eq 0 ]; then
     echo ""
     echo "=========================================="
     echo "TRAINING COMPLETED SUCCESSFULLY"
     echo "=========================================="
     
-    # Find the results directory (most recent baseline_* directory)
-    RESULTS_DIR=$(ls -td $PROJECT_DIR/results/baseline_* | head -1)
+    # Find results directory
+    RESULTS_DIR=$(ls -td $PROJECT_DIR/results/baseline_* 2>/dev/null | head -1)
     
     if [ -d "$RESULTS_DIR" ]; then
-        echo "Results saved to: $RESULTS_DIR"
+        echo ""
+        echo "Results: $RESULTS_DIR"
         echo ""
         echo "Files created:"
-        ls -lh "$RESULTS_DIR"
-        echo ""
+        ls -lh "$RESULTS_DIR/" | grep -E '\.(pt|pkl|json|log)$'
         
-        # Run evaluation automatically
+        # ========================================
+        # Evaluation
+        # ========================================
+        
+        echo ""
         echo "=========================================="
         echo "RUNNING EVALUATION"
         echo "=========================================="
@@ -109,33 +183,45 @@ if [ $? -eq 0 ]; then
             --data "$DATA_FILE" \
             --scaler "$RESULTS_DIR/scaler.pkl" \
             --output_dir "$EVAL_DIR" \
+            --batch_size 128 \
             --early_detection
         
-        if [ $? -eq 0 ]; then
+        EVAL_STATUS=$?
+        
+        if [ $EVAL_STATUS -eq 0 ]; then
             echo ""
             echo "=========================================="
-            echo "EVALUATION COMPLETED SUCCESSFULLY"
+            echo "EVALUATION COMPLETED"
             echo "=========================================="
-            echo "Evaluation results saved to: $EVAL_DIR"
             echo ""
-            echo "Files created:"
-            ls -lh "$EVAL_DIR"
+            echo "Evaluation results: $EVAL_DIR"
+            echo ""
+            echo "Generated files:"
+            ls -lh "$EVAL_DIR/"
+            echo ""
+            
+            # Display metrics if available
+            if [ -f "$EVAL_DIR/metrics.json" ]; then
+                echo "Performance Metrics:"
+                python -c "import json; m=json.load(open('$EVAL_DIR/metrics.json')); print(f\"  Accuracy: {m['accuracy']:.4f}\"); print(f\"  ROC AUC:  {m['roc_auc']:.4f}\"); print(f\"  PR AUC:   {m['pr_auc']:.4f}\")"
+            fi
         else
-            echo "WARNING: Evaluation failed, but training succeeded"
+            echo ""
+            echo "WARNING: Evaluation failed (training succeeded)"
         fi
     fi
+    
 else
     echo ""
     echo "=========================================="
     echo "TRAINING FAILED"
     echo "=========================================="
-    echo "Check the error log for details:"
-    echo "  tail -100 $PROJECT_DIR/logs/train_baseline_${SLURM_JOB_ID}.err"
+    echo "Check error log: logs/baseline_${SLURM_JOB_ID}.err"
     exit 1
 fi
 
 echo ""
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "End time: $(date)"
+echo "Job completed: $(date)"
+echo "Duration: $SECONDS seconds"
 echo "=========================================="

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Pre-flight check script for microlensing thesis project
-Run this before submitting SLURM jobs to catch common issues
+Run this before submitting jobs to catch common issues
+Works for both AMD (ROCm) and NVIDIA (CUDA) systems
 """
 
 import sys
@@ -79,24 +80,75 @@ def main():
             __import__(package)
             print(f"✓ {name} installed")
         except ImportError:
-            print(f"✗ {name} NOT INSTALLED - install with: pip install {package}")
+            print(f"✗ {name} NOT INSTALLED")
+            if package == 'torch':
+                print("  Install with:")
+                print("  # For NVIDIA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
+                print("  # For AMD: pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0")
+            else:
+                print(f"  Install with: pip install {package}")
             all_checks_passed = False
     
-    # PyTorch CUDA
+    # ========================================================================
+    # 3. GPU Detection
+    # ========================================================================
+    print_section("3. GPU Detection")
+    
     try:
         import torch
+        
+        # Check GPU availability
         cuda_available = torch.cuda.is_available()
+        
         if cuda_available:
-            print(f"✓ PyTorch CUDA available ({torch.cuda.device_count()} GPUs)")
+            num_gpus = torch.cuda.device_count()
+            print(f"✓ PyTorch detected {num_gpus} GPU(s)")
+            
+            # Detect backend
+            device_name = torch.cuda.get_device_name(0).lower()
+            if 'amd' in device_name or 'mi' in device_name or 'radeon' in device_name:
+                backend = 'AMD (ROCm)'
+            else:
+                backend = 'NVIDIA (CUDA)'
+            
+            print(f"  Backend: {backend}")
+            
+            # List GPUs
+            for i in range(num_gpus):
+                gpu_name = torch.cuda.get_device_name(i)
+                print(f"  GPU {i}: {gpu_name}")
+                
+                # Try to get memory info
+                try:
+                    props = torch.cuda.get_device_properties(i)
+                    total_mem = props.total_memory / 1e9
+                    print(f"    Memory: {total_mem:.1f} GB")
+                except:
+                    pass
+            
+            # Test GPU computation
+            print("\n  Testing GPU computation...")
+            try:
+                x = torch.randn(1000, 1000, device='cuda')
+                y = torch.randn(1000, 1000, device='cuda')
+                z = torch.matmul(x, y)
+                torch.cuda.synchronize()
+                print("  ✓ GPU computation test passed")
+            except Exception as e:
+                print(f"  ✗ GPU computation test failed: {e}")
+                all_checks_passed = False
         else:
-            print(f"⚠ PyTorch CUDA NOT available (OK for CPU testing)")
-    except:
-        pass
+            print("⚠ No GPUs detected - training will run on CPU (very slow)")
+            print("  This is OK for testing but not recommended for full training")
+            
+    except ImportError:
+        print("✗ PyTorch not installed - cannot check GPUs")
+        all_checks_passed = False
     
     # ========================================================================
-    # 3. Data Files
+    # 4. Data Files
     # ========================================================================
-    print_section("3. Data Files")
+    print_section("4. Data Files")
     
     data_dir = project_root / 'data' / 'raw'
     data_files = list(data_dir.glob('*.npz'))
@@ -105,43 +157,53 @@ def main():
         print(f"✓ Found {len(data_files)} data file(s):")
         for f in data_files:
             size_mb = f.stat().st_size / 1e6
-            print(f"    - {f.name} ({size_mb:.1f} MB)")
+            print(f"    {f.name} ({size_mb:.1f} MB)")
     else:
-        print(f"✗ No .npz data files found in {data_dir}")
-        print(f"  Generate data with: python code/simulate.py")
-        all_checks_passed = False
+        print(f"⚠ No .npz data files found in {data_dir}")
+        print(f"  Generate baseline data with:")
+        print(f"    cd code")
+        print(f"    python simulate.py --output ../data/raw/events_baseline_1M.npz")
     
     # Check for baseline data specifically
-    baseline_data = data_dir / 'events_1M.npz'
-    if baseline_data.exists():
-        print(f"✓ Baseline dataset (events_1M.npz) exists")
-        
-        # Try to load and validate
-        try:
-            import numpy as np
-            data = np.load(baseline_data)
-            X = data['X']
-            y = data['y']
-            print(f"    Shape: {X.shape}, Labels: {len(y)}")
+    baseline_files = [
+        'events_baseline_1M.npz',
+        'events_1M.npz',
+        'test_2k.npz'
+    ]
+    
+    baseline_found = False
+    for filename in baseline_files:
+        baseline_path = data_dir / filename
+        if baseline_path.exists():
+            print(f"✓ Found dataset: {filename}")
+            baseline_found = True
             
-            # Basic validation
-            if len(X) == len(y):
-                print(f"✓ Data validation passed")
-            else:
-                print(f"✗ Data shape mismatch: X={len(X)}, y={len(y)}")
-                all_checks_passed = False
+            # Try to validate
+            try:
+                import numpy as np
+                data = np.load(baseline_path)
+                X = data['X']
+                y = data['y']
+                print(f"    Shape: {X.shape}, Labels: {len(set(y))}")
                 
-        except Exception as e:
-            print(f"✗ Could not load data: {e}")
-            all_checks_passed = False
-    else:
-        print(f"⚠ Baseline dataset not found (events_1M.npz)")
-        print(f"  You'll need this for baseline training")
+                if len(X) == len(y):
+                    print(f"    ✓ Data validation passed")
+                else:
+                    print(f"    ✗ Data shape mismatch!")
+                    all_checks_passed = False
+            except Exception as e:
+                print(f"    ✗ Could not load data: {e}")
+                all_checks_passed = False
+            break
+    
+    if not baseline_found:
+        print(f"⚠ No baseline dataset found")
+        print(f"  Generate with: python code/simulate.py")
     
     # ========================================================================
-    # 4. Code Files
+    # 5. Code Files
     # ========================================================================
-    print_section("4. Code Files")
+    print_section("5. Code Files")
     
     code_dir = project_root / 'code'
     required_scripts = [
@@ -168,13 +230,13 @@ def main():
                     compile(f.read(), script_path, 'exec')
                 print(f"    ✓ No syntax errors")
             except SyntaxError as e:
-                print(f"    ✗ Syntax error: {e}")
+                print(f"    ✗ Syntax error on line {e.lineno}: {e.msg}")
                 all_checks_passed = False
     
     # ========================================================================
-    # 5. SLURM Scripts
+    # 6. SLURM Scripts
     # ========================================================================
-    print_section("5. SLURM Scripts")
+    print_section("6. SLURM Scripts")
     
     slurm_dir = project_root / 'slurm'
     slurm_scripts = list(slurm_dir.glob('*.sh'))
@@ -182,113 +244,27 @@ def main():
     if slurm_scripts:
         print(f"✓ Found {len(slurm_scripts)} SLURM script(s)")
         for script in slurm_scripts:
-            # Check if executable
             is_executable = os.access(script, os.X_OK)
             if is_executable:
                 print(f"  ✓ {script.name} (executable)")
             else:
-                print(f"  ⚠ {script.name} (not executable - run: chmod +x {script})")
+                print(f"  ⚠ {script.name} (not executable)")
+                print(f"    Fix with: chmod +x {script}")
     else:
-        print(f"✗ No SLURM scripts found in {slurm_dir}")
-        all_checks_passed = False
+        print(f"⚠ No SLURM scripts found in {slurm_dir}")
+        print(f"  This is OK if not using a cluster")
     
     # ========================================================================
-    # 6. File Extension Check
+    # 7. Configuration Check
     # ========================================================================
-    print_section("6. File Extension Consistency")
-    
-    # Check if train.py saves .pt files
-    train_py = code_dir / 'train.py'
-    if train_py.exists():
-        with open(train_py) as f:
-            content = f.read()
-            if 'torch.save' in content and '.pt' in content:
-                print(f"✓ train.py saves PyTorch .pt files")
-                
-                # Check SLURM scripts
-                for script in slurm_scripts:
-                    with open(script) as f:
-                        script_content = f.read()
-                        if '.keras' in script_content:
-                            print(f"  ✗ {script.name} references .keras (should be .pt)")
-                            all_checks_passed = False
-                        elif '.pt' in script_content:
-                            print(f"  ✓ {script.name} uses .pt extension")
-            elif '.keras' in content:
-                print(f"⚠ train.py might save .keras files (check if using TensorFlow)")
-    
-    # ========================================================================
-    # 7. Path Consistency
-    # ========================================================================
-    print_section("7. Path Configuration")
-    
-    # Check for hardcoded paths in code
-    print("Checking for hardcoded paths...")
-    hardcoded_found = False
-    
-    for script in (code_dir / 'train.py', code_dir / 'evaluate.py'):
-        if not script.exists():
-            continue
-            
-        with open(script) as f:
-            content = f.read()
-            if '/u/hd_vm305' in content:
-                print(f"  ⚠ {script.name} contains hardcoded path /u/hd_vm305")
-                hardcoded_found = True
-    
-    if not hardcoded_found:
-        print("  ✓ No hardcoded paths in Python scripts")
-    
-    # Check SLURM scripts
-    for script in slurm_scripts:
-        with open(script) as f:
-            content = f.read()
-            if '/u/hd_vm305' in content and 'PROJECT_DIR' not in content:
-                print(f"  ⚠ {script.name} has hardcoded paths (consider using $PROJECT_DIR)")
-    
-    # ========================================================================
-    # 8. Git Status
-    # ========================================================================
-    print_section("8. Git Repository")
-    
-    git_dir = project_root / '.git'
-    if git_dir.exists():
-        print(f"✓ Git repository initialized")
-        
-        # Check for uncommitted changes
-        try:
-            result = subprocess.run(
-                ['git', 'status', '--porcelain'], 
-                cwd=project_root,
-                capture_output=True, 
-                text=True
-            )
-            if result.stdout.strip():
-                print(f"  ⚠ Uncommitted changes found:")
-                for line in result.stdout.strip().split('\n')[:5]:
-                    print(f"    {line}")
-                if len(result.stdout.strip().split('\n')) > 5:
-                    print(f"    ... and more")
-            else:
-                print(f"  ✓ Working directory clean")
-        except:
-            print(f"  ⚠ Could not check git status")
-    else:
-        print(f"⚠ Not a git repository (consider: git init)")
-    
-    # ========================================================================
-    # 9. Configuration Check
-    # ========================================================================
-    print_section("9. Configuration")
+    print_section("7. Configuration")
     
     config_py = code_dir / 'config.py'
     if config_py.exists():
         try:
-            import sys
             sys.path.insert(0, str(code_dir))
             import config
             
-            # Check key parameters
             print(f"✓ config.py loaded successfully")
             print(f"    N_EVENTS_TOTAL: {getattr(config, 'N_EVENTS_TOTAL', 'NOT SET')}")
             print(f"    BATCH_SIZE: {getattr(config, 'BATCH_SIZE', 'NOT SET')}")
@@ -296,13 +272,62 @@ def main():
             
             # Check for experiments configuration
             if hasattr(config, 'EXPERIMENTS'):
-                print(f"    EXPERIMENTS defined: {len(config.EXPERIMENTS)} configs")
-            else:
-                print(f"    ⚠ EXPERIMENTS dict not found")
-                
+                print(f"    EXPERIMENTS: {len(config.EXPERIMENTS)} configurations")
+            
+            # Check binary parameter sets
+            if hasattr(config, 'BINARY_PARAM_SETS'):
+                param_sets = config.BINARY_PARAM_SETS
+                print(f"    BINARY_PARAM_SETS: {list(param_sets.keys())}")
+            
         except Exception as e:
             print(f"✗ Error loading config.py: {e}")
             all_checks_passed = False
+    
+    # ========================================================================
+    # 8. Disk Space
+    # ========================================================================
+    print_section("8. Disk Space")
+    
+    try:
+        stat = os.statvfs(project_root)
+        free_gb = (stat.f_bavail * stat.f_frsize) / 1e9
+        total_gb = (stat.f_blocks * stat.f_frsize) / 1e9
+        used_gb = total_gb - free_gb
+        
+        print(f"  Total: {total_gb:.1f} GB")
+        print(f"  Used:  {used_gb:.1f} GB")
+        print(f"  Free:  {free_gb:.1f} GB")
+        
+        if free_gb < 50:
+            print(f"⚠ Low disk space! Need at least 50 GB free")
+            print(f"  Consider cleaning up or using different storage")
+        else:
+            print(f"✓ Sufficient disk space")
+    except:
+        print("⚠ Could not check disk space")
+    
+    # ========================================================================
+    # 9. Memory Check
+    # ========================================================================
+    print_section("9. System Memory")
+    
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.readlines()
+        
+        for line in meminfo:
+            if 'MemTotal' in line:
+                total_kb = int(line.split()[1])
+                total_gb = total_kb / 1e6
+                print(f"  Total RAM: {total_gb:.1f} GB")
+                
+                if total_gb < 16:
+                    print(f"⚠ Low RAM - recommend at least 16 GB")
+                else:
+                    print(f"✓ Sufficient RAM")
+                break
+    except:
+        print("⚠ Could not check system memory")
     
     # ========================================================================
     # Final Summary
@@ -311,19 +336,34 @@ def main():
     
     if all_checks_passed:
         print("✅ ALL CRITICAL CHECKS PASSED!")
-        print("\nYou're ready to:")
-        print("  1. Submit baseline training: sbatch slurm/train_baseline.sh")
-        print("  2. Monitor with: squeue -u $USER")
-        print("  3. Check logs: tail -f logs/train_baseline_*.out")
+        print("\n✓ System is ready for baseline training")
+        print("\nNext steps:")
+        print("  1. Generate data (if not done):")
+        print("     cd code")
+        print("     python simulate.py --output ../data/raw/events_baseline_1M.npz")
+        print("\n  2. Start training:")
+        print("     # Local:")
+        print("     python train.py --data ../data/raw/events_baseline_1M.npz \\")
+        print("                     --output ../models/baseline.pt \\")
+        print("                     --experiment_name baseline")
+        print("\n     # Cluster:")
+        print("     sbatch slurm/train_baseline.sh")
+        print("\n  3. Monitor progress:")
+        print("     tail -f logs/baseline_*.out")
         return 0
     else:
         print("❌ SOME CHECKS FAILED")
-        print("\nPlease fix the issues above before submitting jobs.")
-        print("Common fixes:")
-        print("  - Install missing packages: pip install -r requirements.txt")
-        print("  - Create missing directories: mkdir -p data/raw models results logs")
-        print("  - Make scripts executable: chmod +x slurm/*.sh")
-        print("  - Generate data: python code/simulate.py")
+        print("\nPlease fix the issues above before starting training.")
+        print("\nCommon fixes:")
+        print("  - Install PyTorch:")
+        print("    # NVIDIA: pip install torch --index-url https://download.pytorch.org/whl/cu121")
+        print("    # AMD: pip install torch --index-url https://download.pytorch.org/whl/rocm6.0")
+        print("  - Install other packages:")
+        print("    pip install -r requirements.txt")
+        print("  - Create missing directories:")
+        print("    mkdir -p data/raw data/processed models results logs")
+        print("  - Make scripts executable:")
+        print("    chmod +x slurm/*.sh")
         return 1
 
 if __name__ == "__main__":

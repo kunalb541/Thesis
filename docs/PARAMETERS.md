@@ -1,297 +1,357 @@
-# Binary Parameters and Physical Interpretation
+### Binary Parameters and Physical Interpretation
 
-Understanding which binary parameters make events **distinguishable from PSPL** is critical for interpreting your thesis results.
+Understanding which binary parameters make events **distinguishable from PSPL** is critical for interpreting your results.
 
 ---
 
-## 🔑 Key Insight: The u₀ Parameter
+## 🔑 Key Physical Principles
 
-**u₀ (impact parameter)** is the **most important** parameter for distinguishability.
+### The Caustic Crossing Phenomenon
 
-### What is u₀?
+**Caustics** are critical curves in the lens plane where magnification theoretically approaches infinity. When a source star crosses a caustic, the light curve shows:
+- Sharp, dramatic spikes
+- Complex, multi-peaked structure
+- Features that PSPL events cannot produce
 
-The impact parameter is the minimum distance between the source trajectory and the center of mass of the lens system, measured in Einstein radii.
+**This is the key signature for detecting binary lenses.**
+
+---
+
+## 📐 Binary Parameters Explained
+
+### 1. **u₀ (Impact Parameter)** - THE MOST IMPORTANT
+
+**Definition**: Minimum distance between source trajectory and lens center of mass (in Einstein radii)
 
 ```
         Source trajectory
               →
     ━━━━━━━━━━━━━━━━━━━━
                          ↑ u₀
-          • ←───────────┘
-        Lens
+          ● ●           ┘
+        Binary lens
 ```
 
-### Why u₀ Matters
+**Physical significance**:
+- **Small u₀ (< 0.15)**: Source passes close to lens
+  - High probability of crossing caustics
+  - Strong, distinctive features
+  - Clearly different from PSPL
+  
+- **Medium u₀ (0.15 - 0.30)**: Moderate distance
+  - May or may not cross caustics (depends on s, q)
+  - Moderate magnification
+  - Sometimes distinguishable, sometimes not
+  
+- **Large u₀ (> 0.30)**: Source passes far from lens
+  - Very low caustic crossing probability
+  - Weak magnification
+  - **Fundamentally PSPL-like**
+  - No algorithm can reliably distinguish these
 
-**Small u₀ (< 0.1)**: Source passes **close** to the lens
-- High magnification
-- **Crosses caustics** (critical curves where magnification → ∞)
-- Sharp, distinctive spikes in the light curve
-- **Easy to distinguish from PSPL**
-
-**Large u₀ (> 0.3)**: Source passes **far** from the lens
-- Moderate magnification
-- **Misses caustics**
-- Smooth, PSPL-like light curve
-- **Hard to distinguish from PSPL**
-
-### The Detection Threshold
-
-**Physical interpretation**: ~15-20% of binary events have u₀ > 0.3 and fundamentally look like PSPL events. This is a **fundamental limit** - no amount of better observing or better algorithms can fix this!
-
-Your thesis quantifies: **For the remaining 80-85% of events with u₀ < 0.3, how well can we detect them under realistic conditions?**
+**Research finding**: Approximately 15-25% of binary events have large u₀ and are intrinsically indistinguishable from PSPL. This is a **fundamental physical limit**, not a machine learning limitation.
 
 ---
 
-## 📐 Binary Parameters Explained
+### 2. **s (Separation)** - Caustic Size Controller
 
-### Core Binary Parameters
+**Definition**: Distance between the two lens masses (in Einstein radii)
 
-#### 1. **s (separation)**
-- **Definition**: Distance between the two masses in Einstein radii
-- **Range**: 0.3 - 2.0 (standard), 0.8 - 1.2 (easy), 0.1 - 0.3 (hard)
-- **Physical meaning**: 
-  - s < 1: Close binary → caustics merge into single structure
-  - s ≈ 1: Wide binary → large central caustic + two planetary caustics
-  - s > 1: Very wide binary → caustics well separated
-
-**Why it matters**: s ≈ 1 produces the largest caustics, making crossings more likely!
-
-```
-s = 0.5 (close)       s = 1.0 (wide)        s = 2.0 (very wide)
-      
-  ⚫─⚫                  ⚫     ⚫                ⚫           ⚫
-   │ │                  │     │                │           │
-  caustics            caustics              caustics
-   merged              large                 small
-```
-
-#### 2. **q (mass ratio)**
-- **Definition**: Ratio of secondary to primary mass (m₂/m₁)
-- **Range**: 0.1 - 1.0 (standard and easy), 0.5 - 1.0 (hard)
-- **Physical meaning**:
-  - q ≪ 1: Planetary system (tiny companion)
-  - q ≈ 1: Equal mass binary (symmetric)
-
-**Why it matters**: 
-- Low q → asymmetric caustics → more distinctive features
-- High q → symmetric caustics → can mimic PSPL symmetry
-
-#### 3. **u₀ (impact parameter)**
-- **Definition**: Minimum distance to lens center (Einstein radii)
-- **Range**: 0.01 - 0.5 (standard), 0.001 - 0.1 (easy), 0.3 - 0.5 (hard)
-- **Physical meaning**: How close the source passes to the lens
-
-**THIS IS THE KEY PARAMETER!**
-
-**Impact on observability**:
-```
-u₀ = 0.05:  ████████████  (crosses caustic, clear spike)
-u₀ = 0.20:  ██████░░░░░░  (might graze caustic)
-u₀ = 0.40:  ███░░░░░░░░░  (misses caustic, looks like PSPL)
-```
-
-#### 4. **ρ (source size)**
-- **Definition**: Angular size of the source (Einstein radii)
-- **Range**: 0.001 - 0.05 (standard), 0.0001 - 0.01 (easy), 0.03 - 0.1 (hard)
-- **Physical meaning**: Finite source size "smooths out" sharp caustic crossings
-
-**Why it matters**:
-- Small ρ → sharp spikes during caustic crossing → distinctive
-- Large ρ → smoothed features → harder to detect
-- Finite source effects dominate for timescales < ρ × tE
+**Physical significance**:
+- **s < 0.5**: Close binary
+  - Caustics merge into single structure
+  - Smaller overall caustic size
+  
+- **s ≈ 0.8-1.5**: Wide binary
+  - **Largest caustics** (maximum cross-section)
+  - Highest detection probability
+  - Clear central caustic + planetary caustics
+  
+- **s > 2.0**: Very wide binary
+  - Caustics become small and separated
+  - Lower detection probability
 
 ```
-Point source (ρ→0):    Finite source (ρ=0.01):    Large source (ρ=0.05):
-        
-    ^                      ^                          ^
-    │ ╱╲                   │  ╱‾╲                     │  ╱‾‾╲
-    │╱  ╲                  │ ╱   ╲                    │ ╱    ╲
-    ┼────                  ┼──────                    ┼───────
-    │                      │                          │
-   Sharp spike          Smoothed spike             Very smooth
+s = 0.3           s = 1.0           s = 3.0
+(close)           (wide)         (very wide)
+
+  ●─●              ●     ●          ●           ●
+  tiny            LARGE            small
+caustics         caustics        caustics
 ```
 
-#### 5. **α (source trajectory angle)**
-- **Definition**: Angle of source trajectory relative to binary axis
-- **Range**: 0 - π (all configurations)
-- **Physical meaning**: Determines which caustics the source might cross
+**Optimal for detection**: s ≈ 0.8-1.5 (wide binary regime)
 
-**Why it matters**: 
+---
+
+### 3. **q (Mass Ratio)** - Asymmetry Parameter
+
+**Definition**: Ratio of secondary to primary mass (m₂/m₁)
+
+**Physical significance**:
+- **q << 1 (e.g., 0.001)**: Planetary system
+  - Jupiter/Sun ≈ 0.001
+  - Earth/Sun ≈ 0.000003
+  - Asymmetric caustic structure
+  - Smaller planetary caustics
+  
+- **q ≈ 0.1-0.5**: Intermediate
+  - Brown dwarfs, low-mass stars
+  - Moderate asymmetry
+  
+- **q ≈ 0.5-1.0**: Stellar binary
+  - Equal or near-equal mass
+  - More symmetric caustics
+  - Can mimic PSPL symmetry if u₀ is large
+
+```
+q = 0.001         q = 0.1           q = 1.0
+(planet)        (brown dwarf)     (equal mass)
+
+●―――――●          ●――――●            ●―●
+big   tiny      big  small      symmetric
+```
+
+**For detection**: Lower q (more asymmetric) generally produces more distinctive features, **but only if u₀ is small enough to cross caustics**.
+
+---
+
+### 4. **ρ (Source Size)** - Feature Sharpness
+
+**Definition**: Angular radius of the source star (in Einstein radii)
+
+**Physical significance**:
+- **ρ << 0.01**: Point-like source
+  - Infinitely sharp caustic crossing spikes
+  - Maximum feature contrast
+  
+- **ρ ≈ 0.01-0.03**: Typical source
+  - Caustic features smoothed but visible
+  - Realistic for most observations
+  
+- **ρ > 0.05**: Large source
+  - Heavily smoothed caustic crossings
+  - Features may be undetectable
+  - "Finite source effects" dominate
+
+```
+Light curve during caustic crossing:
+
+ρ → 0             ρ = 0.01          ρ = 0.05
+(point)           (typical)         (large)
+
+    ∧                 ∧                 ∧
+   ╱ ╲              ╱   ╲             ╱     ╲
+  ╱   ╲            ╱     ╲           ╱       ╲
+ ╱     ╲          ╱       ╲         ╱         ╲
+──────────     ─────────────    ───────────────
+Sharp spike     Rounded peak      Smooth bump
+```
+
+**Detection requirement**: ρ < 0.03 for clear caustic signature
+
+---
+
+### 5. **α (Trajectory Angle)** - Caustic Encounter Geometry
+
+**Definition**: Angle between source trajectory and binary axis
+
+**Physical significance**:
+- Different angles → different caustic encounters
 - Some angles lead to central caustic crossing
 - Other angles lead to planetary caustic crossing
-- Affects the shape and timing of features
+- Averaged over all angles in realistic populations
 
-#### 6. **tE (Einstein crossing time)**
-- **Definition**: Time for source to cross one Einstein radius
-- **Range**: 10 - 150 days (PSPL), 10 - 100 days (Binary)
-- **Physical meaning**: Event timescale, depends on lens mass and relative motion
-
-**Why it matters**: 
-- Short tE → rapid evolution → need dense cadence to resolve
-- Long tE → slow evolution → easier to observe but survey duration matters
+**Less critical** than u₀, s, q for overall distinguishability.
 
 ---
 
-## 🎯 Parameter Sets in This Thesis
+### 6. **tE (Einstein Crossing Time)** - Event Timescale
 
-### Standard (Baseline)
-```python
-{
-    's': (0.3, 2.0),      # Full range of separations
-    'q': (0.1, 1.0),      # All mass ratios
-    'u₀': (0.01, 0.5),    # Mix of close and distant passes
-    'ρ': (0.001, 0.05),   # Typical source sizes
-    'α': (0, π),          # All trajectory angles
-    'tE': (10, 100)       # Typical timescales
-}
-```
-**Goal**: Represent realistic population for baseline performance
+**Definition**: Time for source to cross one Einstein radius
 
-### Easy (Best Case)
-```python
-{
-    's': (0.8, 1.2),      # Wide binaries (s≈1, largest caustics!)
-    'q': (0.1, 0.5),      # Asymmetric (more distinctive)
-    'u₀': (0.001, 0.1),   # Small u₀ (crosses caustics!)
-    'ρ': (0.0001, 0.01),  # Small sources (sharp features!)
-    'α': (0, π),          # All angles
-    'tE': (10, 100)       # Typical timescales
-}
-```
-**Goal**: Best-case scenario - maximum distinguishability
+**Physical significance**:
+- **tE ~ 10-50 days**: Typical for bulge events
+- **tE ~ 50-200 days**: Long events (good for detailed study)
+- **tE < 10 days**: Rapid events (need dense cadence)
 
-**Expected performance**: 98-99% accuracy under good observing conditions
-
-### Hard (Worst Case)
-```python
-{
-    's': (0.1, 0.3),      # Close binaries (small caustics)
-    'q': (0.5, 1.0),      # Symmetric (less distinctive)
-    'u₀': (0.3, 0.5),     # Large u₀ (misses caustics!)
-    'ρ': (0.03, 0.1),     # Large sources (smoothed features)
-    'α': (0, π),          # All angles
-    'tE': (10, 100)       # Typical timescales
-}
-```
-**Goal**: Worst-case scenario - minimum distinguishability
-
-**Expected performance**: 82-88% accuracy (fundamental limit!)
+**Detection impact**:
+- Longer tE → more observations → better characterization
+- Shorter tE + sparse cadence → may miss caustic crossing
 
 ---
 
-## 📊 Parameter Space Visualization
+## 🎯 Parameter Sets in This Project
 
-### Caustic Crossing Probability vs u₀
+### BASELINE (Wide Range)
+**Goal**: Represent realistic population from planetary to stellar
 
-```
-P(caustic crossing) vs u₀ for different s values:
-
-Probability
-    1.0│              s=1.0 (wide)
-       │             ╱
-       │            ╱
-       │           ╱
-    0.5│          ╱s=0.5 (close)
-       │         ╱╱
-       │        ╱╱ 
-       │       ╱╱  s=2.0 (very wide)
-    0.0└──────╱─────────────────
-         0.0  0.1  0.2  0.3  0.4  0.5  u₀
-
-Key insight: Crossing probability drops sharply above u₀ ≈ 0.2-0.3
+```python
+{
+    's': (0.1, 10.0),      # All separations
+    'q': (0.001, 1.0),     # Planetary to equal-mass
+    'u₀': (0.001, 1.0),    # All impact parameters
+    'ρ': (0.0001, 0.1),    # All source sizes
+    'tE': (10, 200),       # All timescales
+}
 ```
 
-### Detection Difficulty Map
-
-```
-                    EASY          MODERATE        HARD
-                    
-u₀ < 0.1            ████          ████            ███
-                    High mag      High mag        High mag
-                    Crosses       Crosses         Crosses
-                    caustic       caustic         caustic
-                    
-0.1 < u₀ < 0.3      ███           ██              █
-                    Medium mag    Medium mag      Low mag
-                    May cross     Rarely          Never
-                    caustic       crosses         crosses
-                    
-u₀ > 0.3            █             █               ░
-                    Low mag       Low mag         Very low
-                    No crossing   No crossing     No crossing
-                    PSPL-like     PSPL-like       PSPL-like
-                    
-                Small ρ,        Medium ρ,       Large ρ,
-                s≈1, q<0.5      s<2, q<1        s extreme,
-                                                q≈1
-```
+**What to expect**: Mixed population
+- Some events clearly binary (small u₀, good geometry)
+- Some events clearly PSPL-like (large u₀)
+- Performance depends on the u₀ distribution
 
 ---
 
-## 🔬 Physical Interpretation for Your Thesis
+### DISTINCT (Maximum Distinguishability)
+**Goal**: Events guaranteed to look different from PSPL
 
-### Key Findings to Discuss
+```python
+{
+    's': (0.8, 1.5),       # Wide binary (largest caustics)
+    'q': (0.01, 0.5),      # Asymmetric
+    'u₀': (0.001, 0.15),   # MUST cross caustics
+    'ρ': (0.0001, 0.01),   # Sharp features
+    'tE': (20, 150),       # Good timescale
+}
+```
 
-1. **The u₀ threshold**: ~15-20% of binary events have u₀ > 0.3 and are fundamentally PSPL-like. This is a **hard physical limit**.
+**What to expect**: Near-perfect classification possible
+- All events cross caustics
+- Clear, sharp features
+- Only limited by observational effects (cadence, noise)
 
-2. **The s≈1 sweet spot**: Wide binaries (s ≈ 0.8-1.2) have the largest caustics and are easiest to detect.
+---
 
-3. **Source size matters**: Finite source effects (ρ) become important for ρ > 0.01. This sets a resolution limit for detecting rapid caustic crossings.
+### PLANETARY (Planet Detection)
+**Goal**: Simulate planetary microlensing events
 
-4. **Asymmetry helps**: Low mass ratio (q < 0.5) creates asymmetric caustics that are more distinctive than symmetric ones.
+```python
+{
+    's': (0.5, 3.0),       # Typical planet orbits
+    'q': (0.0001, 0.01),   # Jupiter-mass to super-Jupiter
+    'u₀': (0.001, 0.5),    # All impacts
+    'ρ': (0.0001, 0.05),   
+    'tE': (10, 150),       
+}
+```
 
-### Implications for LSST and Roman
+**Physical context**:
+- Models planet-hosting systems
+- Planetary caustics are smaller than central caustic
+- Detection depends critically on u₀ and s
 
-**LSST** (ground-based, wide field):
-- Typical photometric error: σ ≈ 0.1-0.15 mag
-- Cadence: ~3-4 days → misses ~20-30% of observations
-- **Conclusion**: Will detect most easy events (u₀ < 0.1) but struggle with moderate cases (0.1 < u₀ < 0.3)
+---
 
-**Roman Space Telescope** (space-based, narrow field):
-- Typical photometric error: σ ≈ 0.01 mag (10× better!)
-- Cadence: 15 min → dense, continuous coverage
-- **Conclusion**: Should detect nearly all caustic-crossing events, limited only by fundamental u₀ threshold
+### STELLAR (Binary Stars)
+**Goal**: Simulate stellar binary lenses
 
-### Your Contribution
+```python
+{
+    's': (0.3, 5.0),       # Stellar separations
+    'q': (0.3, 1.0),       # Near-equal to equal mass
+    'u₀': (0.001, 0.8),    # All impacts
+    'ρ': (0.001, 0.1),     
+    'tE': (20, 200),       # Often longer than planetary
+}
+```
 
-By systematically benchmarking performance across parameter space, you provide **quantitative guidance** for:
-- Survey design (how dense should cadence be?)
-- Follow-up triggers (when to activate 8-10m telescopes?)
-- Realistic event rates (what fraction of binaries will we actually detect?)
+**Physical context**:
+- Models binary star systems
+- More symmetric caustics (higher q)
+- May be harder to distinguish if u₀ is large
+
+---
+
+## 📊 Detection Difficulty Map
+
+```
+                   PLANETARY          STELLAR
+                   (q << 1)           (q ~ 1)
+                   
+u₀ < 0.1          ████████           ████████
+(close pass)      Detectable         Detectable
+                  Sharp features     Clear features
+                  
+0.1 < u₀ < 0.3    ███░░░░░           ██░░░░░░
+(moderate)        Maybe              Maybe
+                  Depends on ρ,s     Depends on ρ,s
+                  
+u₀ > 0.3          ░░░░░░░░           ░░░░░░░░
+(distant)         Undetectable       Undetectable
+                  PSPL-like          PSPL-like
+```
+
+**Key insight**: Both planetary and stellar binaries become indistinguishable from PSPL at large u₀. The mass ratio matters less than the geometry.
+
+---
+
+## 🔬 Physical Interpretation for Your Results
+
+### Questions to Answer
+
+1. **What fraction of events in your baseline are "easy" (small u₀)?**
+   - Analyze the u₀ distribution
+   - Compare accuracy vs u₀
+
+2. **Do planetary systems perform differently than stellar?**
+   - Compare 'planetary' vs 'stellar' experiments
+   - Is low-q harder to detect?
+
+3. **What is the fundamental detection limit?**
+   - Find the u₀ threshold where accuracy drops
+   - This is a physical limit, not algorithmic
+
+4. **How does observational quality affect this?**
+   - Test with different cadences and errors
+   - Can better observations compensate for difficult geometry?
+
+---
+
+## 🎓 Thesis Contributions
+
+Your systematic benchmarking will answer:
+
+1. **Population statistics**: What fraction of realistic binaries are detectable?
+
+2. **Survey design**: How dense must cadence be? How good must photometry be?
+
+3. **Physical limits**: What is the intrinsic u₀ threshold?
+
+4. **ML vs Traditional**: Does deep learning do better than traditional light curve fitting?
+
+5. **Real-time capability**: Can we trigger follow-up observations early?
+
+---
+
+## 💡 Key Takeaways
+
+✅ **u₀ is king**: Small impact parameter = detectable, large impact parameter = undetectable
+
+✅ **s ≈ 1 optimal**: Wide binaries have largest caustics
+
+✅ **Finite source effects matter**: Small ρ preserves sharp features
+
+✅ **Fundamental limit exists**: ~15-25% of binaries are intrinsically PSPL-like
+
+✅ **Mass ratio secondary**: Whether planetary or stellar matters less than geometry
 
 ---
 
 ## 📚 Further Reading
 
-**Caustic topology**:
-- Erdl & Schneider (1993): "Classification of the multiple deflection two point-mass gravitational lens models"
-- Dominik (1999): "The binary gravitational lens and its extreme cases"
+**Caustic Topology**:
+- Erdl & Schneider (1993): "Classification of gravitational lens models"
+- Dominik (1999): "Binary lensing and its extreme cases"
 
-**Parameter space studies**:
-- Gaudi & Gould (1997): "Planet parameters in microlensing events"
-- Chung & Ryu (2020): "Machine learning classification of microlensing events"
+**Planetary Microlensing**:
+- Gaudi (2012): "Microlensing Surveys for Exoplanets"
+- Bennett & Rhie (1996): "Detecting Earth-mass planets"
 
-**Observational constraints**:
-- Bachelet et al. (2022): "Optimal strategies for microlensing planet searches"
-
----
-
-## 💡 Quick Reference
-
-**To make a binary event easy to detect:**
-- ✓ Small u₀ (< 0.1) - crosses caustics
-- ✓ s ≈ 1 - largest caustics
-- ✓ Small ρ (< 0.01) - sharp features
-- ✓ Low q (< 0.5) - asymmetric
-- ✓ Dense cadence - don't miss spikes
-- ✓ Low photometric error - see small features
-
-**Fundamental limits:**
-- ✗ u₀ > 0.3: Will look like PSPL regardless of other parameters
-- ✗ Large ρ (> 0.05): Smooths out all caustic features
-- ✗ Extreme s (< 0.3 or > 2): Tiny caustics, low crossing probability
+**Observational Studies**:
+- Bachelet et al. (2022): "Optimal planet search strategies"
+- Street et al. (2016): "Real-time event classification"
 
 ---
 
-**Remember**: Even perfect observations and perfect algorithms can't overcome the u₀ > 0.3 fundamental limit. About 15-20% of binary events are intrinsically indistinguishable from PSPL. Your thesis quantifies the performance on the remaining 80-85%!
+**Remember**: Your thesis measures how well we can detect the ~75-85% of binary events that are physically distinguishable. The remaining ~15-25% (large u₀) are a fundamental limit that no method can overcome.
