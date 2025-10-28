@@ -298,7 +298,9 @@ def main():
         for batch_x, _ in tqdm(test_loader, desc='Inference'):
             batch_x = batch_x.to(device)
             outputs = model(batch_x)
-            probs = torch.softmax(outputs[:, -1, :], dim=1)
+            # FIXED: Average across timesteps
+            logits = outputs.mean(dim=1)
+            probs = torch.softmax(logits, dim=1)
             _, preds = torch.max(probs, 1)
             
             all_preds.append(preds.cpu().numpy())
