@@ -1,6 +1,6 @@
 """
 Microlensing event simulation with configurable binary parameters and multiprocessing
-FIXED VERSION - Bug corrections applied
+FIXED VERSION - Bug corrections applied + Fast NPZ save (HPC-safe)
 
 This script generates realistic microlensing light curves using VBMicrolensing.
 Uses multiprocessing to parallelize event generation for significant speedup.
@@ -8,6 +8,7 @@ Uses multiprocessing to parallelize event generation for significant speedup.
 Performance:
 - Serial: ~12 hours for 1M events
 - Parallel (24 cores): ~2-3 hours for 1M events
+- Save: fast uncompressed NPZ (single file), robust on parallel FS
 
 Author: Kunal Bhatia (kunal29bhatia@gmail.com)
 University of Heidelberg
@@ -281,28 +282,47 @@ def simulate_dataset(n_pspl: int, n_binary: int, output_file: str,
     indices = np.random.permutation(len(X))
     X = X[indices]
     y = y[indices]
-    
-    # Save
-    print(f"\nSaving to {output_file}...")
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    
-    np.savez_compressed(
-        output_file, 
-        X=X, 
-        y=y,
-        pspl_params=pspl_params,
-        binary_params_list=binary_params_list,
-        config={
-            'n_pspl': n_pspl,
-            'n_binary': n_binary,
-            'cadence_mask_prob': cadence_mask_prob,
-            'mag_error_std': mag_error_std,
-            'binary_params': binary_params,
-            'random_seed': RANDOM_SEED,
-            'n_points': N_POINTS,
-        }
-    )
-    
+
+    # ---- FAST SAVE: uncompressed NPZ, absolute path, ensured dir, HPC-safe direct write ----
+    print(f"\nSaving to {output_file} (fast uncompressed NPZ)...")
+    # Resolve to absolute path to avoid CWD surprises
+    output_file = os.path.abspath(output_file)
+    # Ensure parent directory exists
+    parent_dir = os.path.dirname(output_file)
+    os.makedirs(parent_dir, exist_ok=True)
+    # Ensure C-contiguous for faster write (compat: no 'copy' kw)
+    X = np.ascontiguousarray(X)
+
+    # Direct write to final NPZ (avoid rename races on parallel FS)
+    try:
+        np.savez(
+            output_file,
+            X=X,
+            y=y,
+            pspl_params=pspl_params,
+            binary_params_list=binary_params_list,
+            config={
+                'n_pspl': n_pspl,
+                'n_binary': n_binary,
+                'cadence_mask_prob': cadence_mask_prob,
+                'mag_error_std': mag_error_std,
+                'binary_params': binary_params,
+                'random_seed': RANDOM_SEED,
+                'n_points': N_POINTS,
+            }
+        )
+    except Exception as e:
+        print(f"ERROR during np.savez: {e}")
+        raise
+
+    # Verify presence and non-empty (guards against FS races)
+    if not os.path.exists(output_file):
+        raise FileNotFoundError(f"np.savez reported success but file not found: {output_file}")
+    size_bytes = os.path.getsize(output_file)
+    if size_bytes == 0:
+        raise IOError(f"np.savez produced an empty file: {output_file}")
+    print(f"  File size: {size_bytes/1e9:.2f} GB")
+
     total_time = time.time() - start_time
     
     # Summary
@@ -312,8 +332,6 @@ def simulate_dataset(n_pspl: int, n_binary: int, output_file: str,
     print(f"\nDataset statistics:")
     print(f"  Total events:       {len(X):,}")
     print(f"  Shape:              {X.shape}")
-    print(f"  Labels:             {dict(zip(*np.unique(y, return_counts=True)))}")
-    print(f"  File size:          {os.path.getsize(output_file) / 1e9:.2f} GB")
     print(f"\nPerformance:")
     print(f"  Total time:         {total_time/60:.1f} minutes ({total_time/3600:.2f} hours)")
     print(f"  Overall rate:       {(n_pspl + n_binary)/total_time:.1f} events/second")

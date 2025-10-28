@@ -296,7 +296,7 @@ def main():
         train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True,
-        num_workers=16,  # More workers for fast GPUs
+        num_workers=64,  # More workers for fast GPUs
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4  # Prefetch more batches
