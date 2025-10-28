@@ -128,7 +128,7 @@ python code/preflight_check.py
 ```bash
 cd code
 
-# Baseline: 1M events (2-3 hours on 24 cores)
+# Baseline: 1M events
 python simulate.py \
     --n_pspl 500000 \
     --n_binary 500000 \
@@ -155,10 +155,6 @@ python train.py \
     --batch_size 512 \
     --experiment_name baseline
 ```
-
-**Training time:**
-- 4× AMD MI300A / NVIDIA A100: ~6-8 hours
-- 1× NVIDIA RTX 4090: ~24-30 hours
 
 ### 4. Evaluate Model
 

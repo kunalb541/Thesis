@@ -1,6 +1,10 @@
 """
-PyTorch training script for microlensing classifier - IMPROVED VERSION
-Fixes: paths, gradient clipping, mixed precision, logging, checkpoints
+PyTorch training script - OPTIMIZED FOR AMD MI300A
+Key improvements:
+- Increased DataLoader workers (16 for training)
+- Added prefetch_factor for better GPU utilization
+- Optimized batch processing
+- Better memory management
 """
 import numpy as np
 import torch
@@ -105,10 +109,10 @@ def train_epoch(model, loader, optimizer, criterion, device, scaler, use_amp=Tru
     
     pbar = tqdm(loader, desc='Training')
     for batch_x, batch_y in pbar:
-        batch_x = batch_x.to(device)
-        batch_y = batch_y.to(device)
+        batch_x = batch_x.to(device, non_blocking=True)  # non_blocking for async transfer
+        batch_y = batch_y.to(device, non_blocking=True)
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
         
         if use_amp:
             with autocast(dtype=torch.bfloat16):
@@ -147,8 +151,8 @@ def validate(model, loader, criterion, device):
     
     with torch.no_grad():
         for batch_x, batch_y in tqdm(loader, desc='Validating'):
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
+            batch_x = batch_x.to(device, non_blocking=True)
+            batch_y = batch_y.to(device, non_blocking=True)
             
             outputs = model(batch_x)
             loss = criterion(outputs[:, -1, :], batch_y)
@@ -187,11 +191,11 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, scal
     return checkpoint['epoch'], checkpoint['val_acc']
 
 def main():
-    parser = argparse.ArgumentParser(description='Train microlensing classifier')
+    parser = argparse.ArgumentParser(description='Train microlensing classifier - OPTIMIZED')
     parser.add_argument('--data', required=True, help='Path to training data (.npz)')
     parser.add_argument('--output', required=True, help='Path to save model (.pt)')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--experiment_name', type=str, default='baseline', help='Experiment name')
     parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
@@ -212,7 +216,7 @@ def main():
     # Setup logging
     logger = setup_logging(results_dir)
     logger.info("="*80)
-    logger.info("MICROLENSING BINARY CLASSIFICATION - TRAINING")
+    logger.info("MICROLENSING BINARY CLASSIFICATION - TRAINING (OPTIMIZED FOR MI300A)")
     logger.info("="*80)
     
     # Setup device
@@ -280,21 +284,27 @@ def main():
     train_dataset = LightCurveDataset(X_train, y_train)
     val_dataset = LightCurveDataset(X_val, y_val)
     
+    # OPTIMIZED DataLoaders for MI300A
+    logger.info("\nConfiguring DataLoaders (optimized for MI300A)...")
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True,
-        num_workers=4,
+        num_workers=16,  # More workers for fast GPUs
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
+        prefetch_factor=4  # Prefetch more batches
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
+        prefetch_factor=4
     )
+    logger.info(f"  Training batches: {len(train_loader)}")
+    logger.info(f"  Validation batches: {len(val_loader)}")
     
     # Build model
     logger.info("\nBuilding model...")
