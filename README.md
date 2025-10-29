@@ -129,6 +129,7 @@ Thesis/
 │   ├── model.py                 # TimeDistributedCNN architecture
 │   ├── config.py                # All experiment configurations
 │   └── utils.py                 # GPU detection, dataset loading
+│   └── preflight_check.py                 # GPU detection, dataset loading
 │
 ├── data/
 │   └── raw/                     # Simulated light curves (.npz)
