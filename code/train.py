@@ -125,9 +125,10 @@ def main():
     )
     # The split ratio calculation for X_val/X_test must use the remaining fraction (1.0 - CFG.TRAIN_SPLIT) as the denominator
     # The original was incorrect. Correcting relative split for consistency with CFG.VAL_SPLIT/CFG.TEST_SPLIT
+# The second split should use train_size (or 1-val_frac as test_size)
     val_frac = CFG.VAL_SPLIT / (CFG.VAL_SPLIT + CFG.TEST_SPLIT)
     X_val, X_test, y_val, y_test = train_test_split(
-        X_tmp, y_tmp, test_size=val_frac, random_state=args.seed, stratify=y_tmp
+        X_tmp, y_tmp, train_size=val_frac, random_state=args.seed, stratify=y_tmp
     )
 
     train_ds = NumpyDataset(X_train, y_train)
