@@ -199,7 +199,7 @@ PAD_VALUE = -1       # unified with simulator
 NORMALIZE_PER_EVENT = True
 
 # Optional fairness: share cadence masks between classes
-USE_SHARED_MASK = False  # FIXED: Enable cadence masking
+USE_SHARED_MASK = False
 MASK_POOL_SIZE = 256
 
 # ============================================================================

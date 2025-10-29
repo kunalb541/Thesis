@@ -4,7 +4,19 @@
 """
 simulate.py — FAST unified generator (PSPL + Binary) for classification
 
-FIXED: Masking now works correctly with USE_SHARED_MASK = False
+Key invariants (anti-leakage):
+  - SAME baseline magnitude range for both classes
+  - Noise added in magnitude space
+  - Identical masking approach for both classes (optionally shared masks)
+  - Convert back to flux the same way
+  - Deferred shuffling: save 'perm' and shuffle at load-time
+
+Speed features:
+  - uint8 labels (0=PSPL, 1=Binary)
+  - Uncompressed NPZ (fast I/O)
+  - Multiprocessing with imap_unordered and tuned chunksize
+  - Preallocated arrays & shared timestamps
+  - Optional per-event median normalization (config.NORMALIZE_PER_EVENT)
 """
 
 from __future__ import annotations
@@ -16,8 +28,9 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Dict, Tuple, Optional, List
 import numpy as np
-from tqdm import tqdm
+from tqdm import tqdm # Adding tqdm for progress bar on parallel map
 
+# Pull global settings from config.py
 try:
     import config as CFG
 except Exception:
@@ -28,6 +41,7 @@ except Exception:
         NORMALIZE_PER_EVENT = True
         USE_SHARED_MASK = False
         MASK_POOL_SIZE = 256
+        # Fallback for BINARY_PARAM_SETS
         BINARY_PARAM_SETS = {'baseline': {
             's_min': 0.7, 's_max': 2.0, 'q_min': 0.1, 'q_max': 0.5, 'rho_min': 0.005, 'rho_max': 0.02,
             'alpha_min': 0.0, 'alpha_max': math.pi / 2, 'tE_min': 50.0, 'tE_max': 200.0,
@@ -35,6 +49,7 @@ except Exception:
         }}
     CFG = _Fallback()
 
+# Globals pulled from config
 PAD_VALUE = float(CFG.PAD_VALUE)
 TIME_MIN = float(CFG.TIME_MIN)
 TIME_MAX = float(CFG.TIME_MAX)
@@ -42,12 +57,14 @@ NORMALIZE_PER_EVENT = bool(getattr(CFG, "NORMALIZE_PER_EVENT", True))
 USE_SHARED_MASK = bool(getattr(CFG, "USE_SHARED_MASK", False))
 MASK_POOL_SIZE = int(getattr(CFG, "MASK_POOL_SIZE", 256))
 
+# Baseline magnitude range (same for both classes)
 BASELINE_MIN = 19.0
 BASELINE_MAX = 22.0
 
+# Try to import VBMicrolensing if available
 _VBM = None
 try:
-    import VBBinaryLensing as VBBL
+    import VBBinaryLensing as VBBL  # noqa: F401
     from VBBinaryLensing import VBBinaryLensing
     _VBM = VBBinaryLensing()
 except Exception:
@@ -56,6 +73,7 @@ except Exception:
 
 @dataclass
 class PSPLRanges:
+    # Use config values if available, else fallback to hardcoded
     t0_min: float = getattr(CFG, "PSPL_T0_MIN", -20.0)
     t0_max: float = getattr(CFG, "PSPL_T0_MAX", 20.0)
     u0_min: float = getattr(CFG, "PSPL_U0_MIN", 0.01)
@@ -80,7 +98,7 @@ class BinaryRanges:
     t0_max: float = 20.0
     u0_min: float = 0.1
     u0_max: float = 0.3
-    
+    # Use kwargs to override defaults when instantiated from BINARY_PARAM_SETS
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -106,17 +124,17 @@ def _set_np_seed(seed: Optional[int]):
 def _maybe_norm_event(flux: np.ndarray) -> np.ndarray:
     if not NORMALIZE_PER_EVENT:
         return flux
-    finite = np.isfinite(flux) & (flux != PAD_VALUE)
+    finite = np.isfinite(flux) & (flux != PAD_VALUE) # Consider PAD_VALUE as non-finite for median
     if finite.any():
+        # Compute median excluding PAD_VALUE
         m = np.median(flux[finite])
         if m > 0:
             flux = flux / m
     return flux
 
 
-# FIX: Updated worker functions to accept cadence_mask_prob and generate masks
-def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, float, Optional[np.ndarray], PSPLRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
-    seed, timestamps, mag_error_std, cadence_mask_prob, mask, ranges = args
+def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, Optional[np.ndarray], PSPLRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
+    seed, timestamps, mag_error_std, mask, ranges = args
     _set_np_seed(seed)
     
     t0 = np.random.uniform(ranges.t0_min, ranges.t0_max)
@@ -131,10 +149,6 @@ def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, float, Option
     if mag_error_std > 0:
         magnitudes += np.random.normal(0.0, mag_error_std, size=magnitudes.shape)
 
-    # FIX: Generate mask if not provided
-    if mask is None and cadence_mask_prob > 0:
-        mask = np.random.rand(len(timestamps)) < cadence_mask_prob
-    
     if mask is not None:
         magnitudes[mask] = np.nan
     
@@ -145,8 +159,8 @@ def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, float, Option
     return flux_padded.astype(np.float32), params
 
 
-def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, float, Optional[np.ndarray], BinaryRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
-    seed, timestamps, mag_error_std, cadence_mask_prob, mask, ranges = args
+def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, Optional[np.ndarray], BinaryRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
+    seed, timestamps, mag_error_std, mask, ranges = args
     _set_np_seed(seed)
     
     s = np.random.uniform(ranges.s_min, ranges.s_max)
@@ -170,9 +184,11 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, float, Opti
             magnifications = np.array(_VBM.BinaryLightCurve(params_vbm, timestamps)[0], dtype=np.float64)
             magnifications = np.clip(magnifications, 1e-6, None)
         except Exception:
+            # Fallback to PSPL if VBMicrolensing fails
             u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
             magnifications = _pspl_magnification(u_t)
     else:
+        # If VBMicrolensing is not installed, always fallback to PSPL (simplified binary event)
         u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
         magnifications = _pspl_magnification(u_t)
 
@@ -181,10 +197,6 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, float, Opti
     if mag_error_std > 0:
         magnitudes += np.random.normal(0.0, mag_error_std, size=magnitudes.shape)
 
-    # FIX: Generate mask if not provided
-    if mask is None and cadence_mask_prob > 0:
-        mask = np.random.rand(len(timestamps)) < cadence_mask_prob
-    
     if mask is not None:
         magnitudes[mask] = np.nan
     
@@ -224,15 +236,17 @@ def build_dataset(n_pspl: int,
     _set_np_seed(seed)
     timestamps = np.linspace(TIME_MIN, TIME_MAX, n_points, dtype=np.float64)
 
-    pspl_ranges = PSPLRanges()
+    pspl_ranges = PSPLRanges() # PSPL ranges are fixed/pulled from config
+    # binary_ranges is passed as an argument (Fixed #5)
 
     N = n_pspl + n_binary
     X = np.empty((N, n_points), dtype=np.float32)
-    y = np.empty((N,), dtype=np.uint8)
+    y = np.empty((N,), dtype=np.uint8)  # 0=PSPL, 1=Binary
 
     params_pspl: Optional[List[Dict]] = [] if save_params else None
     params_binary: Optional[List[Dict]] = [] if save_params else None
 
+    # Precompute shared masks (if enabled)
     shared_masks: Optional[List[np.ndarray]] = None
     if USE_SHARED_MASK:
         rng = np.random.RandomState(seed if seed is not None else None)
@@ -245,17 +259,17 @@ def build_dataset(n_pspl: int,
             return None
         return shared_masks[i % MASK_POOL_SIZE]
 
-    # FIX: Pass cadence_mask_prob to workers
     pspl_args = [
-        (None if seed is None else seed + i, timestamps, mag_error_std, cadence_mask_prob, pick_mask(i), pspl_ranges)
+        (None if seed is None else seed + i, timestamps, mag_error_std, pick_mask(i), pspl_ranges)
         for i in range(n_pspl)
     ]
     binary_args = [
-        (None if seed is None else seed + 10_000 + i, timestamps, mag_error_std, cadence_mask_prob, pick_mask(i), binary_ranges)
+        (None if seed is None else seed + 10_000 + i, timestamps, mag_error_std, pick_mask(i), binary_ranges)
         for i in range(n_binary)
     ]
 
     idx = 0
+    # PSPL events
     for flux, params in _parallel_map_unordered(generate_pspl_event_worker, pspl_args, num_workers):
         X[idx, :] = flux
         y[idx] = 0
@@ -263,6 +277,7 @@ def build_dataset(n_pspl: int,
             params_pspl.append(params)
         idx += 1
 
+    # Binary events
     for flux, params in _parallel_map_unordered(generate_binary_event_worker, binary_args, num_workers):
         X[idx, :] = flux
         y[idx] = 1
@@ -289,7 +304,7 @@ def build_dataset(n_pspl: int,
         "TIME_MAX": TIME_MAX,
         "vbmicrolensing_available": bool(_VBM is not None),
         "pspl_ranges": asdict(pspl_ranges),
-        "binary_ranges": asdict(binary_ranges),
+        "binary_ranges": asdict(binary_ranges), # Now includes the specific ranges used
         "label_map": {0: "PSPL", 1: "Binary"},
         "shuffle_perm_available": True,
         "perm_seed": seed,
@@ -321,6 +336,7 @@ def save_npz(path: str,
         out["params_pspl_json"] = np.array(json.dumps(params_pspl))
     if params_binary is not None:
         out["params_binary_json"] = np.array(json.dumps(params_binary))
+    # Fastest I/O: uncompressed
     np.savez(path, **out)
     print(f"Saved dataset to: {path}")
     print(f"Shapes: X={X.shape}, y={y.shape}, timestamps={timestamps.shape}, perm={perm.shape}")
@@ -337,6 +353,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=str, default="data/raw/events_fast.npz")
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--save-params", action="store_true")
+    # FIX #5: Added --binary_params CLI argument
     choices = list(CFG.BINARY_PARAM_SETS.keys())
     p.add_argument("--binary_params", type=str, default="baseline", choices=choices, 
                    help=f"Select binary parameter set from config: {choices}")
@@ -346,6 +363,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     
+    # Get binary parameter ranges (FIX #5)
     binary_ranges_data = CFG.BINARY_PARAM_SETS.get(args.binary_params, CFG.BINARY_PARAM_SETS['baseline'])
     binary_ranges = BinaryRanges(**binary_ranges_data)
     
@@ -377,7 +395,7 @@ def main():
         seed=args.seed,
         save_params=args.save_params,
         num_workers=args.num_workers,
-        binary_ranges=binary_ranges
+        binary_ranges=binary_ranges # Pass the correct ranges
     )
 
     save_npz(args.output, X, y, timestamps, meta, p_pspl, p_bin, perm)
