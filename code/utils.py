@@ -1,320 +1,286 @@
 """
 Utility functions for microlensing classification
-Supports both AMD (ROCm) and NVIDIA (CUDA) GPUs
+- GPU detection for NVIDIA (CUDA) and AMD (ROCm)
+- Dataset loading with saved permutation support
+- Normalization, padding helpers, shared mask generation
+- Lightweight plotting helpers
+
+Author: Kunal Bhatia
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-import json
+from __future__ import annotations
+
 import os
-import sys
+import json
+from typing import Tuple, List, Optional
 
-def detect_gpu_backend():
+import numpy as np
+
+# Try to import config for consistent settings (PAD_VALUE, plotting style, etc.)
+try:
+    import config as CFG
+except Exception:
+    class _Fallback:
+        PAD_VALUE = -1
+        PLOT_STYLE = None
+    CFG = _Fallback()
+
+# ---------------------------------------------------------------------------
+# GPU utilities (Torch optional)
+# ---------------------------------------------------------------------------
+
+def detect_gpu_backend() -> str:
     """
-    Detect which GPU backend is available
-    Returns: 'amd', 'nvidia', or 'cpu'
+    Detect the available GPU backend.
+    Returns:
+        'nvidia' if CUDA is available
+        'amd'    if ROCm/HIP is available
+        'cpu'    otherwise
+    """
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        return "cpu"
+
+    import torch
+    if torch.cuda.is_available():
+        # NVIDIA CUDA is available
+        # (Some ROCm builds may also report cuda available; prefer explicit HIP check next)
+        if hasattr(torch.version, "hip") and torch.version.hip:
+            return "amd"
+        return "nvidia"
+    # CUDA not available; check for HIP explicitly
+    if hasattr(torch.version, "hip") and torch.version.hip:
+        return "amd"
+    return "cpu"
+
+
+def check_gpu_availability() -> int:
+    """
+    Returns number of visible GPUs (0 if none).
     """
     try:
         import torch
-        if torch.cuda.is_available():
-            # Check if it's AMD or NVIDIA
-            device_name = torch.cuda.get_device_name(0).lower()
-            if 'amd' in device_name or 'mi' in device_name or 'radeon' in device_name:
-                return 'amd'
-            else:
-                return 'nvidia'
-    except ImportError:
-        pass
-    
-    return 'cpu'
-
-def check_gpu_availability():
-    """
-    Check GPU availability and provide detailed information
-    Works for both PyTorch (AMD/NVIDIA) and TensorFlow
-    """
-    print("=" * 60)
-    print("GPU AVAILABILITY CHECK")
-    print("=" * 60)
-    
-    backend = detect_gpu_backend()
-    print(f"\nDetected backend: {backend.upper()}")
-    
-    # Try PyTorch
-    try:
-        import torch
-        print(f"\nPyTorch version: {torch.__version__}")
-        
-        if torch.cuda.is_available():
-            num_gpus = torch.cuda.device_count()
-            print(f"Number of GPUs detected: {num_gpus}")
-            
-            for i in range(num_gpus):
-                print(f"\nGPU {i}:")
-                print(f"  Name: {torch.cuda.get_device_name(i)}")
-                
-                # Get memory info
-                if hasattr(torch.cuda, 'get_device_properties'):
-                    props = torch.cuda.get_device_properties(i)
-                    total_memory = props.total_memory / 1e9
-                    print(f"  Total Memory: {total_memory:.2f} GB")
-                
-                # Current memory usage
-                if hasattr(torch.cuda, 'memory_allocated'):
-                    allocated = torch.cuda.memory_allocated(i) / 1e9
-                    cached = torch.cuda.memory_reserved(i) / 1e9
-                    print(f"  Allocated: {allocated:.2f} GB")
-                    print(f"  Cached: {cached:.2f} GB")
-            
-            # Test computation
-            print("\nTesting GPU computation...")
-            try:
-                x = torch.randn(1000, 1000, device='cuda')
-                y = torch.randn(1000, 1000, device='cuda')
-                z = torch.matmul(x, y)
-                torch.cuda.synchronize()
-                print("✓ GPU computation test passed")
-            except Exception as e:
-                print(f"✗ GPU computation test failed: {e}")
-            
-            print("=" * 60)
-            return num_gpus
-        else:
-            print("\n⚠ WARNING: PyTorch installed but no GPUs detected!")
-            print("Training will run on CPU (very slow)")
-            print("=" * 60)
-            return 0
-            
-    except ImportError:
-        print("\n⚠ PyTorch not installed")
-        print("Install with:")
-        if backend == 'amd':
-            print("  pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0")
-        else:
-            print("  pip install torch torchvision")
-        print("=" * 60)
+    except Exception:
         return 0
 
-def setup_gpu_environment():
+    if detect_gpu_backend() in ("nvidia", "amd") and torch.cuda.is_available():
+        try:
+            return torch.cuda.device_count()
+        except Exception:
+            return 0
+    return 0
+
+
+def get_device_name() -> str:
     """
-    Setup environment variables for optimal GPU performance
-    Works for both AMD and NVIDIA
+    Human-friendly device string.
+    """
+    try:
+        import torch
+    except Exception:
+        return "cpu"
+
+    if not torch.cuda.is_available():
+        return "cpu"
+
+    count = torch.cuda.device_count()
+    names = []
+    for i in range(count):
+        try:
+            names.append(torch.cuda.get_device_name(i))
+        except Exception:
+            names.append(f"GPU{i}")
+    return ", ".join(names) if names else "gpu"
+
+
+def setup_gpu_environment(verbose: bool = True) -> str:
+    """
+    Set a few environment toggles for stability/perf.
+    Returns backend: 'nvidia' | 'amd' | 'cpu'
     """
     backend = detect_gpu_backend()
-    
-    print(f"\nConfiguring {backend.upper()} GPU environment...")
-    
-    if backend == 'amd':
-        # AMD ROCm settings
-        os.environ['ROCR_VISIBLE_DEVICES'] = '0,1,2,3'
-        os.environ['HIP_VISIBLE_DEVICES'] = '0,1,2,3'
-        print("  Set ROCR_VISIBLE_DEVICES=0,1,2,3")
-        print("  Set HIP_VISIBLE_DEVICES=0,1,2,3")
-    elif backend == 'nvidia':
-        # NVIDIA CUDA settings
-        os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-        print("  Set CUDA_VISIBLE_DEVICES=0,1,2,3")
-    
-    # Common PyTorch optimizations
-    os.environ['OMP_NUM_THREADS'] = '24'
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
-    print("  Set OMP_NUM_THREADS=24")
-    print("  Set PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512")
-    
+
+    # Determinism toggles (leave to training script for strict reproducibility)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "0")
+
+    if verbose:
+        print(f"[utils] Detected backend: {backend}")
+        if backend != "cpu":
+            try:
+                import torch
+                print(f"[utils] GPUs visible: {torch.cuda.device_count()}")
+                for i in range(torch.cuda.device_count()):
+                    props = torch.cuda.get_device_properties(i)
+                    gmem = getattr(props, "total_memory", 0) / 1e9
+                    print(f"  - GPU {i}: {props.name} | {gmem:.2f} GB")
+            except Exception:
+                pass
     return backend
 
-def get_device_name():
-    """Get a descriptive name for the compute device"""
-    backend = detect_gpu_backend()
-    
-    if backend in ['amd', 'nvidia']:
-        try:
-            import torch
-            return f"{backend.upper()} - {torch.cuda.get_device_name(0)}"
-        except:
-            return backend.upper()
-    else:
-        return "CPU"
 
-def plot_training_history(history_dict, save_path):
-    """Plot training and validation metrics"""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # Loss
-    axes[0].plot(history_dict['train_loss'], label='Train Loss', linewidth=2)
-    axes[0].plot(history_dict['val_loss'], label='Val Loss', linewidth=2)
-    axes[0].set_xlabel('Epoch', fontsize=12)
-    axes[0].set_ylabel('Loss', fontsize=12)
-    axes[0].set_title('Training and Validation Loss', fontsize=14)
-    axes[0].legend(fontsize=11)
-    axes[0].grid(alpha=0.3)
-    
-    # Accuracy
-    axes[1].plot(history_dict['train_acc'], label='Train Accuracy', linewidth=2)
-    axes[1].plot(history_dict['val_acc'], label='Val Accuracy', linewidth=2)
-    axes[1].set_xlabel('Epoch', fontsize=12)
-    axes[1].set_ylabel('Accuracy', fontsize=12)
-    axes[1].set_title('Training and Validation Accuracy', fontsize=14)
-    axes[1].legend(fontsize=11)
-    axes[1].grid(alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Training history plot saved to {save_path}")
-
-def plot_light_curve(timestamps, flux, title="Light Curve", save_path=None):
-    """Plot a single light curve"""
-    plt.figure(figsize=(12, 6))
-    plt.plot(timestamps, flux, 'o-', markersize=3, linewidth=1)
-    plt.xlabel('Time (days)', fontsize=12)
-    plt.ylabel('Flux', fontsize=12)
-    plt.title(title, fontsize=14)
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
-
-def plot_sample_events(data_path, n_samples=6, save_path=None):
-    """Plot sample PSPL and Binary events"""
-    data = np.load(data_path)
-    X = data['X']
-    y = data['y']
-    
-    # Get indices for each class
-    pspl_idx = np.where(y == 'PSPL')[0]
-    binary_idx = np.where(y == 'Binary')[0]
-    
-    # Random sample
-    pspl_samples = np.random.choice(pspl_idx, n_samples // 2, replace=False)
-    binary_samples = np.random.choice(binary_idx, n_samples // 2, replace=False)
-    
-    fig, axes = plt.subplots(2, n_samples // 2, figsize=(15, 6))
-    
-    # Plot PSPL samples
-    for i, idx in enumerate(pspl_samples):
-        timestamps = np.arange(X.shape[1])
-        flux = X[idx, :, 0]
-        axes[0, i].plot(timestamps, flux, 'b-', linewidth=1)
-        axes[0, i].set_title(f'PSPL Event {idx}', fontsize=10)
-        axes[0, i].set_xlabel('Time Step', fontsize=9)
-        axes[0, i].set_ylabel('Flux', fontsize=9)
-        axes[0, i].grid(alpha=0.3)
-    
-    # Plot Binary samples
-    for i, idx in enumerate(binary_samples):
-        timestamps = np.arange(X.shape[1])
-        flux = X[idx, :, 0]
-        axes[1, i].plot(timestamps, flux, 'r-', linewidth=1)
-        axes[1, i].set_title(f'Binary Event {idx}', fontsize=10)
-        axes[1, i].set_xlabel('Time Step', fontsize=9)
-        axes[1, i].set_ylabel('Flux', fontsize=9)
-        axes[1, i].grid(alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
-
-def load_experiment_results(results_dir):
-    """Load all experiment results for comparison"""
-    results = []
-    
-    if not os.path.exists(results_dir):
-        print(f"Results directory not found: {results_dir}")
-        return results
-    
-    for exp_name in os.listdir(results_dir):
-        exp_path = os.path.join(results_dir, exp_name)
-        if not os.path.isdir(exp_path):
-            continue
-        
-        metrics_path = os.path.join(exp_path, 'metrics.json')
-        config_path = os.path.join(exp_path, 'config.json')
-        
-        if os.path.exists(metrics_path):
-            with open(metrics_path, 'r') as f:
-                metrics = json.load(f)
-            
-            config = {}
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-            
-            results.append({
-                'experiment': exp_name,
-                'metrics': metrics,
-                'config': config
-            })
-    
-    return results
-
-def compare_experiments(results_dir, save_path=None):
-    """Compare multiple experiments"""
-    results = load_experiment_results(results_dir)
-    
-    if not results:
-        print("No results found to compare")
+def print_gpu_summary() -> None:
+    """
+    Pretty-print a one-shot GPU summary.
+    """
+    backend = setup_gpu_environment(verbose=False)
+    try:
+        import torch
+    except Exception:
+        print("GPU: CPU only (PyTorch not installed).")
         return
-    
-    # Extract experiment names and accuracies
-    names = [r['experiment'] for r in results]
-    accuracies = [r['metrics'].get('accuracy', 0) for r in results]
-    
-    # Sort by accuracy
-    sorted_indices = np.argsort(accuracies)[::-1]
-    names = [names[i] for i in sorted_indices]
-    accuracies = [accuracies[i] for i in sorted_indices]
-    
-    # Plot
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    bars = ax.bar(range(len(names)), accuracies, alpha=0.7)
-    ax.set_xticks(range(len(names)))
-    ax.set_xticklabels(names, rotation=45, ha='right')
-    ax.set_ylabel('Test Accuracy', fontsize=12)
-    ax.set_title('Experiment Comparison', fontsize=14)
-    ax.set_ylim([0.80, 1.0])
-    ax.grid(alpha=0.3, axis='y')
-    
-    # Color bars by performance
-    for i, bar in enumerate(bars):
-        if accuracies[i] >= 0.95:
-            bar.set_color('green')
-        elif accuracies[i] >= 0.90:
-            bar.set_color('orange')
+
+    if not torch.cuda.is_available():
+        print("GPU: CPU only (no CUDA/HIP device).")
+        return
+
+    n = torch.cuda.device_count()
+    print(f"GPU backend: {backend} | {n} device(s)")
+    for i in range(n):
+        props = torch.cuda.get_device_properties(i)
+        total_gb = getattr(props, "total_memory", 0) / 1e9
+        print(f"  [{i}] {props.name} | {total_gb:.2f} GB")
+
+# ---------------------------------------------------------------------------
+# Dataset helpers
+# ---------------------------------------------------------------------------
+
+def load_npz_dataset(npz_path: str, apply_perm: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """
+    Load dataset produced by simulate.py.
+    - Applies saved permutation if present
+    - Maps string labels to uint8 if necessary
+
+    Returns:
+        X: (N, L) float32
+        y: (N,) uint8 (0=PSPL, 1=Binary)
+        timestamps: (L,) float64
+        meta: dict
+    """
+    d = np.load(npz_path, allow_pickle=False)
+    X = d["X"]
+    y = d["y"]
+    if apply_perm and "perm" in d.files:
+        perm = d["perm"]
+        X = X[perm]
+        y = y[perm]
+
+    # Normalize label dtype
+    if y.dtype.kind in ("U", "S", "O"):
+        y = np.array([0 if (str(v).lower().startswith("pspl")) else 1 for v in y], dtype=np.uint8)
+    else:
+        y = y.astype(np.uint8, copy=False)
+
+    timestamps = d["timestamps"]
+    meta = {}
+    if "meta_json" in d.files:
+        try:
+            meta = json.loads(d["meta_json"].item())
+        except Exception:
+            meta = {}
+    return X, y, timestamps, meta
+
+
+def apply_pad_to_zero(X: np.ndarray, pad_value: Optional[float] = None) -> np.ndarray:
+    """
+    Replace PAD_VALUE entries with 0.0 (neutral for convs).
+    Returns a new array (does not modify in-place).
+    """
+    if pad_value is None:
+        pad_value = getattr(CFG, "PAD_VALUE", -1)
+    X = X.copy()
+    X[X == pad_value] = 0.0
+    return X
+
+
+def normalize_per_event(X: np.ndarray, pad_value: Optional[float] = None) -> np.ndarray:
+    """
+    Divide each row by its median ignoring PAD_VALUE entries.
+    Returns a new array.
+    """
+    if pad_value is None:
+        pad_value = getattr(CFG, "PAD_VALUE", -1)
+    X = X.copy()
+    finite = np.isfinite(X) & (X != pad_value)
+    # Compute per-row median safely
+    med = np.zeros(X.shape[0], dtype=np.float64)
+    for i in range(X.shape[0]):
+        mask = finite[i]
+        if mask.any():
+            med[i] = np.nanmedian(X[i, mask])
         else:
-            bar.set_color('red')
-    
-    plt.tight_layout()
-    
+            med[i] = 1.0
+    med[med <= 0] = 1.0
+    X[finite] = X[finite] / med[:, None][finite]
+    return X
+
+
+def generate_shared_masks(n_points: int, prob: float, pool_size: int, seed: Optional[int] = None) -> List[np.ndarray]:
+    """
+    Create a pool of boolean masks (True = missing) with given probability.
+    """
+    rng = np.random.RandomState(seed if seed is not None else None)
+    masks = [(rng.rand(n_points) < prob) for _ in range(max(0, int(pool_size)))]
+    return masks
+
+# ---------------------------------------------------------------------------
+# Plotting helpers
+# ---------------------------------------------------------------------------
+
+def _maybe_set_style():
+    style = getattr(CFG, "PLOT_STYLE", None)
+    if style:
+        try:
+            import matplotlib.pyplot as plt  # noqa
+            plt.style.use(style)
+        except Exception:
+            pass
+
+def plot_lightcurve(t: np.ndarray, f: np.ndarray, title: str = "", save_path: Optional[str] = None):
+    """
+    Quick plot of a single light curve.
+    Treat PAD_VALUE as missing.
+    """
+    _maybe_set_style()
+    import matplotlib.pyplot as plt
+
+    pad_value = getattr(CFG, "PAD_VALUE", -1)
+    mask = np.isfinite(f) & (f != pad_value)
+
+    fig = plt.figure(figsize=(10, 4))
+    ax = fig.add_subplot(111)
+    ax.plot(t[mask], f[mask], lw=1.0)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Flux (arb.)")
+    if title:
+        ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Comparison plot saved to {save_path}")
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=getattr(CFG, "DPI", 150))
+        plt.close(fig)
     else:
         plt.show()
+
+# ---------------------------------------------------------------------------
+# Simple sanity checks
+# ---------------------------------------------------------------------------
+
+def class_mean_flux(X: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Return mean flux per class (pre-shuffle values). Useful for quick diagnostics.
+    """
+    m0 = X[y == 0].mean() if np.any(y == 0) else float("nan")
+    m1 = X[y == 1].mean() if np.any(y == 1) else float("nan")
+    diff = abs(m0 - m1) if (np.isfinite(m0) and np.isfinite(m1)) else float("nan")
+    return float(m0), float(m1), float(diff)
+
 
 if __name__ == "__main__":
-    # Quick test
-    print("\n" + "="*60)
-    print("GPU DETECTION AND SETUP")
-    print("="*60)
-    
-    num_gpus = check_gpu_availability()
-    
-    if num_gpus > 0:
-        backend = setup_gpu_environment()
-        device_name = get_device_name()
-        print(f"\n✓ Ready to train on: {device_name}")
-    else:
-        print("\n⚠ No GPUs available. Training will be very slow on CPU.")
-    
-    print("="*60)
+    # On-demand self-test
+    print("[utils] Backend:", detect_gpu_backend())
+    print("[utils] GPUs:", check_gpu_availability())
+    print("[utils] Device(s):", get_device_name())

@@ -1,402 +1,243 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-PyTorch evaluation script - IMPROVED VERSION
-Adds: early detection analysis, better error handling, batched inference
+evaluate.py — Evaluate a trained model on an NPZ dataset
+- Loads NPZ (applies saved permutation if present)
+- Uses PAD_VALUE from config for preprocessing
+- Computes Accuracy, ROC-AUC, PR-AUC, Confusion Matrix
+- Optional early-detection analysis using fractions from config
+- Optional plots (ROC, PR, confusion matrix)
+
+Usage:
+  python evaluate.py --model models/baseline.pt --data data/raw/events_baseline_1M.npz --plots results/plots
+
+Author: Kunal Bhatia
 """
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_recall_curve
-from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
+
+from __future__ import annotations
+
 import argparse
 import os
 import json
-import joblib
-import sys
 from pathlib import Path
-from tqdm import tqdm
+from typing import Dict, Tuple, Optional, List
 
-class TimeDistributedCNN(nn.Module):
-    def __init__(self, sequence_length=1500, num_channels=1, num_classes=2):
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_curve, average_precision_score
+
+# Local imports
+import config as CFG
+from utils import load_npz_dataset, apply_pad_to_zero
+
+# -------------------------
+# Model (must match train)
+# -------------------------
+
+class CNN1D(nn.Module):
+    def __init__(self, input_len: int):
         super().__init__()
-        self.conv1 = nn.Conv1d(num_channels, 128, kernel_size=5, padding=2)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.conv2 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.conv3 = nn.Conv1d(64, 32, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm1d(32)
-        self.dropout = nn.Dropout(0.3)
-        self.relu = nn.ReLU()
-        self.fc1 = nn.Linear(32, 64)
-        self.fc2 = nn.Linear(64, num_classes)
-        
-    def forward(self, x):
-        x = x.transpose(1, 2)
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.dropout(x)
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = self.dropout(x)
-        x = self.relu(self.bn3(self.conv3(x)))
-        x = self.dropout(x)
-        x = x.transpose(1, 2)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+        c1, c2, c3 = CFG.CONV1_FILTERS, CFG.CONV2_FILTERS, CFG.CONV3_FILTERS
+        self.net = nn.Sequential(
+            nn.Conv1d(1, c1, kernel_size=9, padding=4),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
 
-class LightCurveDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.FloatTensor(X)
-        self.y = torch.LongTensor(y)
-    
+            nn.Conv1d(c1, c2, kernel_size=7, padding=3),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(c2, c3, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(c3, CFG.FC1_UNITS),
+            nn.ReLU(inplace=True),
+            nn.Dropout(CFG.DROPOUT_RATE),
+            nn.Linear(CFG.FC1_UNITS, 2),
+        )
+
+    def forward(self, x):
+        z = self.net(x)
+        return self.head(z)
+
+# -------------------------
+# Dataset wrapper
+# -------------------------
+
+class NumpyDataset(Dataset):
+    def __init__(self, X: np.ndarray, y: np.ndarray):
+        X = apply_pad_to_zero(X, pad_value=CFG.PAD_VALUE)
+        self.X = torch.from_numpy(X).float().unsqueeze(1)  # [N, 1, L]
+        self.y = torch.from_numpy(y).long()
+
     def __len__(self):
-        return len(self.X)
-    
+        return self.X.shape[0]
+
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-def plot_confusion_matrix(y_true, y_pred, save_path):
-    """Plot confusion matrix"""
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['PSPL', 'Binary'],
-                yticklabels=['PSPL', 'Binary'])
-    plt.title('Confusion Matrix', fontsize=14)
-    plt.ylabel('True Label', fontsize=12)
-    plt.xlabel('Predicted Label', fontsize=12)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✓ Confusion matrix saved to {save_path}")
+# -------------------------
+# Evaluation helpers
+# -------------------------
 
-def plot_roc(y_true, y_probs, save_path):
-    """Plot ROC curve"""
-    fpr, tpr, _ = roc_curve(y_true, y_probs)
-    roc_auc = auc(fpr, tpr)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, lw=2, label=f'ROC (AUC = {roc_auc:.4f})')
-    plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random')
-    plt.xlabel('False Positive Rate', fontsize=12)
-    plt.ylabel('True Positive Rate', fontsize=12)
-    plt.title('ROC Curve', fontsize=14)
-    plt.legend(fontsize=11)
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✓ ROC curve saved to {save_path}")
-    return roc_auc
-
-def plot_precision_recall(y_true, y_probs, save_path):
-    """Plot Precision-Recall curve"""
-    precision, recall, _ = precision_recall_curve(y_true, y_probs)
-    pr_auc = auc(recall, precision)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(recall, precision, lw=2, label=f'PR (AUC = {pr_auc:.4f})')
-    plt.xlabel('Recall', fontsize=12)
-    plt.ylabel('Precision', fontsize=12)
-    plt.title('Precision-Recall Curve', fontsize=14)
-    plt.legend(fontsize=11)
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✓ Precision-Recall curve saved to {save_path}")
-    return pr_auc
-
-def evaluate_early_detection(model, loader, device, checkpoints=[0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0]):
-    """
-    Evaluate classification accuracy at different fractions of observation.
-    This tests the model's ability to classify events before they complete.
-    """
-    print("\n" + "="*60)
-    print("EARLY DETECTION ANALYSIS")
-    print("="*60)
-    
+@torch.no_grad()
+def run_inference(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
     model.eval()
-    all_outputs = []
-    all_labels = []
-    
-    # Get all predictions
-    with torch.no_grad():
-        for batch_x, batch_y in tqdm(loader, desc='Computing predictions'):
-            batch_x = batch_x.to(device)
-            outputs = model(batch_x)  # (batch, time, classes)
-            all_outputs.append(outputs.cpu())
-            all_labels.append(batch_y)
-    
-    # Concatenate
-    all_outputs = torch.cat(all_outputs, dim=0)  # (N, time, classes)
-    all_labels = torch.cat(all_labels, dim=0)    # (N,)
-    
-    n_timesteps = all_outputs.shape[1]
-    results = {}
-    
-    print(f"\nEvaluating at {len(checkpoints)} checkpoints:")
-    for frac in checkpoints:
-        timestep = int(n_timesteps * frac) - 1
-        timestep = max(0, min(timestep, n_timesteps - 1))
-        
-        # Get predictions at this timestep
-        probs = torch.softmax(all_outputs[:, timestep, :], dim=1)
-        _, preds = torch.max(probs, 1)
-        
-        # Calculate accuracy
-        acc = (preds == all_labels).float().mean().item()
-        results[frac] = acc
-        
-        print(f"  {frac*100:5.1f}% observed (t={timestep:4d}): Accuracy = {acc:.4f}")
-    
-    return results
+    logits_list, labels_list = [], []
+    for xb, yb in loader:
+        xb = xb.to(device)
+        out = model(xb)
+        logits_list.append(out.cpu().numpy())
+        labels_list.append(yb.numpy())
+    logits = np.concatenate(logits_list, axis=0)
+    labels = np.concatenate(labels_list, axis=0)
+    return logits, labels
 
-def plot_early_detection(results, save_path):
-    """Plot early detection curve"""
-    fractions = sorted(results.keys())
-    accuracies = [results[f] for f in fractions]
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot([f*100 for f in fractions], accuracies, 'o-', 
-             linewidth=2, markersize=10, color='#2E86AB')
-    
-    # Add horizontal lines for reference
-    plt.axhline(y=0.90, color='green', linestyle='--', linewidth=1.5, 
-                label='90% threshold', alpha=0.7)
-    plt.axhline(y=0.95, color='orange', linestyle='--', linewidth=1.5,
-                label='95% threshold', alpha=0.7)
-    
-    plt.xlabel('Fraction of Event Observed (%)', fontsize=12)
-    plt.ylabel('Classification Accuracy', fontsize=12)
-    plt.title('Real-Time Classification Performance', fontsize=14, pad=20)
-    plt.legend(fontsize=11)
-    plt.grid(alpha=0.3)
-    plt.ylim([0.75, 1.0])
+def compute_metrics(logits: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
+    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
+    p1 = probs[:, 1]
+    preds = probs.argmax(axis=1)
+
+    acc = (preds == labels).mean().item()
+    fpr, tpr, _ = roc_curve(labels, p1)
+    roc_auc = auc(fpr, tpr)
+
+    precision, recall, _ = precision_recall_curve(labels, p1)
+    pr_auc = auc(recall, precision)
+    ap = average_precision_score(labels, p1)
+
+    cm = confusion_matrix(labels, preds)
+    return {
+        "accuracy": float(acc),
+        "roc_auc": float(roc_auc),
+        "pr_auc": float(pr_auc),
+        "average_precision": float(ap),
+        "tn": int(cm[0,0]), "fp": int(cm[0,1]), "fn": int(cm[1,0]), "tp": int(cm[1,1]),
+    }
+
+def early_detection_subset(X: np.ndarray, frac: float) -> np.ndarray:
+    """
+    Crop each sequence to the first `frac` fraction, pad the rest to PAD_VALUE -> then 0.0 for convs.
+    """
+    L = X.shape[1]
+    keep = max(1, int(np.ceil(L * frac)))
+    X_early = np.full_like(X, fill_value=CFG.PAD_VALUE)
+    X_early[:, :keep] = X[:, :keep]
+    X_early = apply_pad_to_zero(X_early, pad_value=CFG.PAD_VALUE)
+    return X_early
+
+def plot_curves(save_dir: Optional[str], logits: np.ndarray, labels: np.ndarray):
+    if not save_dir:
+        return
+    os.makedirs(save_dir, exist_ok=True)
+    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()[:, 1]
+
+    # ROC
+    fpr, tpr, _ = roc_curve(labels, probs)
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC={auc(fpr,tpr):.3f}")
+    plt.plot([0,1], [0,1], linestyle="--")
+    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate"); plt.title("ROC Curve"); plt.legend()
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, "roc.png"), dpi=getattr(CFG, "DPI", 150))
     plt.close()
-    print(f"✓ Early detection curve saved to {save_path}")
+
+    # PR
+    precision, recall, _ = precision_recall_curve(labels, probs)
+    plt.figure()
+    plt.plot(recall, precision, label=f"AUC={auc(recall,precision):.3f}")
+    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("PR Curve"); plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "pr.png"), dpi=getattr(CFG, "DPI", 150))
+    plt.close()
+
+    # Confusion matrix
+    preds = (probs >= 0.5).astype(np.uint8)
+    cm = confusion_matrix(labels, preds)
+    plt.figure()
+    plt.imshow(cm, interpolation='nearest', aspect='auto')
+    for (i,j), v in np.ndenumerate(cm):
+        plt.text(j, i, str(v), ha='center', va='center')
+    plt.xticks([0,1], ["PSPL","Binary"])
+    plt.yticks([0,1], ["PSPL","Binary"])
+    plt.xlabel("Predicted"); plt.ylabel("True"); plt.title("Confusion Matrix")
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "confusion_matrix.png"), dpi=getattr(CFG, "DPI", 150))
+    plt.close()
+
+# -------------------------
+# Main
+# -------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate microlensing classifier')
-    parser.add_argument('--model', required=True, help='Path to trained model (.pt)')
-    parser.add_argument('--data', required=True, help='Path to test data (.npz)')
-    parser.add_argument('--scaler', default=None, help='Path to scaler (.pkl)')
-    parser.add_argument('--output_dir', required=True, help='Directory to save results')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for inference')
-    parser.add_argument('--early_detection', action='store_true', help='Perform early detection analysis')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True, help="Path to .pt saved by train.py")
+    parser.add_argument("--data", type=str, required=True, help="Path to .npz produced by simulate.py")
+    parser.add_argument("--batch_size", type=int, default=CFG.BATCH_SIZE)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--plots", type=str, default=None, help="Directory to save plots (optional)")
     args = parser.parse_args()
-    
-    # Setup paths
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print("="*80)
-    print("MICROLENSING BINARY CLASSIFICATION - EVALUATION")
-    print("="*80)
-    print(f"\nModel: {args.model}")
-    print(f"Data: {args.data}")
-    print(f"Output: {output_dir}")
-    
-    # Device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"\nUsing device: {device}")
-    
-    # Load data
-    print("\nLoading data...")
-    try:
-        data = np.load(args.data)
-        X, y = data['X'], data['y']
-    except FileNotFoundError:
-        print(f"ERROR: Data file not found: {args.data}")
-        sys.exit(1)
-    
-    print(f"  Shape: {X.shape}")
-    print(f"  Classes: {np.unique(y)}")
-    
-    # Encode labels
-    label_map = {'PSPL': 0, 'Binary': 1}
-    y_encoded = np.array([label_map[label] for label in y])
-    
-    # Use test split (last 15%)
-    n_test = int(0.15 * len(X))
-    X_test = X[-n_test:]
-    y_test = y_encoded[-n_test:]
-    
-    print(f"  Test samples: {len(X_test)}")
-    unique, counts = np.unique(y_test, return_counts=True)
-    print(f"  Test distribution: {dict(zip(unique, counts))}")
-    
-    # Load or create scaler
-    if args.scaler and Path(args.scaler).exists():
-        print(f"\nLoading scaler from {args.scaler}")
-        scaler = joblib.load(args.scaler)
-    else:
-        # Look for scaler in model directory
-        model_dir = Path(args.model).parent
-        scaler_candidates = list(model_dir.glob('scaler.pkl'))
-        
-        if scaler_candidates:
-            scaler_path = scaler_candidates[0]
-            print(f"\nFound scaler: {scaler_path}")
-            scaler = joblib.load(scaler_path)
-        else:
-            print("\nWARNING: No scaler found. Fitting on train data...")
-            # Use first 70% as train for scaler fitting
-            n_train = int(0.7 * len(X))
-            X_train_for_scaler = X[:n_train]
-            scaler = StandardScaler()
-            scaler.fit(X_train_for_scaler.reshape(-1, X_train_for_scaler.shape[-1]))
-    
-    # Apply scaler
-    print("Standardizing test data...")
-    X_test = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
-    
-    # Load model
-    print(f"\nLoading model from {args.model}...")
-    try:
-        checkpoint = torch.load(args.model, map_location=device)
-    except FileNotFoundError:
-        print(f"ERROR: Model file not found: {args.model}")
-        sys.exit(1)
-    
-    model = TimeDistributedCNN(X_test.shape[1], X_test.shape[2])
-    
-    # Handle DataParallel
-    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
-        model = nn.DataParallel(model)
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
-    model.eval()
-    
-    print(f"  Model loaded successfully")
-    if 'epoch' in checkpoint:
-        print(f"  Trained for {checkpoint['epoch']+1} epochs")
-    if 'val_acc' in checkpoint:
-        print(f"  Best validation accuracy: {checkpoint['val_acc']:.4f}")
-    
-    # Create dataset and loader
-    test_dataset = LightCurveDataset(X_test, y_test)
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    # Predict (batched inference to avoid OOM)
-    print("\nRunning inference...")
-    all_preds = []
-    all_probs = []
-    
-    with torch.no_grad():
-        for batch_x, _ in tqdm(test_loader, desc='Inference'):
-            batch_x = batch_x.to(device)
-            outputs = model(batch_x)
-            # FIXED: Average across timesteps
-            logits = outputs.mean(dim=1)
-            probs = torch.softmax(logits, dim=1)
-            _, preds = torch.max(probs, 1)
-            
-            all_preds.append(preds.cpu().numpy())
-            all_probs.append(probs[:, 1].cpu().numpy())
-    
-    y_pred = np.concatenate(all_preds)
-    y_probs = np.concatenate(all_probs)
-    
-    # Calculate metrics
-    print("\n" + "="*60)
-    print("EVALUATION RESULTS")
-    print("="*60)
-    
-    accuracy = (y_test == y_pred).mean()
-    print(f"\nTest Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
-    
-    # Classification report
-    print("\nClassification Report:")
-    print("-" * 60)
-    report = classification_report(y_test, y_pred, 
-                                   target_names=['PSPL', 'Binary'], 
-                                   digits=4)
-    print(report)
-    
-    # Save report
-    report_path = output_dir / 'classification_report.txt'
-    with open(report_path, 'w') as f:
-        f.write("Classification Report\n")
-        f.write("="*60 + "\n\n")
-        f.write(f"Test Accuracy: {accuracy:.4f}\n\n")
-        f.write(report)
-    print(f"✓ Report saved to {report_path}")
-    
-    # Confusion matrix
-    print("\nGenerating confusion matrix...")
-    cm_path = output_dir / 'confusion_matrix.png'
-    plot_confusion_matrix(y_test, y_pred, cm_path)
-    
-    # ROC curve
-    print("\nGenerating ROC curve...")
-    roc_path = output_dir / 'roc_curve.png'
-    roc_auc = plot_roc(y_test, y_probs, roc_path)
-    
-    # Precision-Recall curve
-    print("\nGenerating Precision-Recall curve...")
-    pr_path = output_dir / 'precision_recall_curve.png'
-    pr_auc = plot_precision_recall(y_test, y_probs, pr_path)
-    
-    # Early detection analysis
-    early_detection_results = None
-    if args.early_detection:
-        early_detection_results = evaluate_early_detection(
-            model, test_loader, device,
-            checkpoints=[0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0]
-        )
-        
-        # Plot early detection
-        print("\nGenerating early detection curve...")
-        ed_path = output_dir / 'early_detection.png'
-        plot_early_detection(early_detection_results, ed_path)
-    
-    # Save metrics
-    metrics = {
-        'accuracy': float(accuracy),
-        'roc_auc': float(roc_auc),
-        'pr_auc': float(pr_auc),
+
+    # Load dataset (perm-aware)
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
+    X = apply_pad_to_zero(X, pad_value=CFG.PAD_VALUE)
+    L = X.shape[1]
+
+    # Build model and load weights
+    device = torch.device(args.device)
+    model = CNN1D(input_len=L).to(device)
+    ckpt = torch.load(args.model, map_location=device)
+    state = ckpt["model"] if "model" in ckpt else ckpt
+    model.load_state_dict(state)
+
+    # Inference
+    ds = NumpyDataset(X, y)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    logits, labels = run_inference(model, loader, device)
+
+    # Metrics
+    metrics = compute_metrics(logits, labels)
+    print("\n=== Evaluation ===")
+    for k in ["accuracy", "roc_auc", "pr_auc", "average_precision", "tn", "fp", "fn", "tp"]:
+        print(f"{k:>18}: {metrics[k]}")
+
+    # Early detection
+    early_metrics = {}
+    if getattr(CFG, "EARLY_DETECTION_CHECKPOINTS", None):
+        print("\n=== Early Detection ===")
+        for frac in CFG.EARLY_DETECTION_CHECKPOINTS:
+            Xe = early_detection_subset(X, frac)
+            dse = NumpyDataset(Xe, y)
+            loe = DataLoader(dse, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+            loge, labe = run_inference(model, loe, device)
+            me = compute_metrics(loge, labe)
+            early_metrics[frac] = me["accuracy"]
+            print(f"{frac:>5.2f} observed -> acc {me['accuracy']:.4f}")
+
+    # Plots (optional)
+    plot_curves(args.plots, logits, labels)
+
+    # Print save path for JSON summary
+    summary = {
+        "metrics": metrics,
+        "early_detection": early_metrics,
+        "meta": meta,
+        "data": os.path.abspath(args.data),
+        "model": os.path.abspath(args.model),
     }
-    
-    if early_detection_results:
-        metrics['early_detection'] = {
-            f'{int(k*100)}pct': float(v) 
-            for k, v in early_detection_results.items()
-        }
-    
-    metrics_path = output_dir / 'metrics.json'
-    with open(metrics_path, 'w') as f:
-        json.dump(metrics, f, indent=2)
-    print(f"\n✓ Metrics saved to {metrics_path}")
-    
-    # Summary
-    print("\n" + "="*60)
-    print("EVALUATION COMPLETE")
-    print("="*60)
-    print(f"\nResults saved to: {output_dir}")
-    print("\nMetrics Summary:")
-    print(f"  Accuracy:  {accuracy:.4f}")
-    print(f"  ROC AUC:   {roc_auc:.4f}")
-    print(f"  PR AUC:    {pr_auc:.4f}")
-    
-    if early_detection_results:
-        print("\nEarly Detection Summary:")
-        for frac, acc in sorted(early_detection_results.items()):
-            if frac in [0.33, 0.5, 0.67, 1.0]:
-                print(f"  {frac*100:5.1f}% observed: {acc:.4f}")
-    
-    print("="*60)
+    out_dir = args.plots or os.path.dirname(args.model) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "evaluation_summary.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\nSummary saved to: {out_path}")
 
 if __name__ == "__main__":
     main()
