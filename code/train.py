@@ -1,448 +1,219 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-PyTorch training script - OPTIMIZED FOR AMD MI300A
-Key improvements:
-- Increased DataLoader workers (16 for training)
-- Added prefetch_factor for better GPU utilization
-- Optimized batch processing
-- Better memory management
+train.py — Simple 1D-CNN trainer for microlensing classification
+- Loads fast NPZ produced by simulate.py
+- Applies saved permutation if present
+- Uses config.py for hyperparameters and paths
 """
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+
 import argparse
 import os
 import json
-import joblib
-import logging
-import sys
-from datetime import datetime
-from tqdm import tqdm
+import math
+import random
 from pathlib import Path
 
-class TimeDistributedCNN(nn.Module):
-    """1D CNN with per-timestep classification"""
-    def __init__(self, sequence_length=1500, num_channels=1, num_classes=2):
-        super().__init__()
-        
-        # Convolutional layers
-        self.conv1 = nn.Conv1d(num_channels, 128, kernel_size=5, padding=2)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.conv2 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.conv3 = nn.Conv1d(64, 32, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm1d(32)
-        
-        self.dropout = nn.Dropout(0.3)
-        self.relu = nn.ReLU()
-        
-        # Per-timestep classification
-        self.fc1 = nn.Linear(32, 64)
-        self.fc2 = nn.Linear(64, num_classes)
-        
-    def forward(self, x):
-        # x: (batch, time, channels)
-        x = x.transpose(1, 2)  # (batch, channels, time)
-        
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.dropout(x)
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = self.dropout(x)
-        x = self.relu(self.bn3(self.conv3(x)))
-        x = self.dropout(x)
-        
-        x = x.transpose(1, 2)  # (batch, time, features)
-        
-        # Apply classification at each timestep
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)  # (batch, time, classes)
-        
-        return x
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
 
-class LightCurveDataset(Dataset):
+# Config
+import config as CFG
+try:
+    from config import PAD_VALUE
+except Exception:
+    PAD_VALUE = -1
+
+# === Fast NPZ loader that applies saved permutation and normalizes labels ===
+def load_npz_dataset(npz_path, apply_perm=True):
+    d = np.load(npz_path, allow_pickle=False)
+    X = d["X"]
+    y = d["y"]
+    if apply_perm and "perm" in d.files:
+        perm = d["perm"]
+        X = X[perm]
+        y = y[perm]
+    # labels: accept uint8 or strings
+    if y.dtype.kind in ("U","S","O"):
+        y = np.array([0 if (str(v).lower().startswith("pspl")) else 1 for v in y], dtype=np.uint8)
+    else:
+        y = y.astype(np.uint8, copy=False)
+    timestamps = d["timestamps"]
+    meta_json = d["meta_json"].item() if "meta_json" in d.files else "{}"
+    try:
+        meta = json.loads(meta_json)
+    except Exception:
+        meta = {}
+    return X, y, timestamps, meta
+
+# ---- Model ----
+class CNN1D(nn.Module):
+    def __init__(self, input_len: int):
+        super().__init__()
+        c1, c2, c3 = CFG.CONV1_FILTERS, CFG.CONV2_FILTERS, CFG.CONV3_FILTERS
+        self.net = nn.Sequential(
+            nn.Conv1d(1, c1, kernel_size=9, padding=4),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(c1, c2, kernel_size=7, padding=3),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(c2, c3, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(c3, CFG.FC1_UNITS),
+            nn.ReLU(inplace=True),
+            nn.Dropout(CFG.DROPOUT_RATE),
+            nn.Linear(CFG.FC1_UNITS, 2),  # 2 classes
+        )
+
+    def forward(self, x):
+        # x: [B, 1, L]
+        z = self.net(x)
+        return self.head(z)
+
+# ---- Dataset ----
+class NumpyDataset(torch.utils.data.Dataset):
     def __init__(self, X, y):
-        self.X = torch.FloatTensor(X)
-        self.y = torch.LongTensor(y)
-    
+        # Optionally map PAD_VALUE to 0 to be neutral in conv
+        X = X.copy()
+        X[X == PAD_VALUE] = 0.0
+        self.X = torch.from_numpy(X).float().unsqueeze(1)  # [N, 1, L]
+        self.y = torch.from_numpy(y).long()                # [N]
     def __len__(self):
-        return len(self.X)
-    
+        return self.X.shape[0]
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-def setup_logging(results_dir):
-    """Setup logging to both file and console"""
-    log_file = Path(results_dir) / 'training.log'
-    
-    # Create logger
-    logger = logging.getLogger('microlens')
-    logger.setLevel(logging.INFO)
-    
-    # File handler
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(logging.INFO)
-    
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    
-    # Formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    ch.setFormatter(formatter)
-    
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    
-    return logger
+# ---- Training utils ----
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
-def train_epoch(model, loader, optimizer, criterion, device, scaler, use_amp=True, grad_clip=1.0):
-    """Train model for one epoch with gradient clipping and mixed precision"""
+def accuracy(logits, y):
+    preds = logits.argmax(dim=1)
+    return (preds == y).float().mean().item()
+
+def train_one_epoch(model, loader, optimizer, device, grad_clip=None):
     model.train()
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    pbar = tqdm(loader, desc='Training')
-    for batch_x, batch_y in pbar:
-        batch_x = batch_x.to(device, non_blocking=True)  # non_blocking for async transfer
-        batch_y = batch_y.to(device, non_blocking=True)
-        
-        optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
-        
-        if use_amp:
-            with autocast(dtype=torch.bfloat16):
-                outputs = model(batch_x)
-                # FIXED: Average across timesteps
-                logits = outputs.mean(dim=1)
-                loss = criterion(logits, batch_y)
-            
-            scaler.scale(loss).backward()
-            # Gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs = model(batch_x)
-            # FIXED: Average across timesteps
-            logits = outputs.mean(dim=1)
-            loss = criterion(logits, batch_y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            optimizer.step()
-        
-        total_loss += loss.item()
-        _, predicted = torch.max(logits, 1)
-        total += batch_y.size(0)
-        correct += (predicted == batch_y).sum().item()
-        
-        # Update progress bar
-        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{correct/total:.4f}'})
-    
-    return total_loss / len(loader), correct / total
+    total_loss, total_acc, n = 0.0, 0.0, 0
+    crit = nn.CrossEntropyLoss()
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(xb)
+        loss = crit(logits, yb)
+        loss.backward()
+        if grad_clip is not None:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+        bs = xb.size(0)
+        total_loss += loss.item() * bs
+        total_acc += accuracy(logits.detach(), yb) * bs
+        n += bs
+    return total_loss / n, total_acc / n
 
-def validate(model, loader, criterion, device):
-    """Validate model"""
+@torch.no_grad()
+def evaluate(model, loader, device):
     model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for batch_x, batch_y in tqdm(loader, desc='Validating'):
-            batch_x = batch_x.to(device, non_blocking=True)
-            batch_y = batch_y.to(device, non_blocking=True)
-            
-            outputs = model(batch_x)
-            # FIXED: Average across timesteps
-            logits = outputs.mean(dim=1)
-            loss = criterion(logits, batch_y)
-            
-            total_loss += loss.item()
-            _, predicted = torch.max(logits, 1)
-            total += batch_y.size(0)
-            correct += (predicted == batch_y).sum().item()
-    
-    return total_loss / len(loader), correct / total
+    total_loss, total_acc, n = 0.0, 0.0, 0
+    crit = nn.CrossEntropyLoss()
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        logits = model(xb)
+        loss = crit(logits, yb)
+        bs = xb.size(0)
+        total_loss += loss.item() * bs
+        total_acc += accuracy(logits, yb) * bs
+        n += bs
+    return total_loss / n, total_acc / n
 
-def save_checkpoint(model, optimizer, scheduler, scaler, epoch, val_acc, results_dir, filename='checkpoint.pt'):
-    """Save training checkpoint"""
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'scaler_state_dict': scaler.state_dict(),
-        'val_acc': val_acc,
-    }
-    torch.save(checkpoint, Path(results_dir) / filename)
-
-def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, scaler=None):
-    """Load training checkpoint"""
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    if optimizer is not None:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    if scheduler is not None and 'scheduler_state_dict' in checkpoint:
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    if scaler is not None and 'scaler_state_dict' in checkpoint:
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    
-    return checkpoint['epoch'], checkpoint['val_acc']
-
+# ---- Main ----
 def main():
-    parser = argparse.ArgumentParser(description='Train microlensing classifier - OPTIMIZED')
-    parser.add_argument('--data', required=True, help='Path to training data (.npz)')
-    parser.add_argument('--output', required=True, help='Path to save model (.pt)')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--experiment_name', type=str, default='baseline', help='Experiment name')
-    parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
-    parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision')
-    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping threshold')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, required=True, help="Path to .npz produced by simulate.py")
+    parser.add_argument("--output", type=str, default=os.path.join(CFG.MODEL_DIR, "baseline.pt"))
+    parser.add_argument("--batch_size", type=int, default=CFG.BATCH_SIZE)
+    parser.add_argument("--epochs", type=int, default=CFG.EPOCHS)
+    parser.add_argument("--lr", type=float, default=CFG.LEARNING_RATE)
+    parser.add_argument("--weight_decay", type=float, default=CFG.WEIGHT_DECAY)
+    parser.add_argument("--seed", type=int, default=CFG.RANDOM_SEED)
     args = parser.parse_args()
-    
-    # Setup paths
-    output_path = Path(args.output).resolve()
-    output_dir = output_path.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create results directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_dir = output_dir.parent / 'results' / f'{args.experiment_name}_{timestamp}'
-    results_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Setup logging
-    logger = setup_logging(results_dir)
-    logger.info("="*80)
-    logger.info("MICROLENSING BINARY CLASSIFICATION - TRAINING (OPTIMIZED FOR MI300A)")
-    logger.info("="*80)
-    
-    # Setup device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    logger.info(f"Using device: {device}")
-    if torch.cuda.is_available():
-        logger.info(f"GPUs available: {torch.cuda.device_count()}")
-        for i in range(torch.cuda.device_count()):
-            logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
-    
-    # Log configuration
-    logger.info("\nConfiguration:")
-    for key, value in vars(args).items():
-        logger.info(f"  {key}: {value}")
-    logger.info(f"  results_dir: {results_dir}")
-    
-    # Load and validate data
-    logger.info(f"\nLoading data from {args.data}...")
-    try:
-        data = np.load(args.data)
-        X, y = data['X'], data['y']
-    except FileNotFoundError:
-        logger.error(f"Data file not found: {args.data}")
-        logger.error(f"Generate data first using: python simulate.py --output {args.data}")
-        sys.exit(1)
-    
-    # Validate data
-    assert X.shape[0] == len(y), f"Mismatch: X has {X.shape[0]} samples, y has {len(y)}"
-    assert np.isfinite(X).all(), "Data contains NaN or inf values"
-    logger.info(f"Data shape: {X.shape}")
-    logger.info(f"Data range: [{X.min():.3f}, {X.max():.3f}]")
-    
-    # Encode labels
-    label_map = {'PSPL': 0, 'Binary': 1}
-    y_encoded = np.array([label_map[label] for label in y])
-    unique, counts = np.unique(y_encoded, return_counts=True)
-    logger.info(f"Class distribution: {dict(zip(unique, counts))}")
-    
-    # Split data
-    logger.info("\nSplitting data (70% train, 15% val, 15% test)...")
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y_encoded, test_size=0.15, random_state=42, stratify=y_encoded
+
+    set_seed(args.seed)
+
+    print(f"Loading dataset: {args.data}")
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
+    L = X.shape[1]
+    print(f"Loaded X: {X.shape}, y: {y.shape}, time points: {L}")
+
+    X_train, X_tmp, y_train, y_tmp = train_test_split(
+        X, y, test_size=(1.0 - CFG.TRAIN_SPLIT), random_state=args.seed, stratify=y
     )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.1765, random_state=42, stratify=y_temp
+    rel = CFG.TEST_SPLIT / (CFG.TEST_SPLIT + CFG.VAL_SPLIT)
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_tmp, y_tmp, test_size=rel, random_state=args.seed, stratify=y_tmp
     )
-    
-    logger.info(f"  Train: {len(X_train)} samples")
-    logger.info(f"  Val:   {len(X_val)} samples")
-    logger.info(f"  Test:  {len(X_test)} samples")
-    
-    # Standardize
-    logger.info("\nStandardizing data...")
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
-    X_val = scaler.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
-    X_test = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
-    
-    # Save scaler
-    scaler_path = results_dir / 'scaler.pkl'
-    joblib.dump(scaler, scaler_path)
-    logger.info(f"Scaler saved to {scaler_path}")
-    
-    # Create datasets
-    train_dataset = LightCurveDataset(X_train, y_train)
-    val_dataset = LightCurveDataset(X_val, y_val)
-    
-    # OPTIMIZED DataLoaders for MI300A
-    logger.info("\nConfiguring DataLoaders (optimized for MI300A)...")
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        num_workers=64,  # More workers for fast GPUs
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4  # Prefetch more batches
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=args.batch_size,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4
-    )
-    logger.info(f"  Training batches: {len(train_loader)}")
-    logger.info(f"  Validation batches: {len(val_loader)}")
-    
-    # Build model
-    logger.info("\nBuilding model...")
-    model = TimeDistributedCNN(X_train.shape[1], X_train.shape[2])
-    
-    # Multi-GPU
-    if torch.cuda.device_count() > 1:
-        logger.info(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
-        model = nn.DataParallel(model)
-    
-    model = model.to(device)
-    
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
-    
-    # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', patience=5, factor=0.5, verbose=True
-    )
-    
-    # Mixed precision scaler
-    use_amp = not args.no_amp and torch.cuda.is_available()
-    scaler_amp = GradScaler(enabled=use_amp)
-    logger.info(f"Mixed precision training: {use_amp}")
-    
-    # Resume from checkpoint if specified
-    start_epoch = 0
-    best_val_acc = 0
-    if args.resume and Path(args.resume).exists():
-        logger.info(f"\nResuming from checkpoint: {args.resume}")
-        start_epoch, best_val_acc = load_checkpoint(
-            args.resume, model, optimizer, scheduler, scaler_amp
-        )
-        logger.info(f"  Resuming from epoch {start_epoch}, best val acc: {best_val_acc:.4f}")
-        start_epoch += 1
-    
-    # Training loop
-    logger.info("\n" + "="*80)
-    logger.info("STARTING TRAINING")
-    logger.info("="*80 + "\n")
-    
-    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
-    
-    for epoch in range(start_epoch, args.epochs):
-        logger.info(f"Epoch {epoch+1}/{args.epochs}")
-        logger.info("-" * 40)
-        
-        # Train
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, criterion, device, 
-            scaler_amp, use_amp=use_amp, grad_clip=args.grad_clip
-        )
-        
-        # Validate
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
-        
-        # Update scheduler
-        scheduler.step(val_loss)
-        
-        # Log metrics
-        history['train_loss'].append(train_loss)
-        history['train_acc'].append(train_acc)
-        history['val_loss'].append(val_loss)
-        history['val_acc'].append(val_acc)
-        
-        logger.info(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-        logger.info(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-        logger.info(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
-        
-        # Save best model
+
+    train_ds = NumpyDataset(X_train, y_train)
+    val_ds   = NumpyDataset(X_val, y_val)
+    test_ds  = NumpyDataset(X_test, y_test)
+
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader   = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    test_loader  = torch.utils.data.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CNN1D(input_len=L).to(device)
+    if CFG.OPTIMIZER.lower() == "adamw":
+        optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    if CFG.LR_SCHEDULER == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", patience=CFG.LR_PATIENCE, factor=CFG.LR_FACTOR, verbose=True)
+    else:
+        scheduler = None
+
+    best_val_acc = -1.0
+    best_path = args.output
+    os.makedirs(os.path.dirname(best_path) or ".", exist_ok=True)
+
+    for epoch in range(1, args.epochs + 1):
+        tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, device, grad_clip=CFG.GRAD_CLIP)
+        val_loss, val_acc = evaluate(model, val_loader, device)
+        if scheduler is not None:
+            scheduler.step(val_acc)
+
+        print(f"Epoch {epoch:03d} | train loss {tr_loss:.4f} acc {tr_acc:.4f} | val loss {val_loss:.4f} acc {val_acc:.4f}")
+
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_model_path = results_dir / 'best_model.pt'
-            save_checkpoint(model, optimizer, scheduler, scaler_amp, epoch, val_acc, 
-                          results_dir, 'best_model.pt')
-            logger.info(f"  ★ New best model! Saved to {best_model_path}")
-        
-        # Save checkpoint every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            checkpoint_path = results_dir / f'checkpoint_epoch_{epoch+1}.pt'
-            save_checkpoint(model, optimizer, scheduler, scaler_amp, epoch, val_acc,
-                          results_dir, f'checkpoint_epoch_{epoch+1}.pt')
-            logger.info(f"  Checkpoint saved to {checkpoint_path}")
-        
-        logger.info("")
-    
-    # Save final artifacts
-    logger.info("="*80)
-    logger.info("TRAINING COMPLETE")
-    logger.info("="*80)
-    logger.info(f"Best validation accuracy: {best_val_acc:.4f}")
-    
-    # Save history
-    history_path = results_dir / 'history.json'
-    with open(history_path, 'w') as f:
-        json.dump(history, f, indent=2)
-    logger.info(f"Training history saved to {history_path}")
-    
-    # Save config
-    config_path = results_dir / 'config.json'
-    config = {
-        **vars(args),
-        'model_params': {
-            'conv1_filters': 128,
-            'conv2_filters': 64,
-            'conv3_filters': 32,
-            'fc1_units': 64,
-            'dropout': 0.3,
-        },
-        'data_shape': list(X_train.shape),
-        'num_classes': 2,
-        'best_val_acc': float(best_val_acc),
-        'total_params': int(total_params),
-        'trainable_params': int(trainable_params),
-    }
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-    logger.info(f"Configuration saved to {config_path}")
-    
-    # Copy best model to output location
-    if output_path != results_dir / 'best_model.pt':
-        import shutil
-        shutil.copy(results_dir / 'best_model.pt', output_path)
-        logger.info(f"Best model also saved to {output_path}")
-    
-    logger.info(f"\nAll results saved to: {results_dir}")
-    logger.info("="*80)
+            torch.save({"model": model.state_dict(), "epoch": epoch, "val_acc": val_acc}, best_path)
+            if CFG.SAVE_BEST_ONLY:
+                print(f"  ↳ saved best model to {best_path}")
+
+        if CFG.SAVE_CHECKPOINTS and (not CFG.SAVE_BEST_ONLY) and (epoch % CFG.CHECKPOINT_FREQ == 0):
+            ckpt_path = best_path.replace(".pt", f".epoch{epoch}.pt")
+            torch.save({"model": model.state_dict(), "epoch": epoch, "val_acc": val_acc}, ckpt_path)
+            print(f"  ↳ checkpoint saved to {ckpt_path}")
+
+    # Test evaluation
+    ckpt = torch.load(best_path, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    test_loss, test_acc = evaluate(model, test_loader, device)
+    print(f"TEST | loss {test_loss:.4f} acc {test_acc:.4f} (best val acc {best_val_acc:.4f})")
 
 if __name__ == "__main__":
     main()
