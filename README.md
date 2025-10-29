@@ -1,4 +1,4 @@
-# Real-Time Microlensing Classification using Deep Learning
+## Real-Time Microlensing Classification using Deep Learning
 
 **Master's Thesis Project - WORKING VERSION**  
 **Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
