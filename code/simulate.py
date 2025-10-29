@@ -28,6 +28,7 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Dict, Tuple, Optional, List
 import numpy as np
+from tqdm import tqdm # Adding tqdm for progress bar on parallel map
 
 # Pull global settings from config.py
 try:
@@ -40,6 +41,12 @@ except Exception:
         NORMALIZE_PER_EVENT = True
         USE_SHARED_MASK = False
         MASK_POOL_SIZE = 256
+        # Fallback for BINARY_PARAM_SETS
+        BINARY_PARAM_SETS = {'baseline': {
+            's_min': 0.7, 's_max': 2.0, 'q_min': 0.1, 'q_max': 0.5, 'rho_min': 0.005, 'rho_max': 0.02,
+            'alpha_min': 0.0, 'alpha_max': math.pi / 2, 'tE_min': 50.0, 'tE_max': 200.0,
+            't0_min': -20.0, 't0_max': 20.0, 'u0_min': 0.1, 'u0_max': 0.3
+        }}
     CFG = _Fallback()
 
 # Globals pulled from config
@@ -66,12 +73,13 @@ except Exception:
 
 @dataclass
 class PSPLRanges:
-    t0_min: float = -20.0
-    t0_max: float = 20.0
-    u0_min: float = 0.01
-    u0_max: float = 0.5
-    tE_min: float = 10.0
-    tE_max: float = 150.0
+    # Use config values if available, else fallback to hardcoded
+    t0_min: float = getattr(CFG, "PSPL_T0_MIN", -20.0)
+    t0_max: float = getattr(CFG, "PSPL_T0_MAX", 20.0)
+    u0_min: float = getattr(CFG, "PSPL_U0_MIN", 0.01)
+    u0_max: float = getattr(CFG, "PSPL_U0_MAX", 0.5)
+    tE_min: float = getattr(CFG, "PSPL_TE_MIN", 10.0)
+    tE_max: float = getattr(CFG, "PSPL_TE_MAX", 150.0)
 
 
 @dataclass
@@ -90,6 +98,10 @@ class BinaryRanges:
     t0_max: float = 20.0
     u0_min: float = 0.1
     u0_max: float = 0.3
+    # Use kwargs to override defaults when instantiated from BINARY_PARAM_SETS
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
 
 def _to_flux_from_mag(mag: np.ndarray, baseline: float) -> np.ndarray:
@@ -112,9 +124,10 @@ def _set_np_seed(seed: Optional[int]):
 def _maybe_norm_event(flux: np.ndarray) -> np.ndarray:
     if not NORMALIZE_PER_EVENT:
         return flux
-    finite = np.isfinite(flux)
+    finite = np.isfinite(flux) & (flux != PAD_VALUE) # Consider PAD_VALUE as non-finite for median
     if finite.any():
-        m = np.nanmedian(flux[finite])
+        # Compute median excluding PAD_VALUE
+        m = np.median(flux[finite])
         if m > 0:
             flux = flux / m
     return flux
@@ -123,8 +136,7 @@ def _maybe_norm_event(flux: np.ndarray) -> np.ndarray:
 def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, Optional[np.ndarray], PSPLRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
     seed, timestamps, mag_error_std, mask, ranges = args
     _set_np_seed(seed)
-    n_points = timestamps.shape[0]
-
+    
     t0 = np.random.uniform(ranges.t0_min, ranges.t0_max)
     u0 = np.random.uniform(ranges.u0_min, ranges.u0_max)
     tE = np.random.uniform(ranges.tE_min, ranges.tE_max)
@@ -139,10 +151,7 @@ def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, Optional[np.n
 
     if mask is not None:
         magnitudes[mask] = np.nan
-    else:
-        # identical approach but independent draw; here no-op so we don't duplicate mask logic
-        pass
-
+    
     flux = _to_flux_from_mag(magnitudes, baseline)
     flux = _maybe_norm_event(flux)
     flux_padded = np.nan_to_num(flux, nan=PAD_VALUE)
@@ -153,8 +162,7 @@ def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, Optional[np.n
 def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, Optional[np.ndarray], BinaryRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
     seed, timestamps, mag_error_std, mask, ranges = args
     _set_np_seed(seed)
-    n_points = timestamps.shape[0]
-
+    
     s = np.random.uniform(ranges.s_min, ranges.s_max)
     q = np.random.uniform(ranges.q_min, ranges.q_max)
     rho = np.random.uniform(ranges.rho_min, ranges.rho_max)
@@ -164,6 +172,7 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, Optional[np
     u0 = np.random.uniform(ranges.u0_min, ranges.u0_max)
     baseline = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
 
+    magnifications = None
     if _VBM is not None:
         try:
             params_vbm = [_safe_log(np.array([s]))[0],
@@ -175,9 +184,11 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, Optional[np
             magnifications = np.array(_VBM.BinaryLightCurve(params_vbm, timestamps)[0], dtype=np.float64)
             magnifications = np.clip(magnifications, 1e-6, None)
         except Exception:
+            # Fallback to PSPL if VBMicrolensing fails
             u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
             magnifications = _pspl_magnification(u_t)
     else:
+        # If VBMicrolensing is not installed, always fallback to PSPL (simplified binary event)
         u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
         magnifications = _pspl_magnification(u_t)
 
@@ -188,9 +199,7 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, Optional[np
 
     if mask is not None:
         magnitudes[mask] = np.nan
-    else:
-        pass
-
+    
     flux = _to_flux_from_mag(magnitudes, baseline)
     flux = _maybe_norm_event(flux)
     flux_padded = np.nan_to_num(flux, nan=PAD_VALUE)
@@ -202,14 +211,14 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, Optional[np
 
 def _parallel_map_unordered(fn, args_list, num_workers: int):
     if num_workers is None or num_workers <= 1:
-        for a in args_list:
+        for a in tqdm(args_list, desc=f"Generating {fn.__name__.split('_')[1]}"):
             yield fn(a)
         return
     import multiprocessing as mp
     n = len(args_list)
     chunksize = max(1, n // (num_workers * 8))
     with mp.Pool(processes=num_workers) as pool:
-        for res in pool.imap_unordered(fn, args_list, chunksize=chunksize):
+        for res in tqdm(pool.imap_unordered(fn, args_list, chunksize=chunksize), total=n, desc=f"Generating {fn.__name__.split('_')[1]} (Parallel)"):
             yield res
 
 
@@ -220,14 +229,15 @@ def build_dataset(n_pspl: int,
                   cadence_mask_prob: float,
                   seed: Optional[int],
                   save_params: bool,
-                  num_workers: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict,
+                  num_workers: int,
+                  binary_ranges: BinaryRanges) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict,
                                              Optional[List[Dict]], Optional[List[Dict]], np.ndarray]:
 
     _set_np_seed(seed)
     timestamps = np.linspace(TIME_MIN, TIME_MAX, n_points, dtype=np.float64)
 
-    pspl_ranges = PSPLRanges()
-    binary_ranges = BinaryRanges()
+    pspl_ranges = PSPLRanges() # PSPL ranges are fixed/pulled from config
+    # binary_ranges is passed as an argument (Fixed #5)
 
     N = n_pspl + n_binary
     X = np.empty((N, n_points), dtype=np.float32)
@@ -259,6 +269,7 @@ def build_dataset(n_pspl: int,
     ]
 
     idx = 0
+    # PSPL events
     for flux, params in _parallel_map_unordered(generate_pspl_event_worker, pspl_args, num_workers):
         X[idx, :] = flux
         y[idx] = 0
@@ -266,6 +277,7 @@ def build_dataset(n_pspl: int,
             params_pspl.append(params)
         idx += 1
 
+    # Binary events
     for flux, params in _parallel_map_unordered(generate_binary_event_worker, binary_args, num_workers):
         X[idx, :] = flux
         y[idx] = 1
@@ -292,7 +304,7 @@ def build_dataset(n_pspl: int,
         "TIME_MAX": TIME_MAX,
         "vbmicrolensing_available": bool(_VBM is not None),
         "pspl_ranges": asdict(pspl_ranges),
-        "binary_ranges": asdict(binary_ranges),
+        "binary_ranges": asdict(binary_ranges), # Now includes the specific ranges used
         "label_map": {0: "PSPL", 1: "Binary"},
         "shuffle_perm_available": True,
         "perm_seed": seed,
@@ -341,11 +353,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=str, default="data/raw/events_fast.npz")
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--save-params", action="store_true")
+    # FIX #5: Added --binary_params CLI argument
+    choices = list(CFG.BINARY_PARAM_SETS.keys())
+    p.add_argument("--binary_params", type=str, default="baseline", choices=choices, 
+                   help=f"Select binary parameter set from config: {choices}")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    
+    # Get binary parameter ranges (FIX #5)
+    binary_ranges_data = CFG.BINARY_PARAM_SETS.get(args.binary_params, CFG.BINARY_PARAM_SETS['baseline'])
+    binary_ranges = BinaryRanges(**binary_ranges_data)
+    
     print("Configuration:")
     print(json.dumps({
         "n_pspl": args.n_pspl,
@@ -362,6 +383,7 @@ def main():
         "PAD_VALUE": PAD_VALUE,
         "NORMALIZE_PER_EVENT": NORMALIZE_PER_EVENT,
         "USE_SHARED_MASK": USE_SHARED_MASK,
+        "binary_params_set": args.binary_params,
     }, indent=2))
 
     X, y, timestamps, meta, p_pspl, p_bin, perm = build_dataset(
@@ -372,7 +394,8 @@ def main():
         cadence_mask_prob=args.cadence_mask_prob,
         seed=args.seed,
         save_params=args.save_params,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        binary_ranges=binary_ranges # Pass the correct ranges
     )
 
     save_npz(args.output, X, y, timestamps, meta, p_pspl, p_bin, perm)

@@ -1,4 +1,5 @@
-
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 """
 Real-Time Capability Benchmarking for Microlensing Classification
@@ -15,44 +16,24 @@ import torch.nn as nn
 import numpy as np
 import time
 import json
-from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
 import argparse
 import matplotlib.pyplot as plt
+from pathlib import Path
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-class TimeDistributedCNN(nn.Module):
-    """Same architecture as training"""
-    def __init__(self, sequence_length=1500, num_channels=1, num_classes=2):
-        super().__init__()
-        self.conv1 = nn.Conv1d(num_channels, 128, kernel_size=5, padding=2)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.conv2 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.conv3 = nn.Conv1d(64, 32, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm1d(32)
-        self.dropout = nn.Dropout(0.3)
-        self.relu = nn.ReLU()
-        self.fc1 = nn.Linear(32, 64)
-        self.fc2 = nn.Linear(64, num_classes)
-        
-    def forward(self, x):
-        x = x.transpose(1, 2)
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.dropout(x)
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = self.dropout(x)
-        x = self.relu(self.bn3(self.conv3(x)))
-        x = self.dropout(x)
-        x = x.transpose(1, 2)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+# Local import of the unified model
+from model import TimeDistributedCNN
+import config as CFG
 
+# Note: LightCurveDataset must handle the padding logic consistently with training/evaluation
 class LightCurveDataset(Dataset):
     def __init__(self, X, y):
-        self.X = torch.FloatTensor(X)
+        # Apply the same pre-processing as in train.py: map PAD_VALUE to 0.0
+        X_processed = X.copy()
+        X_processed[X_processed == CFG.PAD_VALUE] = 0.0
+        
+        self.X = torch.from_numpy(X_processed).float().unsqueeze(1) # [N, 1, L]
         self.y = torch.LongTensor(y)
     
     def __len__(self):
@@ -91,6 +72,7 @@ def benchmark_inference_speed(model, data_loader, device, n_warmup=10):
             batch_x = batch_x.to(device)
             
             start = time.perf_counter()
+            # The model outputs [B, L, 2], but we only measure the inference time for the forward pass
             _ = model(batch_x)
             if device == 'cuda':
                 torch.cuda.synchronize()
@@ -121,11 +103,9 @@ def benchmark_inference_speed(model, data_loader, device, n_warmup=10):
     
     return results
 
-def benchmark_throughput(model, test_data, device, batch_sizes=[1, 8, 16, 32, 64, 128, 256]):
+def benchmark_throughput(model, X_test, y_test, device, batch_sizes=[1, 8, 16, 32, 64, 128, 256]):
     """
     Measure throughput (events/second) vs batch size
-    
-    Critical for understanding LSST/Roman operational capacity
     """
     model.eval()
     
@@ -135,11 +115,16 @@ def benchmark_throughput(model, test_data, device, batch_sizes=[1, 8, 16, 32, 64
     
     results = []
     
+    # Use a fixed, large subset of data for throughput testing
+    n_throughput_test = min(len(X_test), 10000) 
+    X_test_sub = X_test[:n_throughput_test]
+    y_test_sub = y_test[:n_throughput_test]
+    
     for batch_size in batch_sizes:
         print(f"\nTesting batch_size={batch_size}...")
         
         # Create data loader
-        dataset = LightCurveDataset(test_data['X'][:1000], test_data['y'][:1000])
+        dataset = LightCurveDataset(X_test_sub, y_test_sub)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                           num_workers=0, pin_memory=True)
         
@@ -181,12 +166,9 @@ def benchmark_throughput(model, test_data, device, batch_sizes=[1, 8, 16, 32, 64
     
     return results
 
-def benchmark_lsst_scale(model, test_data, device):
+def benchmark_lsst_scale(model, X_test, y_test, device):
     """
     Simulate LSST operational scenario
-    
-    LSST will generate ~10,000 microlensing alerts per night
-    Can we process them in real-time?
     """
     model.eval()
     
@@ -201,9 +183,9 @@ def benchmark_lsst_scale(model, test_data, device):
     batch_size = 128
     
     # Create dataset
-    n_events = min(lsst_events_per_night, len(test_data['X']))
-    dataset = LightCurveDataset(test_data['X'][:n_events], 
-                               test_data['y'][:n_events])
+    n_events = min(lsst_events_per_night, len(X_test))
+    dataset = LightCurveDataset(X_test[:n_events], 
+                               y_test[:n_events])
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                        num_workers=4, pin_memory=True)
     
@@ -233,8 +215,8 @@ def benchmark_lsst_scale(model, test_data, device):
     print("COMPARISON TO TRADITIONAL χ² FITTING")
     print("-"*60)
     
-    # Literature values for binary lens fitting
-    chi2_time_per_event = 500  # seconds (conservative estimate)
+    # Literature values for binary lens fitting (seconds per event)
+    chi2_time_per_event = 500  
     chi2_total_time = chi2_time_per_event * n_events
     
     print(f"\nTraditional Binary Fitting [Estimated from Literature]:")
@@ -287,7 +269,7 @@ def plot_throughput_vs_batch_size(results, save_path):
     
     # Annotate optimal point
     max_idx = np.argmax(throughputs)
-    plt.annotate(f'Optimal: {batch_sizes[max_idx]}\n{throughputs[max_idx]:.1f} events/s',
+    plt.annotate(f"Optimal: {batch_sizes[max_idx]}\n{throughputs[max_idx]:.1f} events/s",
                 xy=(batch_sizes[max_idx], throughputs[max_idx]),
                 xytext=(10, 10), textcoords='offset points',
                 bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7),
@@ -325,43 +307,61 @@ def main():
     # Load data
     print("\nLoading test data...")
     data = np.load(args.data)
-    X_test = data['X'][-10000:]  # Use last 10k for testing
-    y_test = data['y'][-10000:]
+    # The original script uses the last 10k. We must check if "perm" is present and apply it first.
+    # The benchmark uses a subset, so we will manually apply permutation to the entire dataset 
+    # and then slice the end. This is a robust way to handle the perm array.
+    X_full = data['X']
+    y_full = data['y']
+    if "perm" in data.files:
+        perm = data['perm']
+        X_full = X_full[perm]
+        y_full = y_full[perm]
     
-    # Encode labels
-    label_map = {'PSPL': 0, 'Binary': 1}
-    y_encoded = np.array([label_map[label] for label in y_test])
+    # Label mapping (assumes labels are 'PSPL'/'Binary' strings or the 0/1 encoding used later)
+    # The provided data loader is simple, let's ensure the label encoding is correct.
+    if y_full.dtype.kind in ("U", "S", "O"):
+        y_encoded = np.array([0 if (str(v).lower().startswith("pspl")) else 1 for v in y_full], dtype=np.uint8)
+    else:
+        y_encoded = y_full.astype(np.uint8)
+        
+    # Use last 10k for testing
+    X_test = X_full[-10000:]
+    y_test_encoded = y_encoded[-10000:]
     
-    test_data = {'X': X_test, 'y': y_encoded}
-    print(f"Test data: {X_test.shape}")
+    print(f"Test data shape: {X_test.shape}")
+    L = X_test.shape[1]
     
     # Load model
     print("\nLoading model...")
     checkpoint = torch.load(args.model, map_location=device)
-    model = TimeDistributedCNN(X_test.shape[1], X_test.shape[2])
     
-    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
-        model = nn.DataParallel(model)
+    # FIX #4: Corrected checkpoint key and unified model size
+    model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Handle DataParallel saved state dicts
+    state_dict = checkpoint['model_state_dict']
+    if 'module.' in list(state_dict.keys())[0] and not isinstance(model, nn.DataParallel):
+        # Remove 'module.' prefix for non-DataParallel model loading
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
     print("✓ Model loaded")
     
-    # Create data loader for latency testing
-    dataset = LightCurveDataset(X_test, y_encoded)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
-                       num_workers=4, pin_memory=True)
-    
     # Run benchmarks
     all_results = {}
     
-    # 1. Latency benchmark
-    latency_results = benchmark_inference_speed(model, loader, device)
+    # 1. Latency benchmark (using the subset)
+    dataset_latency = LightCurveDataset(X_test, y_test_encoded)
+    loader_latency = DataLoader(dataset_latency, batch_size=args.batch_size, shuffle=False,
+                       num_workers=4, pin_memory=True)
+
+    latency_results = benchmark_inference_speed(model, loader_latency, device)
     all_results['latency'] = latency_results
     
     # 2. Throughput benchmark
-    throughput_results = benchmark_throughput(model, test_data, device)
+    throughput_results = benchmark_throughput(model, X_test, y_test_encoded, device)
     all_results['throughput'] = throughput_results
     
     # Plot throughput
@@ -369,7 +369,7 @@ def main():
     plot_throughput_vs_batch_size(throughput_results, plot_path)
     
     # 3. LSST scale benchmark
-    lsst_results = benchmark_lsst_scale(model, test_data, device)
+    lsst_results = benchmark_lsst_scale(model, X_test, y_test_encoded, device)
     all_results['lsst_scale'] = lsst_results
     
     # Save results
