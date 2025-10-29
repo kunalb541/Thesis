@@ -1,246 +1,258 @@
-# Real-Time Binary Microlensing Classification
+# Real-Time Binary Microlensing Classification using Deep Learning
 
-**FIXED VERSION - October 2025**
+**Master's Thesis Project - WORKING VERSION**  
+**Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
+**Institution**: University of Heidelberg  
+**Last Updated**: October 2025
 
-Master's Thesis Project | University of Heidelberg  
-**Author**: Kunal Bhatia (kunal29bhatia@gmail.com)
-
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-red.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
 ## 🎯 Project Overview
 
-**Problem:** Upcoming surveys (LSST, Roman) will detect 20,000+ microlensing events/year. Traditional fitting takes ~500s per event, making real-time classification impossible.
+**Research Question**: Can deep learning enable real-time classification of binary microlensing events for next-generation surveys (LSST, Roman)?
 
-**Solution:** Deep learning achieving **0.5ms inference** (1.3 million × faster than traditional methods).
+**Approach**: TimeDistributed 1D CNN trained on 1M+ synthetic light curves from VBMicrolensing.
 
-**Key Finding:** Model achieves 73-78% accuracy on realistic binary populations, with remaining failures concentrated at u₀ > 0.3 (fundamental physical limit, not algorithm limitation).
-
----
-
-## 🔑 Critical Fix (October 2025)
-
-**Issue Discovered:** Original code used only the last timestep for classification:
-```python
-loss = criterion(outputs[:, -1, :], batch_y)  # WRONG!
-```
-
-**Fix Applied:** Aggregate across all timesteps:
-```python
-logits = outputs.mean(dim=1)  # Average all timesteps
-loss = criterion(logits, batch_y)  # CORRECT!
-```
-
-**Impact:** +18.7% accuracy improvement (54.8% → 73.5%)
-
-**Why it matters:** Binary features (caustic crossings) occur throughout the light curve, not just at the end. Temporal aggregation captures these distributed features.
+**Key Innovation**: Temporal aggregation across full light curve captures distributed caustic features → enables early detection.
 
 ---
 
-## 📊 Current Results
+## 🔧 Critical Fix (October 2025)
 
-| Experiment | Accuracy | Key Finding |
-|------------|----------|-------------|
-| **Baseline** (wide u₀) | 70-75% | ~25% of binaries undetectable (u₀ > 0.3) |
-| **Dense Cadence** (5% missing) | 73-78% | Cadence critical for detection |
-| **Distinct** (u₀ < 0.15) | 85-95% | Near-optimal with guaranteed caustics |
-| **Sparse Cadence** (40% missing) | 60-65% | Performance degrades with gaps |
+**Bug**: Original implementation used only final timestep for classification  
+**Fix**: Aggregate predictions across all timesteps using `logits = outputs.mean(dim=1)`  
+**Impact**: +18.7% accuracy improvement (54.8% → 73.5%)
+
+All code in this repository includes the fix.
 
 ---
 
-## 🚀 Quick Start (From Scratch)
+## 📊 Project Status
 
-### 1. Environment Setup
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Environment Setup | ✅ Complete | Tested on NVIDIA/AMD GPUs |
+| Data Simulation | ✅ Complete | VBMicrolensing pipeline working |
+| Training Pipeline | ✅ Complete | Multi-GPU support, mixed precision |
+| Evaluation Pipeline | ✅ Complete | Early detection analysis included |
+| Baseline Experiment | 🔄 In Progress | 1M events, wide parameter range |
+| Cadence Experiments | ⏳ Queued | 4 experiments (5%-40% missing) |
+| Error Experiments | ⏳ Queued | 3 experiments (0.05-0.20 mag) |
+| Topology Experiments | ⏳ Queued | 4 experiments (distinct/planetary/stellar) |
+| Real-time Benchmarking | ⏳ Queued | Inference speed tests |
+| Thesis Writing | ⏳ Not Started | Awaiting experiment completion |
+
+**Tracking**: See `EXPERIMENTS_LOG.md` for detailed progress.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.10+
+- NVIDIA GPU (CUDA 12.1) or AMD GPU (ROCm 6.0)
+- 64 GB RAM recommended
+- 100 GB free disk space
+
+### Setup (5 minutes)
+
 ```bash
+# Clone and navigate
 git clone https://github.com/YOUR_USERNAME/Thesis.git
 cd Thesis
 
+# Create environment
 conda create -n microlens python=3.10 -y
 conda activate microlens
 
 # Install PyTorch (choose your GPU)
+# NVIDIA:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# AMD:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0
+
+# Install dependencies
 pip install -r requirements.txt
 
 # Verify
 python code/preflight_check.py
 ```
 
-### 2. Generate Datasets
+### Run Complete Workflow
+
 ```bash
 cd code
 
-# Baseline (wide parameter range)
+# 1. Generate data (30 min for 100K events)
 python simulate.py \
-    --n_pspl 500000 --n_binary 500000 \
-    --output ../data/raw/events_baseline_1M.npz \
+    --n_pspl 50000 --n_binary 50000 \
+    --output ../data/raw/test_100k.npz \
     --binary_params baseline
 
-# Distinct (guaranteed detectable)
-python simulate.py \
-    --n_pspl 500000 --n_binary 500000 \
-    --output ../data/raw/events_distinct_1M.npz \
-    --binary_params distinct
-
-# Dense cadence
-python simulate.py \
-    --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/events_cadence_05.npz \
-    --cadence 0.05 \
-    --binary_params baseline
-```
-
-### 3. Train Models
-```bash
-# Baseline
+# 2. Train (2-3 hours on 4 GPUs)
 python train.py \
-    --data ../data/raw/events_baseline_1M.npz \
-    --output ../models/baseline.pt \
+    --data ../data/raw/test_100k.npz \
+    --output ../models/test_100k.pt \
     --epochs 50 \
-    --batch_size 128 \
-    --experiment_name baseline
+    --experiment_name test_100k
 
-# Expected: 70-75% accuracy
-```
-
-### 4. Evaluate
-```bash
-RESULTS_DIR=$(ls -td results/baseline_* | head -1)
-
+# 3. Evaluate
+RESULTS_DIR=$(ls -td ../results/test_100k_* | head -1)
 python evaluate.py \
     --model $RESULTS_DIR/best_model.pt \
-    --data ../data/raw/events_baseline_1M.npz \
-    --scaler $RESULTS_DIR/scaler.pkl \
+    --data ../data/raw/test_100k.npz \
     --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 
-# Benchmark real-time capability
+# 4. Real-time benchmark
 python benchmark_realtime.py \
     --model $RESULTS_DIR/best_model.pt \
-    --data ../data/raw/events_baseline_1M.npz \
+    --data ../data/raw/test_100k.npz \
     --output_dir $RESULTS_DIR/benchmark
 ```
 
 ---
 
-## 🔬 Experimental Suite
-
-### Systematic Experiments
-
-1. **Cadence Studies** (observation frequency)
-   - Dense (5% missing): 73-78%
-   - Baseline (20% missing): 70-75%
-   - Sparse (40% missing): 60-65%
-
-2. **Binary Topology** (physical detection limits)
-   - Distinct (u₀ < 0.15): 85-95%
-   - Baseline (u₀ up to 1.0): 70-75%
-
-3. **Photometric Quality** (measurement precision)
-   - Space-based (0.05 mag): Test effect
-   - Ground-based (0.10 mag): Baseline
-   - Poor conditions (0.20 mag): Test effect
-
----
-
 ## 📁 Repository Structure
+
 ```
 Thesis/
 ├── code/
-│   ├── train.py              # Training (FIXED: uses mean aggregation)
-│   ├── evaluate.py           # Evaluation (FIXED: uses mean aggregation)
-│   ├── simulate.py           # Dataset generation
-│   ├── benchmark_realtime.py # Real-time capability testing
-│   ├── config.py             # All experiment configurations
-│   └── utils.py              # Utilities
-├── data/raw/                 # Simulated datasets
-├── models/                   # Trained models
-├── results/                  # Training outputs
-├── analysis/                 # Analysis scripts
-└── docs/                     # Documentation
+│   ├── simulate.py              # Dataset generation (VBMicrolensing)
+│   ├── train.py                 # Training with temporal aggregation
+│   ├── evaluate.py              # Evaluation + early detection
+│   ├── benchmark_realtime.py    # Inference speed benchmarking
+│   ├── model.py                 # TimeDistributedCNN architecture
+│   ├── config.py                # All experiment configurations
+│   └── utils.py                 # GPU detection, dataset loading
+│
+├── data/
+│   └── raw/                     # Simulated light curves (.npz)
+│
+├── models/                      # Saved model checkpoints
+├── results/                     # Training logs, evaluation outputs
+│
+├── docs/
+│   ├── SETUP_GUIDE.md          # Installation instructions
+│   ├── RESEARCH_GUIDE.md       # Thesis workflow and physics
+│   └── QUICK_REFERENCE.md      # Command cheatsheet
+│
+├── EXPERIMENTS_LOG.md          # Track all experiments and results
+├── NOTES.md                    # Research notes and observations
+├── requirements.txt            # Python dependencies
+└── README.md                   # This file
 ```
 
 ---
 
-## 🎓 Thesis Contributions
+## 🔬 Systematic Experiments
 
-### 1. Real-Time Classification
-- **0.5ms per event** (vs 500s for traditional fitting)
-- Process 10,000 LSST alerts in **0.1 minutes**
-- **1.3 million × speedup**
+All experiments use the same architecture; only data conditions vary.
 
-### 2. Physical Detection Limits
-- Identified u₀ > 0.3 as fundamental threshold
-- ~25% of realistic binaries intrinsically PSPL-like
-- **Astrophysical limit, not algorithmic**
+### 1. Baseline (Reference)
+**Goal**: Establish performance on realistic population  
+**Config**: 1M events, 20% missing, 0.10 mag error, wide u₀ range  
+**Command**:
+```bash
+python simulate.py --n_pspl 500000 --n_binary 500000 \
+    --output ../data/raw/baseline_1M.npz --binary_params baseline
+python train.py --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline
+```
 
-### 3. Observing Strategy Guidance
-- Dense cadence (95% coverage) critical
-- Improves performance by 15-25% over sparse
-- Early detection possible at 50% completion
+### 2. Cadence Studies (4 experiments)
+**Goal**: Quantify observing frequency requirements
 
-### 4. Architecture Innovation
-- TimeDistributed CNN with temporal aggregation
-- Mean/max pooling outperforms single-timestep by 18.7%
-- Captures distributed caustic features
+| Experiment | Missing % | Coverage | Survey Type |
+|------------|-----------|----------|-------------|
+| Dense | 5% | 95% | LSST-like |
+| Baseline | 20% | 80% | Reference |
+| Sparse | 30% | 70% | Poor |
+| Very Sparse | 40% | 60% | Minimal |
 
----
+### 3. Photometric Error Studies (3 experiments)
+**Goal**: Test robustness to measurement uncertainty
 
-## ⚡ Performance
+| Experiment | Error (mag) | Quality |
+|------------|-------------|---------|
+| Low | 0.05 | Space-based (Roman) |
+| Baseline | 0.10 | Ground-based (LSST) |
+| High | 0.20 | Poor conditions |
 
-### Hardware Requirements
-- **Training:** 4× GPUs (AMD MI300A or NVIDIA A100)
-- **Inference:** Single GPU or even CPU
-- **Memory:** 16 GB minimum, 64 GB recommended
+### 4. Binary Topology Studies (3 experiments)
+**Goal**: Understand physical detection limits
 
-### Speed
-- **Dataset generation:** ~3 hours for 1M events (192 cores)
-- **Training:** ~8 hours for 50 epochs (4 GPUs)
-- **Evaluation:** ~15 minutes
-- **Inference:** <1ms per event
-
----
-
-## 📊 Key Results Summary
-
-**Main Finding:** Model achieves near-optimal performance (85-95%) for caustic-crossing binaries but realistic populations show 70-75% due to fundamental physics (u₀ > 0.3 limit).
-
-**Operational Impact:** Real-time classification feasible for LSST/Roman alert streams with minimal infrastructure.
-
-**Physical Insight:** Detection limit is astrophysical (impact parameter threshold), not algorithmic.
+| Experiment | u₀ range | s range | q range | Expected |
+|------------|----------|---------|---------|----------|
+| Distinct | 0.001-0.15 | 0.8-1.5 | 0.01-0.5 | High accuracy |
+| Planetary | 0.001-0.5 | 0.5-3.0 | 0.0001-0.01 | Moderate |
+| Stellar | 0.001-0.8 | 0.3-5.0 | 0.3-1.0 | Challenging |
 
 ---
 
-## 📚 Documentation
+## 🧮 Physics Background (Brief)
 
-- **[Setup Guide](docs/SETUP_GUIDE.md)** - Installation instructions
-- **[Research Guide](docs/RESEARCH_GUIDE.md)** - Complete experimental workflow
-- **[Quick Reference](docs/QUICK_REFERENCE.md)** - Command cheat sheet
+### Why Binary Lenses Are Hard to Detect
+
+**Point-Source Point-Lens (PSPL)**: Simple, symmetric magnification curve  
+**Binary Lens**: Complex caustic topology creates sharp features
+
+**Key Parameter: u₀ (impact parameter)**
+- **u₀ < 0.15**: Source crosses caustics → clearly binary
+- **u₀ = 0.15-0.30**: Marginal → sometimes detectable
+- **u₀ > 0.30**: No caustic crossing → fundamentally PSPL-like
+
+**Hypothesis**: Model failures will concentrate at large u₀ (physical limit, not algorithmic).
+
+**For detailed physics**: See `docs/RESEARCH_GUIDE.md`
 
 ---
 
-## 🐛 Known Issues (FIXED)
+## 📈 Expected Outcomes
 
-### ~~Issue: Low Accuracy (~54%)~~
-**Status:** ✅ FIXED  
-**Problem:** Using only last timestep for classification  
-**Solution:** Aggregate across all timesteps with `outputs.mean(dim=1)`  
-**Impact:** +18.7% accuracy improvement  
+Based on preliminary testing and physics:
+
+| Metric | Expected Range | Notes |
+|--------|----------------|-------|
+| Baseline Accuracy | 70-75% | Limited by u₀ > 0.3 events |
+| Distinct Accuracy | 85-95% | Caustic-crossing only |
+| Dense Cadence | +10-15% vs Sparse | Cadence critical |
+| Early Detection (50%) | 65-70% | Sufficient for triggering |
+| Inference Speed | <1 ms/event | 1M× faster than fitting |
+
+**These are hypotheses** - actual results in `EXPERIMENTS_LOG.md`
 
 ---
 
-## 📝 Citation
-```bibtex
-@mastersthesis{bhatia2025realtime,
-  title={Real-Time Binary Microlensing Classification using Deep Learning},
-  author={Bhatia, Kunal},
-  year={2025},
-  school={University of Heidelberg},
-  note={Achieves 73-78\% accuracy with 0.5ms inference time}
-}
+## 📝 Documentation
+
+- **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Complete installation guide (local + HPC)
+- **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Physics background, experiment design, thesis structure
+- **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet for all experiments
+- **[EXPERIMENTS_LOG.md](EXPERIMENTS_LOG.md)**: Track experiment progress and results
+- **[NOTES.md](NOTES.md)**: Research notes, observations, todos
+
+---
+
+## 🧪 Reproducibility
+
+All experiments are fully reproducible:
+
+1. **Fixed random seeds**: Set in `config.py` and enforced in all scripts
+2. **Saved configurations**: All experiment parameters logged
+3. **Data permutations**: Saved and reapplied consistently
+4. **Exact versions**: See `requirements.txt` for pinned dependencies
+5. **Hardware-agnostic**: Works on NVIDIA and AMD GPUs
+
+**To reproduce any experiment**:
+```bash
+# Use exact configuration from EXPERIMENTS_LOG.md
+python simulate.py [EXACT_PARAMS_FROM_LOG]
+python train.py [EXACT_PARAMS_FROM_LOG]
 ```
 
 ---
@@ -249,25 +261,29 @@ Thesis/
 
 **Author**: Kunal Bhatia  
 **Email**: kunal29bhatia@gmail.com  
-**Institution**: University of Heidelberg  
+**Institution**: University of Heidelberg
+
+**For Issues**:
+- Code bugs: Open GitHub issue
+- Physics questions: See `docs/RESEARCH_GUIDE.md`
+- Setup problems: See `docs/SETUP_GUIDE.md`
 
 ---
 
-## 🎯 Next Steps
+## 📚 Citation
 
-1. **Complete systematic experiments** (cadence, error, topology)
-2. **Analyze u₀ distribution** of misclassifications
-3. **Create comparison visualizations**
-4. **Write thesis chapters**
+```bibtex
+@mastersthesis{bhatia2025realtime,
+  title={Real-Time Binary Microlensing Classification using Deep Learning for Survey Operations},
+  author={Bhatia, Kunal},
+  year={2025},
+  school={University of Heidelberg},
+  note={Code available at https://github.com/YOUR_USERNAME/Thesis}
+}
+```
 
 ---
 
-**Status**: Active Development  
-**Version**: 2.0.0 (Fixed)  
-**Last Updated**: October 2025
+## License
 
----
-
-## 🌟 The Bottom Line
-
-Traditional microlensing analysis cannot keep pace with next-generation surveys. This framework demonstrates that deep learning enables **real-time classification** at survey scales with proper temporal aggregation, while identifying fundamental physical limits in binary detection.
+MIT License - See [LICENSE](LICENSE) for details.
