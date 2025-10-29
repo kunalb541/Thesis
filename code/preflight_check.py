@@ -58,10 +58,8 @@ def check_paths(base_dir: Path):
     ok = True
     needed = [
         base_dir/"data"/"raw",
-        base_dir/"data"/"processed",
         base_dir/"models",
         base_dir/"results",
-        base_dir/"logs",
     ]
     for p in needed:
         if not p.exists():
