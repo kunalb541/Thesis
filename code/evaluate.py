@@ -181,7 +181,8 @@ def main():
     parser.add_argument("--data", type=str, required=True, help="Path to .npz produced by simulate.py")
     parser.add_argument("--batch_size", type=int, default=CFG.BATCH_SIZE)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--plots", type=str, default=None, help="Directory to save plots (optional)")
+    parser.add_argument("--output_dir", type=str, default=None, help="Directory to save evaluation results")
+    parser.add_argument("--early_detection", action="store_true", help="Run early detection analysis")
     args = parser.parse_args()
 
     # Load dataset (perm-aware)
@@ -196,7 +197,12 @@ def main():
     model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2).to(device)
 
     ckpt = torch.load(args.model, map_location=device)
-    state = ckpt["model"] if "model" in ckpt else ckpt
+    if "model_state_dict" in ckpt:
+        state = ckpt["model_state_dict"]
+    elif "model" in ckpt:
+        state = ckpt["model"]
+    else:
+        state = ckpt
     model.load_state_dict(state)
 
     # Inference
@@ -212,7 +218,7 @@ def main():
 
     # Early detection
     early_metrics = {}
-    if getattr(CFG, "EARLY_DETECTION_CHECKPOINTS", None):
+    if args.early_detection and getattr(CFG, "EARLY_DETECTION_CHECKPOINTS", None):
         print("\n=== Early Detection ===")
         for frac in CFG.EARLY_DETECTION_CHECKPOINTS:
             Xe = early_detection_subset(X, frac)
@@ -224,7 +230,7 @@ def main():
             print(f"{frac:>5.2f} observed -> acc {me['accuracy']:.4f}")
 
     # Plots (optional)
-    plot_curves(args.plots, logits, labels)
+    plot_curves(args.output_dir, logits, labels)
 
     # Print save path for JSON summary
     summary = {
@@ -234,7 +240,7 @@ def main():
         "data": os.path.abspath(args.data),
         "model": os.path.abspath(args.model),
     }
-    out_dir = args.plots or os.path.dirname(args.model) or "."
+    out_dir = args.output_dir or os.path.dirname(args.model) or "."
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "evaluation_summary.json")
     with open(out_path, "w", encoding="utf-8") as f:

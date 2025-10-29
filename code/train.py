@@ -222,13 +222,13 @@ def main():
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save({"model": model.state_dict(), "epoch": epoch, "val_acc": val_acc}, best_path)
+            torch.save({"model_state_dict": model.state_dict(), "epoch": epoch, "val_acc": val_acc}, best_path)
             if CFG.SAVE_BEST_ONLY:
                 print(f"  ↳ saved best model to {best_path}")
 
         if CFG.SAVE_CHECKPOINTS and (not CFG.SAVE_BEST_ONLY) and (epoch % CFG.CHECKPOINT_FREQ == 0):
             ckpt_path = best_path.replace(".pt", f".epoch{epoch}.pt")
-            torch.save({"model": model.state_dict(), "epoch": epoch, "val_acc": val_acc}, ckpt_path)
+            torch.save({"model_state_dict": model.state_dict(), "epoch": epoch, "val_acc": val_acc}, ckpt_path)
             print(f"  ↳ checkpoint saved to {ckpt_path}")
 
     # Test evaluation
