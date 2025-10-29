@@ -141,8 +141,6 @@ Thesis/
 │   ├── RESEARCH_GUIDE.md       # Thesis workflow and physics
 │   └── QUICK_REFERENCE.md      # Command cheatsheet
 │
-├── EXPERIMENTS_LOG.md          # Track all experiments and results
-├── NOTES.md                    # Research notes and observations
 ├── requirements.txt            # Python dependencies
 └── README.md                   # This file
 ```
@@ -212,20 +210,6 @@ python train.py --data ../data/raw/baseline_1M.npz \
 
 ---
 
-## 📈 Expected Outcomes
-
-Based on preliminary testing and physics:
-
-| Metric | Expected Range | Notes |
-|--------|----------------|-------|
-| Baseline Accuracy | 70-75% | Limited by u₀ > 0.3 events |
-| Distinct Accuracy | 85-95% | Caustic-crossing only |
-| Dense Cadence | +10-15% vs Sparse | Cadence critical |
-| Early Detection (50%) | 65-70% | Sufficient for triggering |
-| Inference Speed | <1 ms/event | 1M× faster than fitting |
-
-**These are hypotheses** - actual results in `EXPERIMENTS_LOG.md`
-
 ---
 
 ## 📝 Documentation
@@ -233,8 +217,6 @@ Based on preliminary testing and physics:
 - **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Complete installation guide (local + HPC)
 - **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Physics background, experiment design, thesis structure
 - **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet for all experiments
-- **[EXPERIMENTS_LOG.md](EXPERIMENTS_LOG.md)**: Track experiment progress and results
-- **[NOTES.md](NOTES.md)**: Research notes, observations, todos
 
 ---
 
