@@ -79,6 +79,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6
 pip install -r requirements.txt
 
 # Verify
+python code/utils.py
 python code/preflight_check.py
 ```
 
@@ -129,7 +130,7 @@ Thesis/
 │   ├── model.py                 # TimeDistributedCNN architecture
 │   ├── config.py                # All experiment configurations
 │   └── utils.py                 # GPU detection, dataset loading
-│   └── preflight_check.py                 # GPU detection, dataset loading
+│   └── preflight_check.py       # GPU Check
 │
 ├── data/
 │   └── raw/                     # Simulated light curves (.npz)
@@ -231,11 +232,6 @@ All experiments are fully reproducible:
 4. **Exact versions**: See `requirements.txt` for pinned dependencies
 5. **Hardware-agnostic**: Works on NVIDIA and AMD GPUs
 
-**To reproduce any experiment**:
-```bash
-# Use exact configuration from EXPERIMENTS_LOG.md
-python simulate.py [EXACT_PARAMS_FROM_LOG]
-python train.py [EXACT_PARAMS_FROM_LOG]
 ```
 
 ---
