@@ -129,8 +129,8 @@ Thesis/
 │   ├── benchmark_realtime.py    # Inference speed benchmarking
 │   ├── model.py                 # TimeDistributedCNN architecture
 │   ├── config.py                # All experiment configurations
-│   └── utils.py                 # GPU detection, dataset loading
-│   └── preflight_check.py       # GPU Check
+│   └── utils.py                 # GPU Check
+│   └── preflight_check.py       # GPU detection, dataset loading
 │
 ├── data/
 │   └── raw/                     # Simulated light curves (.npz)
