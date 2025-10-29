@@ -281,7 +281,7 @@ salloc --partition=gpu \
 
 # Once allocated, test
 conda activate microlens
-python code/utils.py
+python code/preflight_check.py
 
 # Exit when done
 exit
