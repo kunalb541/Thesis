@@ -36,34 +36,31 @@ from utils import load_npz_dataset, apply_pad_to_zero
 # Model (must match train)
 # -------------------------
 
-class CNN1D(nn.Module):
-    def __init__(self, input_len: int):
+class TimeDistributedCNN(nn.Module):
+    """
+    Produces per-timestep class logits of shape [B, L, num_classes].
+    Convs are padding-preserving so temporal length stays L.
+    """
+    def __init__(self, sequence_length: int, num_channels: int = 1, num_classes: int = 2):
         super().__init__()
         c1, c2, c3 = CFG.CONV1_FILTERS, CFG.CONV2_FILTERS, CFG.CONV3_FILTERS
-        self.net = nn.Sequential(
-            nn.Conv1d(1, c1, kernel_size=9, padding=4),
+        self.feature = nn.Sequential(
+            nn.Conv1d(num_channels, c1, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(c1, c2, kernel_size=7, padding=3),
+            nn.Conv1d(c1, c2, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(c2, c3, kernel_size=5, padding=2),
+            nn.Conv1d(c2, c3, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(1),
         )
-        self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(c3, CFG.FC1_UNITS),
-            nn.ReLU(inplace=True),
-            nn.Dropout(CFG.DROPOUT_RATE),
-            nn.Linear(CFG.FC1_UNITS, 2),
-        )
+        # 1x1 conv to project features to class logits per timestep
+        self.classifier = nn.Conv1d(c3, num_classes, kernel_size=1)
 
-    def forward(self, x):
-        z = self.net(x)
-        return self.head(z)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C=1, L]
+        z = self.feature(x)              # [B, c3, L]
+        logits_per_t = self.classifier(z)  # [B, num_classes, L]
+        # return [B, L, num_classes] to match caller’s expectation
+        return logits_per_t.transpose(1, 2)
 
 # -------------------------
 # Dataset wrapper
@@ -91,8 +88,10 @@ def run_inference(model: nn.Module, loader: DataLoader, device: torch.device) ->
     logits_list, labels_list = [], []
     for xb, yb in loader:
         xb = xb.to(device)
-        out = model(xb)
-        logits_list.append(out.cpu().numpy())
+        outputs = model(xb)  # [B, L, 2]
+        # CRITICAL FIX: Aggregate over time dimension to get sequence-level logits
+        logits = outputs.mean(dim=1)  # [B, 2]
+        logits_list.append(logits.cpu().numpy())
         labels_list.append(yb.numpy())
     logits = np.concatenate(logits_list, axis=0)
     labels = np.concatenate(labels_list, axis=0)
@@ -192,7 +191,10 @@ def main():
 
     # Build model and load weights
     device = torch.device(args.device)
-    model = CNN1D(input_len=L).to(device)
+    # REPLACED: model = CNN1D(input_len=L).to(device)
+    # WITH:
+    model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2).to(device)
+
     ckpt = torch.load(args.model, map_location=device)
     state = ckpt["model"] if "model" in ckpt else ckpt
     model.load_state_dict(state)

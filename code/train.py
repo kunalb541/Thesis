@@ -51,35 +51,45 @@ def load_npz_dataset(npz_path, apply_perm=True):
     return X, y, timestamps, meta
 
 # ---- Model ----
-class CNN1D(nn.Module):
-    def __init__(self, input_len: int):
+class TimeDistributedCNN(nn.Module):
+    """CNN that outputs predictions at each timestep"""
+    def __init__(self, sequence_length=1500, num_channels=1, num_classes=2):
         super().__init__()
         c1, c2, c3 = CFG.CONV1_FILTERS, CFG.CONV2_FILTERS, CFG.CONV3_FILTERS
-        self.net = nn.Sequential(
-            nn.Conv1d(1, c1, kernel_size=9, padding=4),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(c1, c2, kernel_size=7, padding=3),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(c2, c3, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(1),
-        )
-        self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(c3, CFG.FC1_UNITS),
-            nn.ReLU(inplace=True),
-            nn.Dropout(CFG.DROPOUT_RATE),
-            nn.Linear(CFG.FC1_UNITS, 2),  # 2 classes
-        )
-
+        
+        self.conv1 = nn.Conv1d(num_channels, c1, kernel_size=9, padding=4)
+        self.bn1 = nn.BatchNorm1d(c1)
+        self.conv2 = nn.Conv1d(c1, c2, kernel_size=7, padding=3)
+        self.bn2 = nn.BatchNorm1d(c2)
+        self.conv3 = nn.Conv1d(c2, c3, kernel_size=5, padding=2)
+        self.bn3 = nn.BatchNorm1d(c3)
+        
+        self.dropout = nn.Dropout(CFG.DROPOUT_RATE)
+        self.relu = nn.ReLU()
+        
+        self.fc1 = nn.Linear(c3, CFG.FC1_UNITS)
+        self.fc2 = nn.Linear(CFG.FC1_UNITS, num_classes)
+        
     def forward(self, x):
         # x: [B, 1, L]
-        z = self.net(x)
-        return self.head(z)
+        # x = x.transpose(1, 2)  # [B, L, 1] - but wait, input is [B, 1, L]
+        # Keep as [B, 1, L] for conv1d
+        x = self.relu(self.bn1(self.conv1(x)))  # [B, c1, L]
+        x = self.dropout(x)
+        x = self.relu(self.bn2(self.conv2(x)))  # [B, c2, L]
+        x = self.dropout(x)
+        x = self.relu(self.bn3(self.conv3(x)))  # [B, c3, L]
+        x = self.dropout(x)
+        
+        # Now x is [B, c3, L] - transpose to [B, L, c3]
+        x = x.transpose(1, 2)  # [B, L, c3]
+        
+        # Apply FC layers at each timestep
+        x = self.relu(self.fc1(x))  # [B, L, FC1_UNITS]
+        x = self.dropout(x)
+        x = self.fc2(x)  # [B, L, num_classes]
+        
+        return x  # [B, L, 2] - predictions at each timestep
 
 # ---- Dataset ----
 class NumpyDataset(torch.utils.data.Dataset):
@@ -112,12 +122,18 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip=None):
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(xb)
+        
+        outputs = model(xb)  # [B, L, 2]
+        
+        # CRITICAL FIX: Aggregate across time
+        logits = outputs.mean(dim=1)  # [B, 2] - average all timesteps
+        
         loss = crit(logits, yb)
         loss.backward()
         if grad_clip is not None:
             nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
+        
         bs = xb.size(0)
         total_loss += loss.item() * bs
         total_acc += accuracy(logits.detach(), yb) * bs
@@ -131,7 +147,10 @@ def evaluate(model, loader, device):
     crit = nn.CrossEntropyLoss()
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
-        logits = model(xb)
+        
+        outputs = model(xb)  # [B, L, 2]
+        logits = outputs.mean(dim=1)  # [B, 2] - CRITICAL FIX
+        
         loss = crit(logits, yb)
         bs = xb.size(0)
         total_loss += loss.item() * bs
@@ -175,7 +194,10 @@ def main():
     test_loader  = torch.utils.data.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = CNN1D(input_len=L).to(device)
+    
+    # Updated model instantiation
+    model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2).to(device)
+    
     if CFG.OPTIMIZER.lower() == "adamw":
         optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:

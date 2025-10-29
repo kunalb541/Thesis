@@ -40,7 +40,6 @@ for exp in "${experiments[@]}"; do
     python evaluate.py \
         --model "$RESULTS_DIR/best_model.pt" \
         --data "../data/raw/$data" \
-        --scaler "$RESULTS_DIR/scaler.pkl" \
         --output_dir "$RESULTS_DIR/evaluation" \
         --batch_size 128 \
         --early_detection
