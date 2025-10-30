@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py — Evaluate a trained model on an NPZ dataset
-- Loads NPZ (applies saved permutation if present)
-- Uses PAD_VALUE from config for preprocessing
-- Computes Accuracy, ROC-AUC, PR-AUC, Confusion Matrix
-- Optional early-detection analysis using fractions from config
-- Optional plots (ROC, PR, confusion matrix)
-
-Usage:
-  python evaluate.py --model models/baseline.pt --data data/raw/events_baseline_1M.npz --output_dir results/plots
+evaluate.py — FIXED VERSION with proper temporal loss
+Matches train.py and TensorFlow notebook approach
 
 Author: Kunal Bhatia
+Version: FIXED
 """
 
 
@@ -35,8 +29,8 @@ from tqdm import tqdm
 
 # Local imports
 import config as CFG
-from model import TimeDistributedCNN  # FIX #3: Import unified model
-from utils import load_npz_dataset  # FIX #3: Import dataset loader from utils
+from model import TimeDistributedCNN
+from utils import load_npz_dataset
 
 def find_latest_results_dir(experiment_name, base_dir='../results'):
     """Find the most recent results directory for an experiment"""
@@ -56,8 +50,6 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
 
 class NumpyDataset(Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray):
-        # The apply_pad_to_zero utility function from utils is not defined in the original diff, 
-        # but the logic is simple: map PAD_VALUE to 0.0. Doing this inline for reliability.
         X_copy = X.copy()
         X_copy[X_copy == CFG.PAD_VALUE] = 0.0
         self.X = torch.from_numpy(X_copy).float().unsqueeze(1)  # [N, 1, L]
@@ -75,21 +67,53 @@ class NumpyDataset(Dataset):
 
 @torch.no_grad()
 def run_inference(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    FIXED: Computes per-timestep loss for consistency with training
+    """
     model.eval()
     logits_list, labels_list, all_logits_t_list = [], [], []
+    criterion = nn.CrossEntropyLoss()
+    total_loss = 0.0
+    n_samples = 0
+    
     for xb, yb in tqdm(loader, desc="Running Inference"):
         xb = xb.to(device)
+        yb = yb.to(device)
+        
         outputs = model(xb)  # [B, L, 2]
+        
+        # ============================================================
+        # 🔥 KEY FIX: Compute loss at EVERY timestep (consistency with training)
+        # ============================================================
+        B, L, C = outputs.shape
+        
+        # Repeat labels across timesteps
+        yb_repeated = yb.unsqueeze(1).expand(B, L)  # [B, L]
+        
+        # Reshape and compute loss
+        outputs_flat = outputs.reshape(B * L, C)  # [B*L, 2]
+        yb_flat = yb_repeated.reshape(B * L)  # [B*L]
+        
+        loss = criterion(outputs_flat, yb_flat)
+        total_loss += loss.item() * B
+        n_samples += B
+        # ============================================================
+        
         all_logits_t_list.append(outputs.cpu().numpy())
-        # Aggregate over time dimension to get sequence-level logits
+        
+        # Aggregate over time dimension for final prediction
         logits = outputs.mean(dim=1)  # [B, 2]
         logits_list.append(logits.cpu().numpy())
-        labels_list.append(yb.numpy())
+        labels_list.append(yb.cpu().numpy())
         
+    avg_loss = total_loss / n_samples
     logits = np.concatenate(logits_list, axis=0)
     labels = np.concatenate(labels_list, axis=0)
     logits_t = np.concatenate(all_logits_t_list, axis=0)
-    return logits, labels, logits_t # Return per-timestep logits as well
+    
+    print(f"\n✓ Average loss (per-timestep): {avg_loss:.4f}")
+    
+    return logits, labels, logits_t
 
 def compute_metrics(logits: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
     probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
@@ -98,11 +122,10 @@ def compute_metrics(logits: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
 
     acc = (preds == labels).mean().item()
     
-    # Handle case where only one class is present in the batch, or all predictions are the same
     try:
         fpr, tpr, _ = roc_curve(labels, p1)
         roc_auc = auc(fpr, tpr)
-    except ValueError: # Happens if all labels are the same
+    except ValueError:
         roc_auc = float('nan')
 
     precision, recall, _ = precision_recall_curve(labels, p1)
@@ -127,7 +150,7 @@ def early_detection_subset(X: np.ndarray, frac: float) -> np.ndarray:
     X_early = np.full_like(X, fill_value=CFG.PAD_VALUE)
     X_early[:, :keep] = X[:, :keep]
     
-    X_early_conv = X_early.copy() # Avoid modifying the pad_value-filled array
+    X_early_conv = X_early.copy()
     X_early_conv[X_early_conv == CFG.PAD_VALUE] = 0.0
     return X_early_conv
 
@@ -204,10 +227,16 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
+    print("="*80)
+    print("🔥 FIXED EVALUATION WITH TEMPORAL LOSS")
+    print("="*80)
+    print("\n✅ Loss computed at EVERY timestep (matches training)")
+    print(f"\nModel: {args.model}")
+    print(f"Data: {args.data}")
+    print(f"Output: {args.output_dir}")
 
     # Load dataset (perm-aware)
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
-    # Note: X passed to NumpyDataset will be 0-padded for the model
     L = X.shape[1]
 
     # Build model and load weights
@@ -215,12 +244,12 @@ def main():
     model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2).to(device)
 
     ckpt = torch.load(args.model, map_location=device)
-    if "model_state_dict" in ckpt: # Preferred key (from train.py fix)
+    if "model_state_dict" in ckpt:
         state = ckpt["model_state_dict"]
-    elif "model" in ckpt: # Legacy key
+    elif "model" in ckpt:
         state = ckpt["model"]
     else:
-        state = ckpt # Raw state dict
+        state = ckpt
     model.load_state_dict(state)
 
     # Inference
@@ -239,42 +268,52 @@ def main():
     early_metrics = {}
     if args.early_detection and getattr(CFG, "EARLY_DETECTION_CHECKPOINTS", None):
         print("\n=== Early Detection ===")
-        # Keep track of all accuracies for a full early detection plot if needed later
         early_detection_accuracies = {}
         for frac in CFG.EARLY_DETECTION_CHECKPOINTS:
-            # 1. Prepare early data (X is full, but passed to utility which pads)
+            # Prepare early data
             Xe_padded_conv = early_detection_subset(X, frac)
-            dse = NumpyDataset(Xe_padded_conv, y) # Use the already 0-padded version
-            num_workers = min(8, os.cpu_count() or 4)  # Reasonable for evaluation
+            dse = NumpyDataset(Xe_padded_conv, y)
+            num_workers = min(8, os.cpu_count() or 4)
             loe = DataLoader(dse, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-            # 2. Run inference on early data
+            
+            # Run inference on early data
             loge, labe, _ = run_inference(model, loe, device)
-            # 3. Compute metrics
+            
+            # Compute metrics
             me = compute_metrics(loge, labe)
             early_detection_accuracies[frac] = me["accuracy"]
             print(f"{frac:>5.2f} observed -> acc {me['accuracy']:.4f}")
         early_metrics = early_detection_accuracies
 
-    # Plots (optional)
+    # Plots
     plot_curves(args.output_dir, logits, labels)
 
-    # Print save path for JSON summary
+    # Save summary
     summary = {
         "metrics": metrics,
         "early_detection": early_metrics,
         "meta": meta,
         "data": os.path.abspath(args.data),
         "model": os.path.abspath(args.model),
+        "fix_applied": "temporal_loss_per_timestep",
     }
     
-    # Save a separate file with the per-timestep logits for later analysis (optional)
+    # Save per-timestep logits for analysis
     np.savez_compressed(os.path.join(args.output_dir, "predictions_full.npz"), 
                         logits_agg=logits, labels=labels, logits_t=logits_t, timestamps=timestamps)
     
     out_path = os.path.join(args.output_dir, "evaluation_summary.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    print(f"\nSummary saved to: {out_path}")
+    print(f"\n✓ Summary saved to: {out_path}")
+    
+    # Success message
+    if metrics['accuracy'] > 0.65:
+        print("\n🎉 SUCCESS! Accuracy > 65% - the temporal loss fix worked!")
+    elif metrics['accuracy'] > 0.55:
+        print("\n⚠️  Partial improvement. Model may need more training epochs.")
+    else:
+        print("\n❌ Still low accuracy. Check training logs and data quality.")
 
 if __name__ == "__main__":
     main()

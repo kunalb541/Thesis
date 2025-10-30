@@ -395,10 +395,7 @@ def main():
     else:
         print("ℹ️ Means differ; expected if priors/physics differ.")
 
-    print("\nLoad-time shuffle example:")
-    print("  with np.load(args.output, allow_pickle=False) as d:")
-    print("      X, y, perm = d['X'], d['y'], d['perm']")
-    print("      X, y = X[perm], y[perm]")
 
 if __name__ == "__main__":
     main()
+

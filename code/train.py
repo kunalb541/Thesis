@@ -2,7 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-train_fast.py — OPTIMIZED training with multi-GPU and mixed precision
+train.py — FIXED VERSION with proper temporal loss
+Matches TensorFlow notebook's approach of computing loss at EVERY timestep
+
+KEY FIX: Changed from aggregated loss to per-timestep loss
+This allows the model to learn temporal patterns properly!
 """
 
 import argparse
@@ -56,6 +60,9 @@ def accuracy(logits, y):
 
 
 def train_one_epoch(model, loader, optimizer, device, grad_clip=None, scaler=None):
+    """
+    FIXED: Now computes loss at EVERY timestep like TensorFlow notebook
+    """
     model.train()
     total_loss, total_acc, n = 0.0, 0.0, 0
     crit = nn.CrossEntropyLoss()
@@ -68,9 +75,25 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip=None, scaler=Non
         
         if scaler is not None:
             with autocast():
-                outputs = model(xb)
-                logits = outputs.mean(dim=1)
-                loss = crit(logits, yb)
+                outputs = model(xb)  # [B, L, 2]
+                
+                # ============================================================
+                # 🔥 KEY FIX: Compute loss at EVERY timestep
+                # ============================================================
+                B, L, C = outputs.shape
+                
+                # Repeat labels across timesteps (like TensorFlow notebook)
+                yb_repeated = yb.unsqueeze(1).expand(B, L)  # [B, L]
+                
+                # Reshape and compute loss
+                outputs_flat = outputs.reshape(B * L, C)  # [B*L, 2]
+                yb_flat = yb_repeated.reshape(B * L)  # [B*L]
+                
+                loss = crit(outputs_flat, yb_flat)
+                # ============================================================
+                
+                # For accuracy, aggregate predictions
+                logits = outputs.mean(dim=1)  # [B, 2]
             
             scaler.scale(loss).backward()
             if grad_clip:
@@ -79,9 +102,26 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip=None, scaler=Non
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(xb)
-            logits = outputs.mean(dim=1)
-            loss = crit(logits, yb)
+            outputs = model(xb)  # [B, L, 2]
+            
+            # ============================================================
+            # 🔥 KEY FIX: Compute loss at EVERY timestep
+            # ============================================================
+            B, L, C = outputs.shape
+            
+            # Repeat labels across timesteps
+            yb_repeated = yb.unsqueeze(1).expand(B, L)  # [B, L]
+            
+            # Reshape and compute loss
+            outputs_flat = outputs.reshape(B * L, C)  # [B*L, 2]
+            yb_flat = yb_repeated.reshape(B * L)  # [B*L]
+            
+            loss = crit(outputs_flat, yb_flat)
+            # ============================================================
+            
+            # For accuracy, aggregate predictions
+            logits = outputs.mean(dim=1)  # [B, 2]
+            
             loss.backward()
             if grad_clip:
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -92,13 +132,16 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip=None, scaler=Non
         total_acc += accuracy(logits.detach(), yb) * bs
         n += bs
         
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{accuracy(logits.detach(), yb):.3f}'})
     
     return total_loss / n, total_acc / n
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
+    """
+    FIXED: Also uses per-timestep loss for consistency
+    """
     model.eval()
     total_loss, total_acc, n = 0.0, 0.0, 0
     crit = nn.CrossEntropyLoss()
@@ -106,10 +149,26 @@ def evaluate(model, loader, device):
     for xb, yb in tqdm(loader, desc="Validating", leave=False):
         xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
         
-        outputs = model(xb)
-        logits = outputs.mean(dim=1)
+        outputs = model(xb)  # [B, L, 2]
         
-        loss = crit(logits, yb)
+        # ============================================================
+        # 🔥 KEY FIX: Compute loss at EVERY timestep
+        # ============================================================
+        B, L, C = outputs.shape
+        
+        # Repeat labels across timesteps
+        yb_repeated = yb.unsqueeze(1).expand(B, L)  # [B, L]
+        
+        # Reshape and compute loss
+        outputs_flat = outputs.reshape(B * L, C)  # [B*L, 2]
+        yb_flat = yb_repeated.reshape(B * L)  # [B*L]
+        
+        loss = crit(outputs_flat, yb_flat)
+        # ============================================================
+        
+        # For accuracy, aggregate predictions
+        logits = outputs.mean(dim=1)  # [B, 2]
+        
         bs = xb.size(0)
         total_loss += loss.item() * bs
         total_acc += accuracy(logits, yb) * bs
@@ -148,8 +207,9 @@ def main():
     log_path = output_dir / "training.log"
 
     print("="*80)
-    print("OPTIMIZED MULTI-GPU TRAINING")
+    print("🔥 FIXED TRAINING WITH TEMPORAL LOSS")
     print("="*80)
+    print("\n✅ KEY FIX: Loss computed at EVERY timestep (matches TensorFlow notebook)")
     print(f"\n📁 Output directory: {output_dir}")
     print(f"   Model: {best_model_path}")
     print(f"   Logs:  {log_path}")
@@ -174,6 +234,7 @@ def main():
             "dropout_rate": CFG.DROPOUT_RATE,
         },
         "timestamp": datetime.now().isoformat(),
+        "fix_applied": "temporal_loss_per_timestep",
     }
     
     with open(config_path, 'w') as f:
@@ -345,8 +406,14 @@ def main():
     logger.info("="*80)
     logger.info(f"✓ Training complete! Results saved to: {output_dir}")
     logger.info("="*80)
+    
+    if test_acc > 0.65:
+        logger.info("🎉 SUCCESS! Accuracy > 65% - the temporal loss fix worked!")
+    elif test_acc > 0.55:
+        logger.info("⚠️  Partial improvement. Try longer training or check data quality.")
+    else:
+        logger.info("❌ Still low accuracy. Check data generation and class balance.")
 
 
 if __name__ == "__main__":
     main()
-
