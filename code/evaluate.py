@@ -16,7 +16,10 @@ Author: Kunal Bhatia
 
 
 from __future__ import annotations
-
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for HPC
+import matplotlib.pyplot as plt
+import seaborn as sns
 import argparse
 import os
 import json
@@ -222,7 +225,8 @@ def main():
 
     # Inference
     ds = NumpyDataset(X, y)
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    num_workers = min(8, os.cpu_count() or 4)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     logits, labels, logits_t = run_inference(model, loader, device)
 
     # Metrics
@@ -241,7 +245,8 @@ def main():
             # 1. Prepare early data (X is full, but passed to utility which pads)
             Xe_padded_conv = early_detection_subset(X, frac)
             dse = NumpyDataset(Xe_padded_conv, y) # Use the already 0-padded version
-            loe = DataLoader(dse, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+            num_workers = min(8, os.cpu_count() or 4)  # Reasonable for evaluation
+            loe = DataLoader(dse, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
             # 2. Run inference on early data
             loge, labe, _ = run_inference(model, loe, device)
             # 3. Compute metrics

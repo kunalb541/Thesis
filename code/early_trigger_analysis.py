@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for HPC
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_curve, roc_curve
 import json
