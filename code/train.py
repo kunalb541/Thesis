@@ -270,7 +270,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", patience=CFG.LR_PATIENCE, 
-        factor=CFG.LR_FACTOR, verbose=True
+        factor=CFG.LR_FACTOR,
     )
 
     # Mixed precision

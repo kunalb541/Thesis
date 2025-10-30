@@ -13,17 +13,7 @@ Usage:
 
 Author: Kunal Bhatia
 """
-def find_latest_results_dir(experiment_name, base_dir='../results'):
-    """Find the most recent results directory for an experiment"""
-    base_path = Path(base_dir)
-    pattern = f"{experiment_name}_*"
-    
-    matching_dirs = sorted(base_path.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
-    
-    if not matching_dirs:
-        raise FileNotFoundError(f"No results directories found matching '{pattern}' in {base_dir}")
-    
-    return matching_dirs[0]
+
 
 from __future__ import annotations
 
@@ -45,6 +35,17 @@ import config as CFG
 from model import TimeDistributedCNN  # FIX #3: Import unified model
 from utils import load_npz_dataset  # FIX #3: Import dataset loader from utils
 
+def find_latest_results_dir(experiment_name, base_dir='../results'):
+    """Find the most recent results directory for an experiment"""
+    base_path = Path(base_dir)
+    pattern = f"{experiment_name}_*"
+    
+    matching_dirs = sorted(base_path.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
+    
+    if not matching_dirs:
+        raise FileNotFoundError(f"No results directories found matching '{pattern}' in {base_dir}")
+    
+    return matching_dirs[0]
 
 # -------------------------
 # Dataset wrapper
