@@ -76,7 +76,6 @@ results/
 | Real-time Benchmarking | ⏳ Queued | Inference speed tests |
 | Thesis Writing | ⏳ Not Started | Awaiting experiment completion |
 
-**Tracking**: See `EXPERIMENTS_LOG.md` for detailed progress.
 
 ---
 
