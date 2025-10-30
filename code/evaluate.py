@@ -13,6 +13,17 @@ Usage:
 
 Author: Kunal Bhatia
 """
+def find_latest_results_dir(experiment_name, base_dir='../results'):
+    """Find the most recent results directory for an experiment"""
+    base_path = Path(base_dir)
+    pattern = f"{experiment_name}_*"
+    
+    matching_dirs = sorted(base_path.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
+    
+    if not matching_dirs:
+        raise FileNotFoundError(f"No results directories found matching '{pattern}' in {base_dir}")
+    
+    return matching_dirs[0]
 
 from __future__ import annotations
 
@@ -164,16 +175,31 @@ def plot_curves(save_dir: Optional[str], logits: np.ndarray, labels: np.ndarray)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, help="Path to .pt saved by train.py")
-    parser.add_argument("--data", type=str, required=True, help="Path to .npz produced by simulate.py")
+    parser.add_argument("--model", type=str, default=None, help="Path to model checkpoint (auto-detect if not provided)")
+    parser.add_argument("--data", type=str, required=True, help="Path to test data")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory (auto-detect if not provided)")
+    parser.add_argument("--experiment_name", type=str, default=None, help="Experiment name (for auto-detect)")
     parser.add_argument("--batch_size", type=int, default=CFG.BATCH_SIZE)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save evaluation results") # FIX #4: output_dir now required
     parser.add_argument("--early_detection", action="store_true", help="Run early detection analysis")
     args = parser.parse_args()
     
-    # Create output directory early
+    # Auto-detect model and output_dir if not provided
+    if args.model is None or args.output_dir is None:
+        if args.experiment_name is None:
+            raise ValueError("Must provide either --model and --output_dir, OR --experiment_name for auto-detection")
+        
+        results_dir = find_latest_results_dir(args.experiment_name)
+        print(f"✓ Auto-detected results directory: {results_dir}")
+        
+        if args.model is None:
+            args.model = str(results_dir / "best_model.pt")
+        if args.output_dir is None:
+            args.output_dir = str(results_dir / "evaluation")
+    
+    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+
 
     # Load dataset (perm-aware)
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)

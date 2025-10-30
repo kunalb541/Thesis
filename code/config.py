@@ -248,21 +248,9 @@ RANDOM_SEED = 42
 # Base directory (automatically detected)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Data directories
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
-PROCESSED_DIR = os.path.join(BASE_DIR, 'data', 'processed')
-
-# Output directories
 MODEL_DIR = os.path.join(BASE_DIR, 'models')
 RESULTS_DIR = os.path.join(BASE_DIR, 'results')
-LOGS_DIR = os.path.join(BASE_DIR, 'logs')
-
-# Create directories if they don't exist
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(PROCESSED_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(LOGS_DIR, exist_ok=True)
 
 # ============================================================================
 # VBMICROLENSING PARAMETERS
