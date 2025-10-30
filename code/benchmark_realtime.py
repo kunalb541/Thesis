@@ -9,6 +9,7 @@ operational feasibility for LSST/Roman alert streams.
 
 Author: Kunal Bhatia
 Date: October 2025
+Version: 3.0
 """
 
 import torch
@@ -22,18 +23,20 @@ from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-# Local import of the unified model
+# Local imports
+import sys
+sys.path.insert(0, str(Path(__file__).parent / 'code'))
 from model import TimeDistributedCNN
+from utils import load_npz_dataset
 import config as CFG
 
-# Note: LightCurveDataset must handle the padding logic consistently with training/evaluation
 class LightCurveDataset(Dataset):
     def __init__(self, X, y):
         # Apply the same pre-processing as in train.py: map PAD_VALUE to 0.0
         X_processed = X.copy()
         X_processed[X_processed == CFG.PAD_VALUE] = 0.0
         
-        self.X = torch.from_numpy(X_processed).float().unsqueeze(1) # [N, 1, L]
+        self.X = torch.from_numpy(X_processed).float().unsqueeze(1)  # [N, 1, L]
         self.y = torch.LongTensor(y)
     
     def __len__(self):
@@ -41,6 +44,18 @@ class LightCurveDataset(Dataset):
     
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
+
+def find_latest_results_dir(experiment_name, base_dir='../results'):
+    """Find the most recent results directory for an experiment"""
+    base_path = Path(base_dir)
+    pattern = f"{experiment_name}_*"
+    
+    matching_dirs = sorted(base_path.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
+    
+    if not matching_dirs:
+        raise FileNotFoundError(f"No results directories found matching '{pattern}' in {base_dir}")
+    
+    return matching_dirs[0]
 
 def benchmark_inference_speed(model, data_loader, device, n_warmup=10):
     """
@@ -72,7 +87,6 @@ def benchmark_inference_speed(model, data_loader, device, n_warmup=10):
             batch_x = batch_x.to(device)
             
             start = time.perf_counter()
-            # The model outputs [B, L, 2], but we only measure the inference time for the forward pass
             _ = model(batch_x)
             if device == 'cuda':
                 torch.cuda.synchronize()
@@ -282,11 +296,25 @@ def plot_throughput_vs_batch_size(results, save_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Benchmark real-time capability')
-    parser.add_argument('--model', required=True, help='Path to model checkpoint')
+    parser.add_argument('--model', default=None, help='Path to model checkpoint (auto-detect if not provided)')
     parser.add_argument('--data', required=True, help='Path to test data')
-    parser.add_argument('--output_dir', required=True, help='Output directory')
+    parser.add_argument('--output_dir', default=None, help='Output directory (auto-detect if not provided)')
+    parser.add_argument('--experiment_name', default=None, help='Experiment name (for auto-detect)')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for testing')
     args = parser.parse_args()
+    
+    # Auto-detect model and output_dir if not provided
+    if args.model is None or args.output_dir is None:
+        if args.experiment_name is None:
+            raise ValueError("Must provide either --model and --output_dir, OR --experiment_name for auto-detection")
+        
+        results_dir = find_latest_results_dir(args.experiment_name)
+        print(f"✓ Auto-detected results directory: {results_dir}")
+        
+        if args.model is None:
+            args.model = str(results_dir / "best_model.pt")
+        if args.output_dir is None:
+            args.output_dir = str(results_dir / "benchmark")
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -304,38 +332,22 @@ def main():
     if device == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
-    # Load data
+    # Load data using unified loader
     print("\nLoading test data...")
-    data = np.load(args.data)
-    # The original script uses the last 10k. We must check if "perm" is present and apply it first.
-    # The benchmark uses a subset, so we will manually apply permutation to the entire dataset 
-    # and then slice the end. This is a robust way to handle the perm array.
-    X_full = data['X']
-    y_full = data['y']
-    if "perm" in data.files:
-        perm = data['perm']
-        X_full = X_full[perm]
-        y_full = y_full[perm]
+    X_full, y_full, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
     
-    # Label mapping (assumes labels are 'PSPL'/'Binary' strings or the 0/1 encoding used later)
-    # The provided data loader is simple, let's ensure the label encoding is correct.
-    if y_full.dtype.kind in ("U", "S", "O"):
-        y_encoded = np.array([0 if (str(v).lower().startswith("pspl")) else 1 for v in y_full], dtype=np.uint8)
-    else:
-        y_encoded = y_full.astype(np.uint8)
-        
     # Use last 10k for testing
     X_test = X_full[-10000:]
-    y_test_encoded = y_encoded[-10000:]
+    y_test = y_full[-10000:]
     
     print(f"Test data shape: {X_test.shape}")
     L = X_test.shape[1]
     
     # Load model
     print("\nLoading model...")
-    checkpoint = torch.load(args.model, map_location=device)
+    checkpoint = torch.load(args.model, map_location=device, weights_only=False)
     
-    # FIX #4: Corrected checkpoint key and unified model size
+    # Create model
     model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2)
     
     # Handle DataParallel saved state dicts
@@ -352,8 +364,8 @@ def main():
     # Run benchmarks
     all_results = {}
     
-    # 1. Latency benchmark (using the subset)
-    dataset_latency = LightCurveDataset(X_test, y_test_encoded)
+    # 1. Latency benchmark
+    dataset_latency = LightCurveDataset(X_test, y_test)
     loader_latency = DataLoader(dataset_latency, batch_size=args.batch_size, shuffle=False,
                        num_workers=4, pin_memory=True)
 
@@ -361,7 +373,7 @@ def main():
     all_results['latency'] = latency_results
     
     # 2. Throughput benchmark
-    throughput_results = benchmark_throughput(model, X_test, y_test_encoded, device)
+    throughput_results = benchmark_throughput(model, X_test, y_test, device)
     all_results['throughput'] = throughput_results
     
     # Plot throughput
@@ -369,7 +381,7 @@ def main():
     plot_throughput_vs_batch_size(throughput_results, plot_path)
     
     # 3. LSST scale benchmark
-    lsst_results = benchmark_lsst_scale(model, X_test, y_test_encoded, device)
+    lsst_results = benchmark_lsst_scale(model, X_test, y_test, device)
     all_results['lsst_scale'] = lsst_results
     
     # Save results

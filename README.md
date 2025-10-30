@@ -1,6 +1,6 @@
 ## Real-Time Microlensing Classification using Deep Learning
 
-**Master's Thesis Project - WORKING VERSION**  
+**Master's Thesis Project - Version 3.0**  
 **Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
 **Institution**: University of Heidelberg  
 **Last Updated**: October 2025
@@ -28,6 +28,36 @@
 **Impact**: +18.7% accuracy improvement (54.8% → 73.5%)
 
 All code in this repository includes the fix.
+
+---
+
+## 🆕 What's New in v3.0
+
+### Major Improvements
+- **✅ Timestamped Results**: All training runs save to `results/EXPERIMENT_NAME_TIMESTAMP/`
+- **✅ Auto-Detection**: Evaluation and benchmarking automatically find latest model
+- **✅ Unified Loading**: Consistent data loading across all scripts
+- **✅ Better Organization**: Separate directories for each experiment run
+- **✅ Reproducible**: All configs and logs saved with each experiment
+
+### Directory Structure
+```
+results/
+├── baseline_20251027_143022/      # Timestamped experiment folder
+│   ├── best_model.pt              # Best model checkpoint
+│   ├── config.json                # Experiment configuration
+│   ├── training.log               # Training logs
+│   ├── summary.json               # Final metrics
+│   ├── evaluation/                # Evaluation outputs
+│   │   ├── evaluation_summary.json
+│   │   ├── roc.png
+│   │   ├── pr.png
+│   │   └── confusion_matrix.png
+│   └── benchmark/                 # Benchmarking outputs
+│       ├── benchmark_results.json
+│       └── throughput_vs_batch_size.png
+└── baseline_20251028_091234/      # Another run for comparison
+```
 
 ---
 
@@ -80,7 +110,6 @@ pip install -r requirements.txt
 
 # Verify
 python code/utils.py
-python code/preflight_check.py
 ```
 
 ### Run Complete Workflow
@@ -97,23 +126,19 @@ python simulate.py \
 # 2. Train (2-3 hours on 4 GPUs)
 python train.py \
     --data ../data/raw/test_100k.npz \
-    --output ../models/test_100k.pt \
-    --epochs 50 \
-    --experiment_name test_100k
+    --experiment_name test_100k \
+    --epochs 50
 
-# 3. Evaluate
-RESULTS_DIR=$(ls -td ../results/test_100k_* | head -1)
+# 3. Evaluate (auto-detects latest results)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name test_100k \
     --data ../data/raw/test_100k.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 
-# 4. Real-time benchmark
+# 4. Real-time benchmark (auto-detects latest results)
 python benchmark_realtime.py \
-    --model $RESULTS_DIR/best_model.pt \
-    --data ../data/raw/test_100k.npz \
-    --output_dir $RESULTS_DIR/benchmark
+    --experiment_name test_100k \
+    --data ../data/raw/test_100k.npz
 ```
 
 ---
@@ -127,16 +152,27 @@ Thesis/
 │   ├── train.py                 # Training with temporal aggregation
 │   ├── evaluate.py              # Evaluation + early detection
 │   ├── benchmark_realtime.py    # Inference speed benchmarking
+│   ├── early_trigger_analysis.py # Follow-up trigger analysis
 │   ├── model.py                 # TimeDistributedCNN architecture
 │   ├── config.py                # All experiment configurations
-│   └── utils.py                 # GPU Check
-│   └── preflight_check.py       # GPU detection, dataset loading
+│   └── utils.py                 # Data loading and GPU utilities
 │
 ├── data/
 │   └── raw/                     # Simulated light curves (.npz)
 │
-├── models/                      # Saved model checkpoints
-├── results/                     # Training logs, evaluation outputs
+├── results/                     # Auto-generated timestamped directories
+│   └── {experiment}_{timestamp}/
+│       ├── best_model.pt        # Best model checkpoint
+│       ├── config.json          # Experiment configuration
+│       ├── training.log         # Training logs
+│       ├── summary.json         # Final metrics
+│       ├── evaluation/          # Evaluation results
+│       │   ├── evaluation_summary.json
+│       │   ├── roc.png
+│       │   └── ...
+│       └── benchmark/           # Benchmark results
+│           ├── benchmark_results.json
+│           └── throughput_vs_batch_size.png
 │
 ├── docs/
 │   ├── SETUP_GUIDE.md          # Installation instructions
@@ -212,6 +248,37 @@ python train.py --data ../data/raw/baseline_1M.npz \
 
 ---
 
+## 💡 Key Features (Version 3.0)
+
+### New in V3:
+- ✅ **Auto-detection of results**: No need to specify model paths manually
+- ✅ **Timestamped directories**: All results organized by experiment and timestamp
+- ✅ **Consistent data loading**: All scripts use `load_npz_dataset()` from utils
+- ✅ **Unified model definition**: Single `TimeDistributedCNN` class
+- ✅ **Comprehensive logging**: Training logs, configs, and summaries saved automatically
+- ✅ **Easy experiment tracking**: `--experiment_name` flag for automatic path management
+
+### Usage Examples:
+
+**Training** (auto-creates timestamped directory):
+```bash
+python train.py --data ../data/raw/baseline.npz --experiment_name baseline
+# Creates: results/baseline_20251030_143022/
+```
+
+**Evaluation** (auto-detects latest results):
+```bash
+python evaluate.py --experiment_name baseline --data ../data/raw/baseline.npz
+# Finds: results/baseline_20251030_143022/best_model.pt
+# Saves to: results/baseline_20251030_143022/evaluation/
+```
+
+**Benchmarking** (auto-detects latest results):
+```bash
+python benchmark_realtime.py --experiment_name baseline --data ../data/raw/baseline.npz
+# Saves to: results/baseline_20251030_143022/benchmark/
+```
+
 ---
 
 ## 📝 Documentation
@@ -227,12 +294,10 @@ python train.py --data ../data/raw/baseline_1M.npz \
 All experiments are fully reproducible:
 
 1. **Fixed random seeds**: Set in `config.py` and enforced in all scripts
-2. **Saved configurations**: All experiment parameters logged
-3. **Data permutations**: Saved and reapplied consistently
+2. **Saved configurations**: All experiment parameters logged to `config.json`
+3. **Data permutations**: Saved and reapplied consistently via `load_npz_dataset()`
 4. **Exact versions**: See `requirements.txt` for pinned dependencies
 5. **Hardware-agnostic**: Works on NVIDIA and AMD GPUs
-
-```
 
 ---
 
@@ -260,6 +325,25 @@ All experiments are fully reproducible:
   note={Code available at https://github.com/YOUR_USERNAME/Thesis}
 }
 ```
+
+---
+
+## 🔄 Version History
+
+**v3.0** (October 2025):
+- Auto-detection of results directories
+- Timestamped experiment organization
+- Unified data loading via `load_npz_dataset()`
+- Improved experiment tracking
+- Enhanced documentation
+
+**v2.0** (October 2025):
+- Fixed temporal aggregation bug
+- Added early detection analysis
+- Multi-GPU training support
+
+**v1.0** (September 2025):
+- Initial implementation
 
 ---
 

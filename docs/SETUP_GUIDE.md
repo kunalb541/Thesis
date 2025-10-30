@@ -1,4 +1,4 @@
-# Setup Guide: From Zero to Training
+# Setup Guide v3.0: From Zero to Training
 
 Complete installation guide for local workstations and HPC clusters.
 
@@ -112,21 +112,20 @@ This installs:
 ### 5. Verify Installation
 
 ```bash
-python code/preflight_check.py
+python code/utils.py
 ```
 
-This comprehensive check will:
-- ✅ Verify directory structure
-- ✅ Check Python version and packages
-- ✅ Detect GPUs and test computation
-- ✅ Check disk space and memory
-- ✅ Validate code files
+This will check:
+- ✅ PyTorch installed
+- ✅ GPU detection
+- ✅ All packages available
 
 **Expected output** (with GPU):
 ```
-✅ ALL CRITICAL CHECKS PASSED!
-
-✓ System is ready for baseline training
+✓ CUDA available: 1 GPU(s)
+  GPU 0: NVIDIA RTX 4090
+    Memory: 24.0 GB
+    Compute: 8.9
 ```
 
 ---
@@ -147,13 +146,106 @@ python simulate.py \
 # Quick training test (10 minutes)
 python train.py \
     --data ../data/raw/test_2k.npz \
-    --output ../models/test.pt \
     --epochs 5 \
     --batch_size 32 \
     --experiment_name test
 ```
 
 If this completes successfully, you're ready for full training!
+
+**Check your results**:
+```bash
+# List created directories
+ls -ltr ../results/
+
+# Should see: test_20251027_HHMMSS/
+```
+
+---
+
+## 🆕 Understanding v3.0 Directory Structure
+
+### Results Organization
+
+Every training run creates a unique timestamped directory:
+
+```
+results/
+├── baseline_20251027_143022/      # First training run
+│   ├── best_model.pt              # Best checkpoint (auto-saved)
+│   ├── config.json                # Exact configuration used
+│   ├── training.log               # Full training logs
+│   ├── summary.json               # Final metrics
+│   ├── evaluation/                # Created when you run evaluate.py
+│   │   ├── evaluation_summary.json
+│   │   ├── roc.png
+│   │   ├── pr.png
+│   │   └── confusion_matrix.png
+│   └── benchmark/                 # Created when you run benchmark_realtime.py
+│       ├── benchmark_results.json
+│       └── throughput_vs_batch_size.png
+│
+└── baseline_20251028_091234/      # Second run (for comparison)
+    └── ...
+```
+
+### Benefits
+- **No overwriting**: Each run preserved separately
+- **Easy comparison**: Compare multiple runs side-by-side
+- **Full reproducibility**: Config saved with each experiment
+- **Auto-detection**: Scripts find latest run automatically
+
+---
+
+## 💡 Using v3.0 Features
+
+### Auto-Detection of Models
+
+**Old workflow (v2.0)**:
+```bash
+# Had to manually specify paths
+python evaluate.py \
+    --model results/baseline_20251027_143022/best_model.pt \
+    --data data/raw/baseline_1M.npz \
+    --output_dir results/baseline_eval
+```
+
+**New workflow (v3.0)**:
+```bash
+# Auto-detects latest model
+python evaluate.py \
+    --experiment_name baseline \
+    --data data/raw/baseline_1M.npz
+```
+
+The script automatically:
+1. Finds all directories matching `baseline_*`
+2. Selects the most recent one
+3. Uses `best_model.pt` from that directory
+4. Saves evaluation to `{experiment_dir}/evaluation/`
+
+### Multiple Runs for Statistics
+
+```bash
+# Train same experiment with different seeds
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 42
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 123
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 456
+
+# Results in:
+# results/baseline_20251027_143022/  (seed 42)
+# results/baseline_20251027_150315/  (seed 123)
+# results/baseline_20251027_152748/  (seed 456)
+
+# Evaluate latest automatically
+python evaluate.py --experiment_name baseline --data data/raw/baseline_1M.npz
+
+# Or evaluate specific run
+python evaluate.py \
+    --model results/baseline_20251027_143022/best_model.pt \
+    --data data/raw/baseline_1M.npz \
+    --output_dir results/baseline_20251027_143022/evaluation_v2
+```
 
 ---
 
@@ -243,33 +335,7 @@ pip install -r requirements.txt
 
 ---
 
-### 6. Configure SLURM Scripts
-
-Edit `slurm/train_baseline.sh`:
-
-```bash
-nano slurm/train_baseline.sh
-```
-
-**Update these lines**:
-```bash
-#SBATCH --partition=YOUR_PARTITION_NAME    # Change to your partition
-#SBATCH --account=YOUR_ACCOUNT             # If required
-#SBATCH --gres=gpu:4                       # Adjust GPU count
-#SBATCH --mem-per-gpu=32G                  # Adjust memory
-
-# Update module loading
-module load cuda/12.1  # or your cluster's module name
-```
-
-**Make executable**:
-```bash
-chmod +x slurm/*.sh
-```
-
----
-
-### 7. Test Interactive Session
+### 6. Test Interactive Session
 
 ```bash
 # Request interactive GPU node (adjust parameters)
@@ -281,7 +347,7 @@ salloc --partition=gpu \
 
 # Once allocated, test
 conda activate microlens
-python code/preflight_check.py
+python code/utils.py
 
 # Exit when done
 exit
@@ -289,19 +355,48 @@ exit
 
 ---
 
-### 8. Submit Batch Job
+### 7. Submit Batch Jobs (v3.0 style)
+
+Create a SLURM script `train_baseline.sh`:
 
 ```bash
-# Generate baseline dataset first (can be done in batch or interactive)
-cd code
-python simulate.py \
-    --n_pspl 500000 \
-    --n_binary 500000 \
-    --output ../data/raw/events_baseline_1M.npz
+#!/bin/bash
+#SBATCH --job-name=baseline
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=128G
+#SBATCH --time=24:00:00
+#SBATCH --output=logs/baseline_%j.out
+#SBATCH --error=logs/baseline_%j.err
 
-# Submit training job
-cd ..
-sbatch slurm/train_baseline.sh
+# Load modules
+module load cuda/12.1
+
+# Activate environment
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate microlens
+
+# Change to code directory
+cd ~/Thesis/code
+
+# Run training (v3.0 - auto-creates timestamped directory)
+python train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
+    --epochs 50 \
+    --batch_size 128
+
+echo "Training complete! Results in: $(ls -td ../results/baseline_* | head -1)"
+```
+
+Submit:
+```bash
+# Make executable
+chmod +x train_baseline.sh
+
+# Submit
+sbatch train_baseline.sh
 
 # Monitor
 squeue -u $USER
@@ -313,6 +408,12 @@ tail -f logs/baseline_*.out
 ## 🔧 GPU Setup Details
 
 ### NVIDIA GPUs
+
+**Check CUDA version**:
+```bash
+nvcc --version
+nvidia-smi
+```
 
 **Install CUDA Toolkit** (if needed):
 
@@ -330,12 +431,6 @@ sudo apt install nvidia-cuda-toolkit
 echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
 echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
-```
-
-**Verify**:
-```bash
-nvidia-smi
-nvcc --version
 ```
 
 ---
@@ -396,16 +491,26 @@ python -c "import torch; print(torch.cuda.is_available())"
 # Reduce batch size
 python train.py --batch_size 64  # or 32
 
-# Or use gradient checkpointing (add to train.py)
-# torch.utils.checkpoint.checkpoint(...)
+# Or use single GPU
+export CUDA_VISIBLE_DEVICES=0
 ```
 
 ---
 
-### Issue: "Permission denied" for SLURM scripts
+### Issue: Can't find latest results directory
 
 ```bash
-chmod +x slurm/*.sh
+# Manually list
+ls -ltr results/baseline_*/
+
+# Check if experiment name matches
+ls results/  # See all experiments
+
+# Specify exact model path
+python evaluate.py \
+    --model results/baseline_20251027_143022/best_model.pt \
+    --data data/raw/baseline_1M.npz \
+    --output_dir results/baseline_20251027_143022/evaluation
 ```
 
 ---
@@ -445,9 +550,12 @@ python train.py --data /tmp/events_baseline_1M.npz ...
 # Check usage
 df -h
 
-# Clean up
-rm -rf data/raw/*.npz  # After backing up to cluster storage
-rm -rf results/old_*/
+# Clean up old results (keep last 3)
+for exp in baseline cadence_05; do
+    ls -td results/${exp}_*/ | tail -n +4 | xargs -r rm -rf
+done
+
+# Clean conda cache
 conda clean --all
 ```
 
@@ -458,20 +566,14 @@ conda clean --all
 Before starting full baseline training:
 
 - [ ] Python 3.8+ installed
-- [ ] PyTorch installed and GPU detected
+- [ ] PyTorch installed and GPU detected (`python code/utils.py`)
 - [ ] All required packages installed
-- [ ] Directory structure created
-- [ ] GPU drivers working (nvidia-smi or rocm-smi)
+- [ ] Directory structure created (automatic in v3.0)
+- [ ] GPU drivers working (`nvidia-smi` or `rocm-smi`)
 - [ ] Test dataset (2K events) generated successfully
 - [ ] Test training (5 epochs) completed without errors
-- [ ] SLURM scripts configured (if on cluster)
 - [ ] Storage space available (50+ GB)
-- [ ] `preflight_check.py` passes all tests
-
-**Run the comprehensive check**:
-```bash
-python code/preflight_check.py
-```
+- [ ] Understand v3.0 directory structure
 
 ---
 
@@ -489,7 +591,7 @@ python code/preflight_check.py
 - **CPU only**: Not recommended (5-7 days)
 
 ### Evaluation
-- **Per experiment**: 10-20 minutes
+- **Per experiment**: 5-10 minutes (auto-detection makes it faster!)
 
 ---
 
@@ -499,26 +601,102 @@ After successful setup:
 
 1. **Generate baseline dataset** (if not done):
    ```bash
-   python code/simulate.py --output data/raw/events_baseline_1M.npz
+   cd code
+   python simulate.py \
+       --n_pspl 500000 --n_binary 500000 \
+       --output ../data/raw/baseline_1M.npz \
+       --binary_params baseline
    ```
 
 2. **Start baseline training**:
    ```bash
-   sbatch slurm/train_baseline.sh  # or run locally
+   python train.py \
+       --data ../data/raw/baseline_1M.npz \
+       --experiment_name baseline
    ```
 
 3. **Monitor progress**:
    ```bash
-   tail -f logs/baseline_*.out
+   # Find your results directory
+   ls -ltr ../results/baseline_*/
+   
+   # Watch logs
+   tail -f $(ls -td ../results/baseline_*/ | head -1)/training.log
    ```
 
 4. **Evaluate when done**:
    ```bash
-   python code/evaluate.py --model results/baseline_*/best_model.pt ...
+   # Auto-detection makes this easy!
+   python evaluate.py \
+       --experiment_name baseline \
+       --data ../data/raw/baseline_1M.npz \
+       --early_detection
    ```
 
-5. **Read research guide**:
+5. **Benchmark**:
+   ```bash
+   python benchmark_realtime.py \
+       --experiment_name baseline \
+       --data ../data/raw/baseline_1M.npz
+   ```
+
+6. **Read research guide**:
    - See `docs/RESEARCH_GUIDE.md` for thesis workflow
+
+---
+
+## 💡 v3.0 Pro Tips
+
+### Finding Your Results
+
+```bash
+# List all runs for an experiment
+ls -ltr results/baseline_*/
+
+# Get most recent
+LATEST=$(ls -td results/baseline_*/ | head -1)
+echo "Latest results: $LATEST"
+
+# View summary
+cat $LATEST/summary.json
+```
+
+### Comparing Multiple Runs
+
+```bash
+# Train with different seeds
+for seed in 42 123 456; do
+    python train.py \
+        --data data/raw/baseline_1M.npz \
+        --experiment_name baseline \
+        --seed $seed
+done
+
+# Compare results
+python -c "
+import json
+from pathlib import Path
+
+for run_dir in sorted(Path('results').glob('baseline_*')):
+    summary = run_dir / 'summary.json'
+    if summary.exists():
+        with open(summary) as f:
+            data = json.load(f)
+        print(f'{run_dir.name}: Acc={data[\"final_test_acc\"]:.4f}')
+"
+```
+
+### Archiving Completed Runs
+
+```bash
+# Archive a specific run
+RUN=baseline_20251027_143022
+tar -czf ${RUN}.tar.gz results/${RUN}/
+
+# Or archive latest
+LATEST=$(ls -td results/baseline_*/ | head -1 | xargs basename)
+tar -czf ${LATEST}.tar.gz results/${LATEST}/
+```
 
 ---
 
@@ -534,8 +712,10 @@ After successful setup:
 
 ### For This Project:
 - Email: kunal29bhatia@gmail.com
-- GitHub Issues: (your repo)
+- Check `docs/QUICK_REFERENCE.md` for command examples
 
 ---
 
-**You're now ready to start your research!** 🚀
+**You're now ready to start your research with v3.0!** 🚀
+
+The new auto-detection and timestamped directories make everything easier and more organized!

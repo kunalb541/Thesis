@@ -1,6 +1,6 @@
-# Research Guide: Systematic Benchmarking of Microlensing Binary Classification
+# Research Guide v3.0: Systematic Benchmarking of Microlensing Binary Classification
 
-**Complete workflow for thesis research**
+**Complete workflow for thesis research using v3.0 features**
 
 ---
 
@@ -22,6 +22,48 @@ Your thesis will quantitatively answer:
 
 5. **How do photometric errors impact performance?**  
    → Test space-based vs ground-based quality
+
+---
+
+## 🆕 v3.0 Features for Research
+
+### Experiment Tracking Made Easy
+
+**v2.0 Problem**: Results got overwritten, hard to compare runs
+**v3.0 Solution**: Every run gets its own timestamped directory
+
+```bash
+# Run same experiment with different seeds for statistics
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 42
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 123  
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 456
+
+# Results automatically organized:
+results/baseline_20251027_143022/  # seed 42
+results/baseline_20251027_150315/  # seed 123
+results/baseline_20251027_152748/  # seed 456
+```
+
+### Auto-Detection Saves Time
+
+**v2.0**: Had to manually find and specify model paths  
+**v3.0**: Scripts automatically find latest model
+
+```bash
+# Evaluate latest run (auto-detection)
+python evaluate.py --experiment_name baseline --data data/raw/baseline_1M.npz
+
+# Benchmark latest run (auto-detection)
+python benchmark_realtime.py --experiment_name baseline --data data/raw/baseline_1M.npz
+```
+
+### Complete Reproducibility
+
+Every experiment directory contains:
+- `config.json` - Exact parameters used
+- `training.log` - Full training history
+- `summary.json` - Final metrics
+- `best_model.pt` - Best checkpoint
 
 ---
 
@@ -133,17 +175,6 @@ Sharp spike     Rounded peak      Smooth bump
 
 ---
 
-#### 5. **tE (Einstein Crossing Time)** - Event Timescale
-
-**Definition**: Time for source to cross one Einstein radius
-
-**Physical significance**:
-- **tE ~ 10-50 days**: Typical for bulge events
-- **tE ~ 50-200 days**: Long events (good for detailed study)
-- Longer tE → more observations → better characterization
-
----
-
 ### Parameter Sets in This Project
 
 #### BASELINE (Wide Range)
@@ -210,9 +241,9 @@ Sharp spike     Rounded peak      Smooth bump
 
 ---
 
-## 📊 Experimental Design
+## 📊 Experimental Design with v3.0
 
-### Baseline (Current - In Progress)
+### Baseline (Reference Experiment)
 
 **Configuration**:
 ```python
@@ -222,58 +253,58 @@ mag_error_std = 0.10       # 0.1 mag photometric error
 binary_params = 'baseline' # Mixed difficulty
 ```
 
-**Status**: ✅ Data ready, 🔄 Training in progress
+**Commands**:
+```bash
+cd code
+
+# Generate data
+python simulate.py \
+    --n_pspl 500000 --n_binary 500000 \
+    --output ../data/raw/baseline_1M.npz \
+    --binary_params baseline
+
+# Train (creates timestamped directory automatically)
+python train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
+    --epochs 50
+
+# Evaluate (auto-detects latest model)
+python evaluate.py \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_1M.npz \
+    --early_detection
+
+# Benchmark
+python benchmark_realtime.py \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_1M.npz
+```
+
+**Results location**: `results/baseline_TIMESTAMP/`
 
 ---
 
-### Experiment Suite
+### Systematic Experiment Suite
 
-After baseline completes, run these systematic experiments:
+After baseline completes, run these experiments:
 
 #### 1. Cadence Experiments
 
 Test how observation frequency affects performance.
 
-**Configurations**:
-```python
-# Dense cadence (LSST-like)
-'cadence_dense': {
-    'cadence_mask_prob': 0.05,  # 95% coverage
-    'n_events': 200_000,
-}
+| Experiment | Missing % | Command |
+|------------|-----------|---------|
+| Dense | 5% | `python simulate.py --cadence_mask_prob 0.05 --output ../data/raw/cadence_05.npz` |
+| Baseline | 20% | (already done) |
+| Sparse | 30% | `python simulate.py --cadence_mask_prob 0.30 --output ../data/raw/cadence_30.npz` |
+| Very Sparse | 40% | `python simulate.py --cadence_mask_prob 0.40 --output ../data/raw/cadence_40.npz` |
 
-# Baseline
-'cadence_baseline': {
-    'cadence_mask_prob': 0.20,  # 80% coverage
-    'n_events': 1_000_000,
-}
-
-# Sparse
-'cadence_sparse': {
-    'cadence_mask_prob': 0.30,  # 70% coverage  
-    'n_events': 200_000,
-}
-
-# Very sparse
-'cadence_very_sparse': {
-    'cadence_mask_prob': 0.40,  # 60% coverage
-    'n_events': 200_000,
-}
-```
-
-**Commands**:
+**Batch training**:
 ```bash
-# Generate data
-python code/simulate.py --n_pspl 100000 --n_binary 100000 \
-       --output data/raw/events_cadence_05.npz --cadence 0.05
-
-# Train
-python code/train.py --data data/raw/events_cadence_05.npz \
-       --output models/cadence_05.pt --experiment_name cadence_05
-
-# Evaluate
-python code/evaluate.py --model results/cadence_05_*/best_model.pt \
-       --data data/raw/events_cadence_05.npz --output_dir results/cadence_05_eval
+for exp in cadence_05 cadence_30 cadence_40; do
+    python train.py --data ../data/raw/${exp}.npz --experiment_name ${exp}
+done
 ```
 
 ---
@@ -282,63 +313,33 @@ python code/evaluate.py --model results/cadence_05_*/best_model.pt \
 
 Test how measurement precision affects performance.
 
-**Configurations**:
-```python
-# Space-based quality (Roman)
-'error_low': {
-    'mag_error_std': 0.05,
-}
-
-# Ground-based quality (LSST)
-'error_baseline': {
-    'mag_error_std': 0.10,
-}
-
-# Poor conditions
-'error_high': {
-    'mag_error_std': 0.20,
-}
-```
+| Experiment | Error (mag) | Quality |
+|------------|-------------|---------|
+| Low | 0.05 | Space-based (Roman) |
+| Baseline | 0.10 | Ground-based (LSST) |
+| High | 0.20 | Poor conditions |
 
 **Hypothesis**: Photometric error matters less than cadence for caustic-crossing events (sharp features survive moderate noise).
 
 ---
 
-#### 3. Binary Difficulty Experiments
+#### 3. Binary Topology Experiments
 
 Test fundamental limits set by caustic topology.
 
-**Configurations**:
-```python
-# Distinct: Small u₀, s≈1, small ρ (crosses caustics)
-'binary_distinct': {
-    'binary_params': 'distinct',
-}
-
-# Baseline: Mixed population
-'binary_baseline': {
-    'binary_params': 'baseline',
-}
-
-# Planetary vs Stellar
-'planetary': {
-    'binary_params': 'planetary',
-}
-
-'stellar': {
-    'binary_params': 'stellar',
-}
-```
+| Experiment | Description | Expected Performance |
+|------------|-------------|---------------------|
+| Distinct | u₀<0.15, s≈1 | High (>90% accuracy) |
+| Planetary | q<<1 | Moderate (70-80%) |
+| Stellar | q~1 | Challenging (60-75%) |
 
 ---
 
-#### 4. Early Detection Experiments
+#### 4. Early Detection Analysis
 
-Test real-time classification capability.
+Test real-time classification capability using `--early_detection` flag.
 
-**Concept**: For triggering follow-up observations, we need to classify events **before** they complete. The TimeDistributed architecture outputs probabilities at each timestep.
-
-**Evaluation**: Use `--early_detection` flag in `evaluate.py` to test performance at:
+**Evaluation checkpoints**:
 - 10% observed
 - 25% observed
 - 33% observed
@@ -349,122 +350,107 @@ Test real-time classification capability.
 
 ```bash
 python evaluate.py \
-    --model results/baseline_*/best_model.pt \
-    --data data/raw/events_baseline_1M.npz \
-    --output_dir results/baseline_eval \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_1M.npz \
     --early_detection
 ```
 
+This creates plots showing accuracy vs observation completeness.
+
 ---
 
-## 🔬 Analysis Plan
+## 🔬 Analysis Workflow with v3.0
 
 ### 1. Individual Experiment Analysis
 
-For each experiment, report:
+For each experiment, you get:
 
-**Performance Metrics**:
-- Accuracy (train/val/test)
-- Precision, Recall, F1 per class
-- ROC AUC and PR AUC
-- Confusion matrix
+**Automatic outputs**:
+- `results/EXPERIMENT_TIMESTAMP/best_model.pt`
+- `results/EXPERIMENT_TIMESTAMP/config.json`
+- `results/EXPERIMENT_TIMESTAMP/training.log`
+- `results/EXPERIMENT_TIMESTAMP/summary.json`
+- `results/EXPERIMENT_TIMESTAMP/evaluation/` (after evaluation)
+- `results/EXPERIMENT_TIMESTAMP/benchmark/` (after benchmarking)
 
-**Visualizations**:
-- Training curves (loss and accuracy)
-- ROC curve
-- Precision-Recall curve
-- Confusion matrix heatmap
+**Quick results check**:
+```bash
+# View training summary
+cat $(ls -td results/baseline_*/ | head -1)/summary.json
 
-**Computational Cost**:
-- Training time
-- GPU memory usage
-- Inference speed (events/second)
+# View evaluation metrics
+cat $(ls -td results/baseline_*/ | head -1)/evaluation/evaluation_summary.json
+```
 
 ---
 
 ### 2. Comparative Analysis
 
-Create comparison plots across experiments:
-
-**Accuracy vs Cadence**:
+**Compare multiple runs**:
 ```python
-import matplotlib.pyplot as plt
 import json
+from pathlib import Path
 
-experiments = ['cadence_05', 'cadence_10', 'cadence_20', 'cadence_30', 'cadence_40']
-cadences = [5, 10, 20, 30, 40]
-accuracies = []
+experiments = ['baseline', 'cadence_05', 'cadence_30', 'cadence_40']
 
 for exp in experiments:
-    with open(f'results/{exp}/metrics.json') as f:
-        metrics = json.load(f)
-        accuracies.append(metrics['accuracy'])
-
-plt.figure(figsize=(10, 6))
-plt.plot(cadences, accuracies, 'o-', linewidth=2, markersize=10)
-plt.xlabel('Missing Observations (%)', fontsize=14)
-plt.ylabel('Test Accuracy', fontsize=14)
-plt.title('Classification Performance vs Observing Cadence', fontsize=16)
-plt.grid(alpha=0.3)
-plt.savefig('figures/cadence_comparison.png', dpi=300, bbox_inches='tight')
+    runs = sorted(Path('results').glob(f'{exp}_*'))
+    if runs:
+        latest = runs[-1]
+        summary = latest / 'summary.json'
+        if summary.exists():
+            with open(summary) as f:
+                data = json.load(f)
+            print(f"{exp:15s}: Acc={data['final_test_acc']:.4f}")
 ```
 
-**Binary Difficulty Comparison**:
+**Create comparison plots**:
 ```python
-# Bar plot comparing distinct/baseline/planetary/stellar
-difficulties = ['Distinct', 'Baseline', 'Planetary', 'Stellar']
-accuracies = [load_accuracy(exp) for exp in difficulties]
+import matplotlib.pyplot as plt
+
+# Cadence comparison
+cadences = [5, 20, 30, 40]
+accuracies = []  # Extract from each experiment
 
 plt.figure(figsize=(10, 6))
-bars = plt.bar(difficulties, accuracies, alpha=0.7)
-plt.ylabel('Test Accuracy', fontsize=14)
-plt.title('Performance vs Binary Configuration', fontsize=16)
-plt.grid(alpha=0.3, axis='y')
-plt.savefig('figures/difficulty_comparison.png', dpi=300, bbox_inches='tight')
-```
-
-**Early Detection Curve**:
-```python
-# Plot accuracy vs fraction of event observed
-# (Already generated by evaluate.py with --early_detection flag)
+plt.plot(cadences, accuracies, 'o-', linewidth=2)
+plt.xlabel('Missing Observations (%)')
+plt.ylabel('Test Accuracy')
+plt.title('Performance vs Observing Cadence')
+plt.savefig('figures/cadence_comparison.png', dpi=300)
 ```
 
 ---
 
-### 3. Physical Interpretation
+### 3. Statistical Analysis (Multiple Seeds)
 
-Connect results to caustic crossing physics:
-
-**u₀ Distribution Analysis**:
-```python
-# Load binary parameters from simulation
-data = np.load('data/raw/events_baseline_1M.npz', allow_pickle=True)
-binary_params = data['binary_params']
-u0_values = [p['u0'] for p in binary_params]
-
-# Load predictions from evaluation
-# Analyze which u₀ values lead to misclassification
-
-# Plot distribution
-plt.figure(figsize=(12, 5))
-
-plt.subplot(1, 2, 1)
-plt.hist(u0_values, bins=50, alpha=0.7, label='All binaries')
-plt.xlabel('Impact Parameter u₀')
-plt.ylabel('Count')
-plt.title('Binary u₀ Distribution')
-
-plt.subplot(1, 2, 2)
-plt.hist(misclassified_u0, bins=50, alpha=0.7, color='red')
-plt.xlabel('Impact Parameter u₀')
-plt.ylabel('Count')
-plt.title('Misclassified Binary u₀ Distribution')
-
-plt.tight_layout()
-plt.savefig('figures/u0_analysis.png', dpi=300)
+**Run experiments with multiple seeds**:
+```bash
+for seed in 42 123 456 789 101112; do
+    python train.py \
+        --data data/raw/baseline_1M.npz \
+        --experiment_name baseline \
+        --seed $seed
+done
 ```
 
-**Hypothesis to test**: Misclassifications concentrate at u₀ > 0.3 (PSPL-like regime).
+**Analyze variance**:
+```python
+import numpy as np
+import json
+from pathlib import Path
+
+accuracies = []
+for run_dir in Path('results').glob('baseline_*'):
+    summary = run_dir / 'summary.json'
+    if summary.exists():
+        with open(summary) as f:
+            data = json.load(f)
+        accuracies.append(data['final_test_acc'])
+
+print(f"Mean accuracy: {np.mean(accuracies):.4f} ± {np.std(accuracies):.4f}")
+print(f"Min: {np.min(accuracies):.4f}, Max: {np.max(accuracies):.4f}")
+```
 
 ---
 
@@ -487,6 +473,7 @@ plt.savefig('figures/u0_analysis.png', dpi=300)
 - Observational realism (errors, gaps)
 - CNN architecture (TimeDistributed design)
 - Training procedure and hyperparameters
+- **v3.0 Feature**: Experiment management and reproducibility
 
 ### Chapter 4: Results
 - **4.1 Baseline Performance**: 1M event training results
@@ -513,7 +500,7 @@ plt.savefig('figures/u0_analysis.png', dpi=300)
 
 ### Phase 1: Baseline (Weeks 1-2)
 - ✅ 1M dataset generated
-- 🔄 Baseline training (current)
+- 🔄 Baseline training
 - ⏳ Baseline evaluation
 
 ### Phase 2: Systematic Experiments (Weeks 3-6)
@@ -526,6 +513,7 @@ plt.savefig('figures/u0_analysis.png', dpi=300)
 - Generate all comparison plots
 - Physical interpretation (u₀ analysis)
 - Statistical analysis
+- **v3.0 Feature**: Easy comparison across runs
 
 ### Phase 4: Writing (Weeks 9-12)
 - Draft all chapters
@@ -550,6 +538,90 @@ plt.savefig('figures/u0_analysis.png', dpi=300)
    
 5. **What's the intrinsic physical limit?**
    - Identify u₀ threshold where performance drops
+
+---
+
+## 📊 Results Documentation Template
+
+### Master Comparison Table
+
+Use this template for your thesis:
+
+```
+| Experiment       | Accuracy | ROC AUC | PR AUC | Training Time | Notes        |
+|------------------|----------|---------|--------|---------------|--------------|
+| Baseline         | XX.X%    | X.XXX   | X.XXX  | Xh           | Reference    |
+| Dense (5%)       | XX.X%    | X.XXX   | X.XXX  | Xh           | LSST-like    |
+| Sparse (30%)     | XX.X%    | X.XXX   | X.XXX  | Xh           | Poor         |
+| V.Sparse (40%)   | XX.X%    | X.XXX   | X.XXX  | Xh           | Minimal      |
+| Low Error (0.05) | XX.X%    | X.XXX   | X.XXX  | Xh           | Space-based  |
+| High Error (0.20)| XX.X%    | X.XXX   | X.XXX  | Xh           | Poor quality |
+| Distinct         | XX.X%    | X.XXX   | X.XXX  | Xh           | Easy         |
+| Planetary        | XX.X%    | X.XXX   | X.XXX  | Xh           | Moderate     |
+| Stellar          | XX.X%    | X.XXX   | X.XXX  | Xh           | Challenging  |
+```
+
+**Extract automatically**:
+```bash
+python -c "
+import json
+from pathlib import Path
+
+experiments = ['baseline', 'cadence_05', 'cadence_30', 'cadence_40',
+               'error_05', 'error_20', 'distinct', 'planetary', 'stellar']
+
+for exp in experiments:
+    runs = sorted(Path('results').glob(f'{exp}_*'))
+    if runs:
+        latest = runs[-1]
+        eval_file = latest / 'evaluation' / 'evaluation_summary.json'
+        if eval_file.exists():
+            with open(eval_file) as f:
+                data = json.load(f)
+            metrics = data['metrics']
+            print(f\"{exp:15s} | {metrics['accuracy']*100:5.1f}% | {metrics['roc_auc']:5.3f} | {metrics['pr_auc']:5.3f}\")
+"
+```
+
+---
+
+## 💬 Key Insights to Communicate
+
+In your thesis, emphasize:
+
+1. **Why ML?** Traditional light curve fitting is computationally expensive and requires good initial guesses. ML enables real-time classification.
+
+2. **Why TimeDistributed?** Enables early detection—critical for triggering follow-up observations.
+
+3. **Physical limits matter**: Some binaries (large u₀) are fundamentally indistinguishable from PSPL. This is not a failure of the algorithm—it's physics.
+
+4. **Survey design implications**: Your results inform how LSST and Roman should allocate observing time.
+
+5. **v3.0 makes research easier**: Timestamped directories, auto-detection, and complete reproducibility streamline the research process.
+
+---
+
+## 🎯 v3.0 Advantages for Thesis
+
+### Better Organization
+- Every experiment run is preserved
+- Easy to revisit and compare old results
+- No confusion about which model was which
+
+### Faster Iteration
+- Auto-detection saves typing and time
+- Quick comparison scripts work seamlessly
+- Batch processing is simpler
+
+### Complete Reproducibility
+- Config files show exact parameters
+- Logs show full training history
+- Easy to regenerate any result
+
+### Publication-Ready
+- Clean, organized results structure
+- Easy to extract figures and tables
+- Straightforward to share with advisors
 
 ---
 
@@ -580,47 +652,10 @@ Your thesis will provide:
 4. **Open-source pipeline** for the community
 5. **Real-time classification** architecture for triggering follow-up
 
-These are **publishable results**! Consider writing a paper after thesis submission.
+**These are publishable results!** Consider writing a paper after thesis submission.
 
 ---
 
-## 📊 Results Documentation
+**v3.0 makes your research workflow smoother and more organized!** 🚀🔭
 
-### Master Comparison Table Template
-
-Create a table like this in your thesis:
-
-| Experiment | Configuration | Accuracy | ROC AUC | PR AUC | Training Time | Notes |
-|------------|---------------|----------|---------|--------|---------------|-------|
-| Baseline | 20% missing, 0.1 mag error | - | - | - | - | Reference |
-| Dense cadence | 5% missing | - | - | - | - | LSST-like |
-| Sparse cadence | 40% missing | - | - | - | - | Poor coverage |
-| Low error | 0.05 mag | - | - | - | - | Space-based |
-| High error | 0.20 mag | - | - | - | - | Poor conditions |
-| Distinct | u₀<0.15, s≈1 | - | - | - | - | Caustic crossers |
-| Planetary | q << 1 | - | - | - | - | Planet systems |
-| Stellar | q ~ 1 | - | - | - | - | Binary stars |
-
-Fill this in as experiments complete.
-
----
-
-## 💬 Key Insights to Communicate
-
-In your thesis, emphasize:
-
-1. **Why ML?** Traditional light curve fitting is computationally expensive and requires good initial guesses. ML enables real-time classification.
-
-2. **Why TimeDistributed?** Enables early detection—critical for triggering follow-up observations.
-
-3. **Physical limits matter**: Some binaries (large u₀) are fundamentally indistinguishable from PSPL. This is not a failure of the algorithm—it's physics.
-
-4. **Survey design implications**: Your results inform how LSST and Roman should allocate observing time.
-
-5. **Open questions remain**: Real data will have additional complexities (blending, parallax, etc.)
-
----
-
-**Remember**: Your thesis tells a story about understanding the limits of binary detection. Focus on clarity, physical intuition, and practical implications for survey design.
-
-Good luck! 🚀
+Remember: Focus on clarity, physical intuition, and practical implications for survey design.

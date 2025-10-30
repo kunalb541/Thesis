@@ -1,8 +1,31 @@
-# Quick Reference Guide
+# Quick Reference Guide - v3.0
 
 **Purpose**: Command cheatsheet for all experiments  
 **Usage**: Copy-paste commands for running experiments  
 **Last Updated**: October 2025
+
+---
+
+## 🆕 v3.0 Features
+
+### Auto-Detection
+No need to manually specify model paths:
+```bash
+# Old way (still works):
+python evaluate.py --model results/baseline_*/best_model.pt \
+    --data data/raw/baseline_1M.npz --output_dir results/baseline_eval
+
+# New way (easier):
+python evaluate.py --experiment_name baseline \
+    --data data/raw/baseline_1M.npz
+```
+
+### Timestamped Results
+Every training run creates a unique directory:
+```
+results/baseline_20251027_143022/  # First run
+results/baseline_20251027_150532/  # Second run (different seed or params)
+```
 
 ---
 
@@ -27,25 +50,21 @@ python simulate.py \
 # Training (6-8 hours on 4 GPUs)
 python train.py \
     --data ../data/raw/baseline_1M.npz \
-    --output ../models/baseline.pt \
     --epochs 50 \
     --batch_size 128 \
     --lr 0.001 \
     --experiment_name baseline
 
-# Evaluation
-RESULTS_DIR=$(ls -td ../results/baseline_* | head -1)
+# Evaluation (auto-detects latest model)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name baseline \
     --data ../data/raw/baseline_1M.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 
 # Real-time benchmark
 python benchmark_realtime.py \
-    --model $RESULTS_DIR/best_model.pt \
-    --data ../data/raw/baseline_1M.npz \
-    --output_dir $RESULTS_DIR/benchmark
+    --experiment_name baseline \
+    --data ../data/raw/baseline_1M.npz
 ```
 
 ---
@@ -68,11 +87,9 @@ python train.py \
     --experiment_name cadence_05
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/cadence_05_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name cadence_05 \
     --data ../data/raw/cadence_05.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -96,11 +113,9 @@ python train.py \
     --experiment_name cadence_30
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/cadence_30_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name cadence_30 \
     --data ../data/raw/cadence_30.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -124,11 +139,9 @@ python train.py \
     --experiment_name cadence_40
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/cadence_40_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name cadence_40 \
     --data ../data/raw/cadence_40.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -152,11 +165,9 @@ python train.py \
     --experiment_name error_05
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/error_05_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name error_05 \
     --data ../data/raw/error_05.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -180,11 +191,9 @@ python train.py \
     --experiment_name error_20
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/error_20_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name error_20 \
     --data ../data/raw/error_20.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -207,11 +216,9 @@ python train.py \
     --experiment_name distinct
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/distinct_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name distinct \
     --data ../data/raw/distinct.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -234,11 +241,9 @@ python train.py \
     --experiment_name planetary
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/planetary_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name planetary \
     --data ../data/raw/planetary.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -261,11 +266,9 @@ python train.py \
     --experiment_name stellar
 
 # Evaluation
-RESULTS_DIR=$(ls -td ../results/stellar_* | head -1)
 python evaluate.py \
-    --model $RESULTS_DIR/best_model.pt \
+    --experiment_name stellar \
     --data ../data/raw/stellar.npz \
-    --output_dir $RESULTS_DIR/evaluation \
     --early_detection
 ```
 
@@ -307,11 +310,11 @@ done
 ### Run All Training (Sequential)
 
 ```bash
-for exp in baseline_1M cadence_05 cadence_30 cadence_40 \
+for exp in baseline cadence_05 cadence_30 cadence_40 \
            error_05 error_20 distinct planetary stellar; do
     echo "Training $exp..."
     python train.py \
-        --data ../data/raw/${exp}.npz \
+        --data ../data/raw/${exp}*.npz \
         --experiment_name ${exp}
 done
 ```
@@ -322,11 +325,9 @@ done
 for exp in baseline cadence_05 cadence_30 cadence_40 \
            error_05 error_20 distinct planetary stellar; do
     echo "Evaluating $exp..."
-    RESULTS_DIR=$(ls -td ../results/${exp}_* | head -1)
     python evaluate.py \
-        --model $RESULTS_DIR/best_model.pt \
-        --data ../data/raw/${exp}.npz \
-        --output_dir $RESULTS_DIR/evaluation \
+        --experiment_name ${exp} \
+        --data ../data/raw/${exp}*.npz \
         --early_detection
 done
 ```
@@ -359,11 +360,24 @@ print('PAD_VALUE count:', (X == -1).sum())
 "
 ```
 
+### Find Latest Results
+
+```bash
+# List all runs for an experiment
+ls -ltr results/baseline_*/
+
+# Get most recent
+ls -td results/baseline_*/ | head -1
+
+# Check contents
+ls -lh $(ls -td results/baseline_*/ | head -1)
+```
+
 ### Monitor Training
 
 ```bash
 # Watch training progress
-watch -n 1 "tail -20 results/baseline_*/training.log"
+watch -n 1 "tail -20 $(ls -td results/baseline_*/ | head -1)/training.log"
 
 # Check GPU usage
 watch -n 1 nvidia-smi  # or rocm-smi for AMD
@@ -393,159 +407,78 @@ print('Expected: [4, 1500, 2]')
 
 ## 📊 Analysis Commands
 
-### Generate Comparison Plots
+### Compare Multiple Runs
 
 ```bash
-# After all experiments complete
+# Compare accuracy across runs of same experiment
 cd code
-
-# Create comparison plots script
-cat > compare_experiments.py << 'EOF'
+python -c "
 import json
-import matplotlib.pyplot as plt
-import numpy as np
 from pathlib import Path
 
-# Load all results
-experiments = ['baseline', 'cadence_05', 'cadence_30', 'cadence_40',
-               'error_05', 'error_20', 'distinct', 'planetary', 'stellar']
+exp = 'baseline'
+runs = sorted(Path('../results').glob(f'{exp}_*'))
 
-results = {}
-for exp in experiments:
-    result_dirs = sorted(Path('../results').glob(f'{exp}_*'))
-    if result_dirs:
-        eval_path = result_dirs[-1] / 'evaluation' / 'evaluation_summary.json'
-        if eval_path.exists():
-            with open(eval_path) as f:
-                results[exp] = json.load(f)
-
-# Cadence comparison
-cadence_exps = ['cadence_05', 'baseline', 'cadence_30', 'cadence_40']
-cadences = [5, 20, 30, 40]
-accs = [results[e]['metrics']['accuracy']*100 for e in cadence_exps if e in results]
-
-plt.figure(figsize=(10, 6))
-plt.plot(cadences, accs, 'o-', linewidth=2, markersize=10)
-plt.xlabel('Missing Observations (%)', fontsize=14)
-plt.ylabel('Test Accuracy (%)', fontsize=14)
-plt.title('Classification Performance vs Observing Cadence', fontsize=16)
-plt.grid(alpha=0.3)
-plt.savefig('../figures/cadence_comparison.png', dpi=300, bbox_inches='tight')
-print('Saved: figures/cadence_comparison.png')
-
-# Error comparison
-error_exps = ['error_05', 'baseline', 'error_20']
-errors = [0.05, 0.10, 0.20]
-accs = [results[e]['metrics']['accuracy']*100 for e in error_exps if e in results]
-
-plt.figure(figsize=(10, 6))
-plt.plot(errors, accs, 's-', linewidth=2, markersize=10, color='red')
-plt.xlabel('Photometric Error (mag)', fontsize=14)
-plt.ylabel('Test Accuracy (%)', fontsize=14)
-plt.title('Classification Performance vs Photometric Error', fontsize=16)
-plt.grid(alpha=0.3)
-plt.savefig('../figures/error_comparison.png', dpi=300, bbox_inches='tight')
-print('Saved: figures/error_comparison.png')
-
-# Topology comparison
-topo_exps = ['distinct', 'baseline', 'planetary', 'stellar']
-labels = ['Distinct\n(u₀<0.15)', 'Baseline\n(mixed)', 'Planetary\n(q<<1)', 'Stellar\n(q~1)']
-accs = [results[e]['metrics']['accuracy']*100 for e in topo_exps if e in results]
-
-plt.figure(figsize=(10, 6))
-bars = plt.bar(labels, accs, alpha=0.7, color=['green', 'blue', 'orange', 'red'])
-plt.ylabel('Test Accuracy (%)', fontsize=14)
-plt.title('Classification Performance vs Binary Topology', fontsize=16)
-plt.ylim([0, 100])
-plt.grid(alpha=0.3, axis='y')
-for i, (bar, acc) in enumerate(zip(bars, accs)):
-    plt.text(bar.get_x() + bar.get_width()/2, acc + 2, 
-             f'{acc:.1f}%', ha='center', fontsize=12, fontweight='bold')
-plt.savefig('../figures/topology_comparison.png', dpi=300, bbox_inches='tight')
-print('Saved: figures/topology_comparison.png')
-EOF
-
-python compare_experiments.py
+for run in runs:
+    summary_file = run / 'summary.json'
+    if summary_file.exists():
+        with open(summary_file) as f:
+            data = json.load(f)
+        print(f'{run.name}: Accuracy = {data[\"final_test_acc\"]:.4f}')
+"
 ```
 
 ### Extract Results Table
 
 ```bash
-# Generate LaTeX table
+# Generate results table for all experiments
 python -c "
 import json
 from pathlib import Path
 
-experiments = {
-    'Baseline': 'baseline',
-    'Dense (5%)': 'cadence_05',
-    'Sparse (30%)': 'cadence_30',
-    'V.Sparse (40%)': 'cadence_40',
-    'Low Error': 'error_05',
-    'High Error': 'error_20',
-    'Distinct': 'distinct',
-    'Planetary': 'planetary',
-    'Stellar': 'stellar',
-}
+experiments = ['baseline', 'cadence_05', 'cadence_30', 'cadence_40',
+               'error_05', 'error_20', 'distinct', 'planetary', 'stellar']
 
-print('\\begin{table}[h]')
-print('\\centering')
-print('\\begin{tabular}{lcccc}')
-print('\\hline')
-print('Experiment & Accuracy & Precision & Recall & F1 \\\\')
-print('\\hline')
+print(f'{'Experiment':<15} {'Accuracy':>10} {'Val Acc':>10} {'Epoch':>8}')
+print('-' * 50)
 
-for name, exp in experiments.items():
-    result_dirs = sorted(Path('results').glob(f'{exp}_*'))
-    if result_dirs:
-        eval_path = result_dirs[-1] / 'evaluation' / 'evaluation_summary.json'
-        if eval_path.exists():
-            with open(eval_path) as f:
-                r = json.load(f)['metrics']
-            acc = r['accuracy'] * 100
-            tp, fp, fn = r['tp'], r['fp'], r['fn']
-            prec = 100 * tp / (tp + fp) if (tp + fp) > 0 else 0
-            rec = 100 * tp / (tp + fn) if (tp + fn) > 0 else 0
-            f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0
-            print(f'{name} & {acc:.1f} & {prec:.1f} & {rec:.1f} & {f1:.2f} \\\\\\\\')
-
-print('\\hline')
-print('\\end{tabular}')
-print('\\caption{Classification performance across systematic experiments.}')
-print('\\label{tab:results}')
-print('\\end{table}')
-" > results_table.tex
-
-cat results_table.tex
+for exp in experiments:
+    runs = sorted(Path('results').glob(f'{exp}_*'))
+    if runs:
+        latest = runs[-1]
+        summary_file = latest / 'summary.json'
+        if summary_file.exists():
+            with open(summary_file) as f:
+                data = json.load(f)
+            acc = data['final_test_acc'] * 100
+            val_acc = data['best_val_acc'] * 100
+            epoch = data['best_epoch']
+            print(f'{exp:<15} {acc:>9.2f}% {val_acc:>9.2f}% {epoch:>8}')
+"
 ```
 
 ---
 
 ## 🔧 Maintenance Commands
 
-### Clean Up
+### Clean Up Old Results
 
 ```bash
-# Remove old results (keep only best)
-find results/ -name "*.pt" -not -name "best_model.pt" -delete
-
-# Clean old data files
-rm data/raw/test_*.npz
-
-# Remove temporary files
-rm -rf logs/*.tmp
-rm -rf __pycache__/
+# Keep only the 3 most recent runs for each experiment
+for exp in baseline cadence_05 cadence_30; do
+    ls -td results/${exp}_*/ | tail -n +4 | xargs -r rm -rf
+done
 ```
 
 ### Archive Experiment
 
 ```bash
-# Archive completed experiment
+# Archive completed experiment (latest run)
 EXP=baseline
-tar -czf ${EXP}_archive.tar.gz \
+LATEST=$(ls -td results/${EXP}_*/ | head -1)
+tar -czf ${EXP}_archive_$(date +%Y%m%d).tar.gz \
     data/raw/${EXP}*.npz \
-    results/${EXP}_*/ \
-    models/${EXP}.pt
+    ${LATEST}
 ```
 
 ### Backup to Remote
@@ -553,7 +486,7 @@ tar -czf ${EXP}_archive.tar.gz \
 ```bash
 # Backup to cluster/server
 rsync -avz --progress \
-    data/ results/ models/ \
+    data/ results/ \
     username@cluster:/path/to/backup/
 ```
 
@@ -576,22 +509,18 @@ python simulate.py --output /tmp/microlens_tmp/data.npz ...
 # Increase batch size (if memory allows)
 python train.py --batch_size 256 ...
 
-# Use mixed precision (if supported)
-# (automatically enabled in config.py)
+# Use mixed precision (automatically enabled in v3.0)
 
-# Pin memory for faster data loading
-# (automatically enabled in train.py)
+# Pin memory for faster data loading (automatically enabled in v3.0)
 ```
 
 ### Reduce Disk Usage
 ```bash
-# Don't save intermediate checkpoints
-# (set SAVE_BEST_ONLY=True in config.py)
-
 # Compress old datasets
 gzip data/raw/*.npz
 
-# Use compressed saves (already default)
+# Remove old checkpoints (keep best_model.pt only)
+find results/ -name "checkpoint_*.pt" -delete
 ```
 
 ---
@@ -600,19 +529,51 @@ gzip data/raw/*.npz
 
 ### Before Starting Experiment
 - [ ] Check disk space (50+ GB free)
-- [ ] Check GPU availability
+- [ ] Check GPU availability (`nvidia-smi` or `rocm-smi`)
 - [ ] Activate conda environment
 - [ ] Review config.py settings
-- [ ] Note start time in EXPERIMENTS_LOG.md
+- [ ] Generate data if not already present
 
 ### After Experiment Completes
-- [ ] Copy results to EXPERIMENTS_LOG.md
-- [ ] Generate evaluation plots
-- [ ] Check for anomalies
-- [ ] Document observations in NOTES.md
-- [ ] Archive data and results
-- [ ] Update status in README.md
+- [ ] Check results directory created
+- [ ] Review training.log for issues
+- [ ] Run evaluation
+- [ ] Run benchmark
+- [ ] Document observations
+- [ ] Archive or clean up old runs
 
 ---
 
-**Bookmark this file - you'll use it constantly!**
+## 💡 Pro Tips
+
+### Using Auto-Detection
+
+```bash
+# Train multiple runs for statistical comparison
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 42
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 123
+python train.py --data data/raw/baseline_1M.npz --experiment_name baseline --seed 456
+
+# Evaluate all runs
+for run in results/baseline_*/; do
+    echo "Evaluating $run"
+    python evaluate.py --model ${run}best_model.pt \
+        --data data/raw/baseline_1M.npz \
+        --output_dir ${run}evaluation
+done
+```
+
+### Comparing Specific Runs
+
+```bash
+# If you want to evaluate a specific run (not the latest)
+# Just specify the full model path:
+python evaluate.py \
+    --model results/baseline_20251027_143022/best_model.pt \
+    --data data/raw/baseline_1M.npz \
+    --output_dir results/baseline_20251027_143022/evaluation_v2
+```
+
+---
+
+**v3.0 makes everything easier with auto-detection!** 🚀
