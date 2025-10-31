@@ -53,7 +53,13 @@ def setup_ddp(backend: Optional[str] = None):
         if backend is None:
             backend = "nccl" if torch.cuda.is_available() else "gloo"
         dist.init_process_group(backend=backend, init_method="env://")
-        torch.distributed.barrier()
+        
+        # FIX: Explicitly set device_ids for the barrier to suppress NCCL warnings
+        if torch.cuda.is_available():
+            torch.distributed.barrier(device_ids=[local_rank])
+        else:
+            torch.distributed.barrier()
+            
         return rank, world_size, local_rank
     else:
         # Single-process (no DDP)
@@ -217,32 +223,30 @@ def save_scalers_rank0(params: Dict[str, np.ndarray], out_dir: str):
         pickle.dump(mm, f)
 
 
+# FIX: Replaced the entire function with the modern, robust dist.broadcast_object_list
 def broadcast_object_from_rank0(obj):
     """
     Broadcast a Python object from rank 0 to all other ranks.
-    Handy for experiment_dir and scaler params.
+    'obj' is the object to broadcast on rank 0, and should be 'None'
+    on all other ranks.
     """
     world_size = get_world_size()
     if world_size == 1:
         return obj
-    if get_rank() == 0:
-        payload = bytearray(pickle.dumps(obj))
-        sz = torch.tensor([len(payload)], dtype=torch.long, device="cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        payload = None
-        sz = torch.tensor([0], dtype=torch.long, device="cuda" if torch.cuda.is_available() else "cpu")
 
-    dist.broadcast(sz, src=0)
-    if get_rank() != 0:
-        payload = bytearray(int(sz.item()))
-    tensor = torch.frombuffer(payload, dtype=torch.uint8)
-    if torch.cuda.is_available():
-        tensor = tensor.to("cuda")
-    dist.broadcast(tensor, src=0)
-    if torch.cuda.is_available():
-        tensor = tensor.cpu()
-    # FIX: Use payload directly instead of inefficient tensor.tolist()
-    return pickle.loads(payload)
+    # We wrap the object in a list because broadcast_object_list
+    # expects a list of objects.
+    if get_rank() == 0:
+        obj_list = [obj]
+    else:
+        obj_list = [None] # Placeholder
+
+    # This function handles serialization, size, and broadcast internally
+    # for both CPU and CUDA tensors, using the correct backend.
+    dist.broadcast_object_list(obj_list, src=0)
+    
+    # Return the broadcasted object
+    return obj_list[0]
 
 
 # -----------------------------
@@ -531,8 +535,8 @@ def main():
         rank0_print("\n" + "=" * 80)
         rank0_print("FINAL EVALUATION")
         rank0_print("=" * 80)
-        rank0_print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
-        rank0_print(f"Best  | val acc {best_val_acc:.4f} (epoch {best_epoch})\n")
+        rank0_print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
+        rank0_print(f"Best  | val acc {best_val_acc:.4f} (epoch {best_epoch})\n")
         rank0_print(f"✓ Training complete! Results saved to: {exp_dir}")
 
     # -----------------------------
