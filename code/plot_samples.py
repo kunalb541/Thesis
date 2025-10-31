@@ -9,7 +9,7 @@ Reproduces the original notebook's 3-panel plots:
 3. Class probabilities over time (with confidence threshold and clamping)
 
 Author: Kunal Bhatia
-Version: 3.1 - Shows original unscaled data
+Version: 3.2 - FIXED: Proper scaler loading (no duplicate data loading)
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from model import TimeDistributedCNN
-from utils import load_npz_dataset
+from utils import load_npz_dataset, load_scalers, apply_scalers_to_data
 import config as CFG
 
 
@@ -43,8 +43,8 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
 
 def plot_sample_predictions(
     model,
-    X_original,  # NEW: Unscaled data for plotting
-    X_normalized,  # NEW: Normalized data for model
+    X_original,  # Unscaled data for plotting
+    X_normalized,  # Normalized data for model
     y,
     timestamps,
     device,
@@ -333,6 +333,8 @@ def main():
             args.model = str(results_dir / "best_model.pt")
         if args.output_dir is None:
             args.output_dir = str(results_dir / "sample_plots")
+    else:
+        results_dir = Path(args.model).parent
     
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -341,35 +343,42 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("SAMPLE PREDICTIONS VISUALIZATION")
+    print("SAMPLE PREDICTIONS VISUALIZATION (FIXED VERSION)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
     print(f"Output: {output_dir}")
     
-    # Load data WITHOUT normalization (for original plotting)
-    print("\nLoading original data (unscaled)...")
-    X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
-    print(f"✓ Original data loaded: {X_original.shape}")
-    # Load RAW data
-    X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
-
-    # Load scalers
-    from utils import load_scalers, apply_scalers_to_data
-    scaler_std, scaler_mm = load_scalers(results_dir)
-
-# Apply scalers
-    X_normalized = apply_scalers_to_data(X_original, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
-    # Load data WITH normalization (for model inference)
-    print("Loading normalized data (for model)...")
-    X_normalized, _, _, _ = load_npz_dataset(args.data, apply_perm=True, normalize=True)
-    print(f"✓ Normalized data loaded: {X_normalized.shape}")
+    # =========================================================================
+    # FIXED: Load RAW data once, apply saved scalers
+    # =========================================================================
+    print("\n" + "="*80)
+    print("LOADING DATA WITH SAVED SCALERS")
+    print("="*80)
     
+    # 1. Load RAW unscaled data
+    print("\n1. Loading RAW data (normalize=False)...")
+    X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
     L = X_original.shape[1]
+    print(f"✓ Raw data loaded: {X_original.shape}")
+    print(f"   Raw data range: [{X_original[X_original != CFG.PAD_VALUE].min():.3f}, {X_original[X_original != CFG.PAD_VALUE].max():.3f}]")
+    
+    # 2. Load saved scalers from training
+    print("\n2. Loading scalers from training...")
+    scaler_std, scaler_mm = load_scalers(results_dir)
+    print(f"✓ Loaded scalers from {results_dir}")
+    
+    # 3. Apply saved scalers to get normalized data
+    print("\n3. Applying saved scalers to data...")
+    X_normalized = apply_scalers_to_data(X_original, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+    print(f"✓ Applied same normalization as training")
+    print(f"   Normalized data range: [{X_normalized[X_normalized != CFG.PAD_VALUE].min():.3f}, {X_normalized[X_normalized != CFG.PAD_VALUE].max():.3f}]")
+    print(f"   Expected: approximately [0.0, 1.0]")
+    # =========================================================================
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
+    print(f"\nDevice: {device}")
     
     model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2)
     
