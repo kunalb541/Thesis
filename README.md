@@ -1,136 +1,51 @@
-## Real-Time Microlensing Classification using Deep Learning
+# Real-Time Binary Microlensing Classification
 
-**Master's Thesis Project - Version 3.1** ⚠️ **CRITICAL BUGS FIXED**  
-**Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
-**Institution**: University of Heidelberg  
-**Last Updated**: October 2025
+**Deep Learning for Next-Generation Survey Operations**
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-red.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
----
-
-## 🚨 IMPORTANT: Critical Bug Fixes (v3.1)
-
-**⚠️ IF YOU HAVE EXISTING RESULTS, READ THIS FIRST:**
-
-Version 3.1 fixes **critical bugs** that invalidated previous results:
-
-1. **Double Normalization Bug**: Data was normalized twice, causing incorrect scaling
-2. **Data Leakage Bug**: Validation/test statistics leaked into training
-3. **Scaler Mismatch**: Evaluation used different scalers than training
-
-**Action Required:**
-- ✅ Read [CRITICAL_BUGS_AND_FIXES.md](CRITICAL_BUGS_AND_FIXES.md) for details
-- ✅ Apply fixes to `train.py`, `utils.py`, `evaluate.py`
-- ✅ Re-train ALL models (old models are invalid)
-- ✅ Do NOT use old results in thesis
-
-**Expected Performance After Fixes:**
-- Training accuracy: 70-75% (was ~55% with bugs)
-- Stable train/val curves
-- Test accuracy within 2-3% of validation
+**Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
+**Institution**: University of Heidelberg  
+**Date**: October 2025
 
 ---
 
-## 🎯 Project Overview
+## Overview
 
-**Research Question**: Can deep learning enable real-time classification of binary microlensing events for next-generation surveys (LSST, Roman)?
+This project implements an automated classification system for binary gravitational microlensing events using deep learning. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
 
-**Approach**: TimeDistributed 1D CNN trained on 1M+ synthetic light curves from VBMicrolensing.
+### Key Features
 
-**Key Innovation**: Temporal aggregation across full light curve captures distributed caustic features → enables early detection.
+- **TimeDistributed CNN** architecture for sequential classification
+- **Real-time capable**: Sub-millisecond inference per event
+- **Early detection**: Classification with partial light curves
+- **Comprehensive benchmarking**: Performance across diverse observing conditions
+- **Production-ready**: Saved normalization parameters ensure reproducible inference
 
----
+### Research Questions
 
-## 🔧 Critical Fixes in v3.1
-
-### Bug #1: Double Normalization (FIXED)
-
-**Problem**: Data was normalized twice - once during loading, once after splitting
-```python
-# ❌ WRONG (v3.0):
-X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=True)
-# ... split data ...
-X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = two_stage_normalize(...)
-
-# ✅ CORRECT (v3.1):
-X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
-# ... split data ...
-X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = two_stage_normalize(...)
-```
-
-**Impact**: 
-- Incorrect data scale
-- Data leakage (test statistics in training)
-- Poor model performance
-
-### Bug #2: Scaler Mismatch in Evaluation (FIXED)
-
-**Problem**: Evaluation scripts re-fitted scalers instead of loading saved ones
-
-**Fix**: New functions in `utils.py`:
-```python
-# Load scalers from training
-scaler_std, scaler_mm = load_scalers(results_dir)
-
-# Apply to evaluation data
-X_normalized = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=-1)
-```
-
-### Verification After Fixes
-
-```bash
-# 1. Train with fixed code
-python train.py --data data/raw/test.npz --experiment_name test_fix --epochs 5
-
-# Check logs for:
-# "Applying two-stage normalization (FIT ON TRAIN ONLY - no data leakage)..."
-# "Train data range: [0.000, 1.000]"  # Should be approximately [0, 1]
-
-# 2. Verify scaler files created
-ls results/test_fix_*/scaler_*.pkl
-# Should see: scaler_standard.pkl, scaler_minmax.pkl
-
-# 3. Evaluate with correct scalers
-python evaluate.py --experiment_name test_fix --data data/raw/test.npz
-# Check logs for:
-# "✓ Loaded scalers from training"
-# "✓ Applied same normalization as training"
-```
+1. What classification accuracy is achievable across realistic binary systems?
+2. How does observing cadence impact detection performance?
+3. How early can we reliably identify binary events?
+4. What are the fundamental physical limits for distinguishing binary from PSPL events?
 
 ---
 
-## 📊 Project Status (v3.1)
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Environment Setup | ✅ Complete | Tested on NVIDIA/AMD GPUs |
-| Data Simulation | ✅ Complete | VBMicrolensing pipeline working |
-| Training Pipeline | ✅ **FIXED** | **Normalization bugs resolved** |
-| Evaluation Pipeline | ✅ **FIXED** | **Now uses saved scalers** |
-| Baseline Experiment | 🔄 **RESTART REQUIRED** | Must re-run with fixes |
-| Cadence Experiments | ⏳ Pending | After baseline completes |
-| Error Experiments | ⏳ Pending | After baseline completes |
-| Topology Experiments | ⏳ Pending | After baseline completes |
-| Real-time Benchmarking | ⏳ Pending | After evaluation fixed |
-| Thesis Writing | ⏳ Not Started | Awaiting valid results |
-
----
-
-## 🚀 Quick Start (v3.1 - FIXED VERSION)
+## Quick Start
 
 ### Prerequisites
+
 - Python 3.10+
-- NVIDIA GPU (CUDA 12.1) or AMD GPU (ROCm 6.0)
+- NVIDIA GPU (recommended) or AMD GPU
 - 64 GB RAM recommended
 - 100 GB free disk space
 
-### Setup (5 minutes)
+### Installation
 
 ```bash
-# Clone and navigate
+# Clone repository
 git clone https://github.com/YOUR_USERNAME/Thesis.git
 cd Thesis
 
@@ -138,258 +53,393 @@ cd Thesis
 conda create -n microlens python=3.10 -y
 conda activate microlens
 
-# Install PyTorch (choose your GPU)
-# NVIDIA:
+# Install PyTorch (choose based on your GPU)
+# NVIDIA CUDA 12.1:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# AMD:
+
+# AMD ROCm 6.0:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Verify
+# Verify installation
 python code/utils.py
 ```
 
-### Apply Critical Fixes
-
-⚠️ **BEFORE RUNNING ANY EXPERIMENTS:**
+### Basic Usage
 
 ```bash
-# 1. Replace utils.py with fixed version
-cp utils_FIXED.py code/utils.py
-
-# 2. Fix train.py (change one line)
-# In code/train.py, line ~180:
-# CHANGE: load_npz_dataset(args.data, apply_perm=True, normalize=True)
-# TO:     load_npz_dataset(args.data, apply_perm=True, normalize=False)
-
-# 3. Fix evaluate.py (see CRITICAL_BUGS_AND_FIXES.md for details)
-
-# 4. Test with small dataset
 cd code
-python simulate.py --n_pspl 1000 --n_binary 1000 --output ../data/raw/test_fix.npz
-python train.py --data ../data/raw/test_fix.npz --experiment_name test_fix --epochs 5
 
-# Should see in logs:
-# "FIT ON TRAIN ONLY - no data leakage"
-# "Train data range: [0.000, 1.000]"
-```
-
----
-
-## 💡 Key Features (Version 3.1 - FIXED)
-
-### Correct Normalization Pipeline
-- ✅ **No data leakage**: Scalers fit on training data only
-- ✅ **Consistent scaling**: Same normalization in train and evaluation
-- ✅ **Saved scalers**: Automatically saved and loaded
-- ✅ **Verified ranges**: Data properly scaled to [0, 1]
-
-### Temporal Aggregation (v3.0 fix maintained)
-- ✅ **Per-timestep loss**: Loss computed at every timestep (not aggregated)
-- ✅ **Mean aggregation**: Predictions aggregated via mean pooling
-- ✅ **Early detection**: Enables classification with partial observations
-
-### Auto-Detection (v3.0 feature maintained)
-- ✅ **Timestamped directories**: Each run gets unique timestamp
-- ✅ **Auto model finding**: Scripts find latest model automatically
-- ✅ **Easy comparison**: Multiple runs preserved separately
-
----
-
-## 📁 Repository Structure
-
-```
-Thesis/
-├── code/
-│   ├── simulate.py              # Dataset generation (VBMicrolensing)
-│   ├── train.py                 # Training with FIXED normalization ⚠️
-│   ├── evaluate.py              # Evaluation with FIXED scaler loading ⚠️
-│   ├── benchmark_realtime.py    # Inference speed benchmarking ⚠️
-│   ├── plot_samples.py          # Sample visualization ⚠️
-│   ├── model.py                 # TimeDistributedCNN architecture
-│   ├── config.py                # All experiment configurations
-│   └── utils.py                 # FIXED: Scaler loading/saving ⚠️
-│
-├── data/
-│   └── raw/                     # Simulated light curves (.npz)
-│
-├── results/                     # Auto-generated timestamped directories
-│   └── {experiment}_{timestamp}/
-│       ├── best_model.pt        # Best model checkpoint
-│       ├── config.json          # Experiment configuration
-│       ├── training.log         # Training logs
-│       ├── summary.json         # Final metrics
-│       ├── scaler_standard.pkl  # ⚠️ NEW: Saved StandardScaler
-│       ├── scaler_minmax.pkl    # ⚠️ NEW: Saved MinMaxScaler
-│       ├── evaluation/          # Evaluation results
-│       └── benchmark/           # Benchmark results
-│
-├── docs/
-│   ├── SETUP_GUIDE.md          # Installation instructions (UPDATED)
-│   ├── RESEARCH_GUIDE.md       # Thesis workflow (UPDATED)
-│   ├── QUICK_REFERENCE.md      # Command cheatsheet (UPDATED)
-│   └── CRITICAL_BUGS_AND_FIXES.md  # ⚠️ NEW: Detailed bug documentation
-│
-├── CRITICAL_BUGS_AND_FIXES.md  # ⚠️ READ THIS FIRST
-├── utils_FIXED.py              # ⚠️ NEW: Fixed utils.py
-├── requirements.txt            # Python dependencies
-└── README.md                   # This file (UPDATED)
-```
-
----
-
-## 🔬 Systematic Experiments (After Fixes)
-
-### Workflow for Each Experiment
-
-```bash
-# 1. Generate data (once)
+# 1. Generate synthetic dataset (1M events, ~2 hours)
 python simulate.py \
-    --n_pspl 500000 --n_binary 500000 \
+    --n_pspl 500000 \
+    --n_binary 500000 \
     --output ../data/raw/baseline_1M.npz \
     --binary_params baseline
 
-# 2. Train (creates timestamped directory with scalers)
+# 2. Train model (~6-8 hours on 4 GPUs)
 python train.py \
     --data ../data/raw/baseline_1M.npz \
     --experiment_name baseline \
     --epochs 50
 
-# Verify in logs:
-# ✓ "FIT ON TRAIN ONLY - no data leakage"
-# ✓ "Train data range: [0.000, 1.000]"
-# ✓ "Scalers saved to results/baseline_TIMESTAMP/"
-
-# 3. Evaluate (auto-loads scalers)
+# 3. Evaluate
 python evaluate.py \
     --experiment_name baseline \
     --data ../data/raw/baseline_1M.npz \
     --early_detection
 
-# Verify in logs:
-# ✓ "Loaded scalers from training"
-# ✓ "Applied same normalization as training"
-
-# 4. Benchmark
+# 4. Benchmark real-time performance
 python benchmark_realtime.py \
     --experiment_name baseline \
     --data ../data/raw/baseline_1M.npz
 ```
 
-### Expected Performance (After Fixes)
+---
 
-| Metric | Before Fixes (v3.0) | After Fixes (v3.1) |
-|--------|---------------------|-------------------|
-| Training Accuracy | ~55% | **70-75%** |
-| Validation Accuracy | ~50% | **70-75%** |
-| Test Accuracy | ~50% | **70-75%** |
-| Train/Val Gap | Large (overfitting) | Small (2-3%) |
-| Data Scale | Incorrect (double normalized) | Correct [0, 1] |
+## Project Structure
+
+```
+Thesis/
+├── code/
+│   ├── simulate.py           # Dataset generation (VBMicrolensing)
+│   ├── train.py              # Model training
+│   ├── evaluate.py           # Model evaluation
+│   ├── benchmark_realtime.py # Inference benchmarking
+│   ├── plot_samples.py       # Visualization
+│   ├── model.py              # CNN architecture
+│   ├── config.py             # Configuration
+│   └── utils.py              # Utilities
+│
+├── data/
+│   └── raw/                  # Simulated light curves (.npz)
+│
+├── results/                  # Auto-generated experiment outputs
+│   └── {experiment}_{timestamp}/
+│       ├── best_model.pt     # Trained model
+│       ├── config.json       # Experiment configuration
+│       ├── training.log      # Training logs
+│       ├── summary.json      # Metrics summary
+│       ├── scaler_standard.pkl  # Normalization parameters
+│       ├── scaler_minmax.pkl    # Normalization parameters
+│       └── evaluation/       # Evaluation results
+│
+├── docs/
+│   ├── SETUP_GUIDE.md        # Detailed installation
+│   ├── RESEARCH_GUIDE.md     # Experimental workflow
+│   └── QUICK_REFERENCE.md    # Command cheatsheet
+│
+└── README.md                 # This file
+```
 
 ---
 
-## 📝 Documentation
+## Systematic Experiments
 
-- **[CRITICAL_BUGS_AND_FIXES.md](CRITICAL_BUGS_AND_FIXES.md)**: ⚠️ **START HERE** - Detailed bug explanations and fixes
-- **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Complete installation guide (updated for v3.1)
-- **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Physics background, experiment design (updated for v3.1)
-- **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet (updated for v3.1)
+### Baseline Experiment
+
+**Purpose**: Establish performance across mixed binary parameter ranges
+
+```bash
+python simulate.py --n_pspl 500000 --n_binary 500000 \
+    --output ../data/raw/baseline_1M.npz --binary_params baseline
+
+python train.py --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline --epochs 50
+```
+
+**Expected Results**:
+- Test Accuracy: 70-75%
+- ROC AUC: 0.78-0.82
+- Inference time: <1 ms per event
+
+### Cadence Experiments
+
+Test how observation frequency affects performance:
+
+| Experiment | Missing Obs | Expected Accuracy |
+|------------|-------------|-------------------|
+| Dense      | 5%          | 75-80%            |
+| Baseline   | 20%         | 70-75%            |
+| Sparse     | 30%         | 65-70%            |
+| Very Sparse| 40%         | 60-65%            |
+
+```bash
+# Example: Dense cadence
+python simulate.py --n_pspl 100000 --n_binary 100000 \
+    --output ../data/raw/cadence_dense.npz \
+    --cadence_mask_prob 0.05
+
+python train.py --data ../data/raw/cadence_dense.npz \
+    --experiment_name cadence_dense --epochs 50
+```
+
+### Photometric Error Experiments
+
+Test how measurement precision affects performance:
+
+```bash
+# Low error (space-based quality)
+python simulate.py --mag_error_std 0.05 \
+    --output ../data/raw/error_low.npz
+
+# High error (poor ground conditions)
+python simulate.py --mag_error_std 0.20 \
+    --output ../data/raw/error_high.npz
+```
+
+### Binary Topology Experiments
+
+Test performance across different binary mass ratios:
+
+```bash
+# Distinct caustic-crossing events (easiest)
+python simulate.py --binary_params distinct \
+    --output ../data/raw/distinct.npz
+
+# Planetary systems
+python simulate.py --binary_params planetary \
+    --output ../data/raw/planetary.npz
+
+# Stellar binaries (hardest)
+python simulate.py --binary_params stellar \
+    --output ../data/raw/stellar.npz
+```
 
 ---
 
-## 🧪 Reproducibility (v3.1)
+## Model Architecture
 
-All experiments are now truly reproducible with fixes:
+### TimeDistributed CNN
 
-1. **Fixed random seeds**: Set in `config.py` and enforced in all scripts
-2. **Saved configurations**: All experiment parameters logged to `config.json`
-3. **Saved scalers**: ⚠️ **NEW**: StandardScaler and MinMaxScaler saved with each experiment
-4. **Consistent normalization**: Same scalers used for train, val, test, and evaluation
-5. **Data permutations**: Saved and reapplied consistently via `load_npz_dataset()`
-6. **Exact versions**: See `requirements.txt` for pinned dependencies
+The model processes light curves sequentially, making predictions at each timestep:
+
+```
+Input: [batch, 1, sequence_length] 
+   ↓
+Conv1D (9, 128) + BatchNorm + ReLU + Dropout
+   ↓
+Conv1D (7, 64) + BatchNorm + ReLU + Dropout
+   ↓
+Conv1D (5, 32) + BatchNorm + ReLU + Dropout
+   ↓
+TimeDistributed(FC 64 + ReLU + Dropout)
+   ↓
+TimeDistributed(FC 2)
+   ↓
+Output: [batch, sequence_length, 2]
+```
+
+**Key Design Choices**:
+- Per-timestep predictions enable early detection
+- Mean/max pooling aggregates across full light curve
+- Captures distributed caustic features
 
 ---
 
-## 📧 Contact
+## Dataset Generation
 
-**Author**: Kunal Bhatia  
-**Email**: kunal29bhatia@gmail.com  
-**Institution**: University of Heidelberg
+Synthetic light curves are generated using [VBMicrolensing](https://github.com/valboz/VBBinaryLensing):
 
-**For Issues**:
-- **Bugs**: Read [CRITICAL_BUGS_AND_FIXES.md](CRITICAL_BUGS_AND_FIXES.md) first
-- Code bugs: Open GitHub issue
-- Physics questions: See `docs/RESEARCH_GUIDE.md`
-- Setup problems: See `docs/SETUP_GUIDE.md`
+### PSPL (Point-Source Point-Lens) Events
+
+Parameters sampled uniformly:
+- Impact parameter u₀: 0.01 - 1.0
+- Einstein timescale tE: 10 - 150 days
+- Event time t₀: 0 - 1000 days
+
+### Binary Events
+
+Configurable parameter ranges for different experiments:
+
+**Baseline** (mixed difficulty):
+- Separation s: 0.1 - 2.5
+- Mass ratio q: 0.1 - 1.0
+- Impact parameter u₀: 0.01 - 0.5
+- Source size ρ: 0.01 - 0.1
+
+**Distinct** (clear caustics):
+- Separation s: 0.8 - 1.5
+- Mass ratio q: 0.1 - 0.5
+- Impact parameter u₀: 0.01 - 0.15
+
+See `config.py` for full parameter definitions.
 
 ---
 
-## 📚 Citation
+## Evaluation Metrics
 
-```bibtex
-@mastersthesis{bhatia2025realtime,
-  title={Real-Time Binary Microlensing Classification using Deep Learning for Survey Operations},
-  author={Bhatia, Kunal},
-  year={2025},
-  school={University of Heidelberg},
-  note={Code available at https://github.com/YOUR_USERNAME/Thesis}
+The system provides comprehensive performance metrics:
+
+### Classification Metrics
+- Accuracy, Precision, Recall, F1-Score
+- ROC Curve and AUC
+- Precision-Recall Curve
+- Confusion Matrix
+
+### Early Detection Analysis
+- Performance at 10%, 25%, 50%, 67%, 83%, 100% observation completeness
+- Shows real-time classification capability
+
+### Decision Time Analysis
+- Average timesteps until confident classification
+- Accuracy vs. decision time curves
+- Confidence threshold sweep (0.5 - 1.0)
+
+### Real-Time Performance
+- Inference latency per event
+- Throughput (events/second)
+- GPU memory usage
+
+---
+
+## Results
+
+Results for each experiment are automatically saved in timestamped directories:
+
+```
+results/baseline_20251027_143022/
+├── best_model.pt              # Best model checkpoint
+├── config.json                # Experiment parameters
+├── training.log               # Training history
+├── summary.json               # Final metrics
+├── scaler_standard.pkl        # StandardScaler parameters
+├── scaler_minmax.pkl          # MinMaxScaler parameters
+└── evaluation/
+    ├── confusion_matrix.png
+    ├── roc_curve.png
+    ├── accuracy_vs_decision_time.png
+    ├── early_detection.png
+    └── evaluation_summary.json
+```
+
+**Key Files**:
+- `scaler_*.pkl`: Normalization parameters fitted on training data
+  - Critical for consistent evaluation and deployment
+  - Loaded automatically during evaluation
+- `evaluation_summary.json`: Complete metrics and analysis
+
+---
+
+## Data Preprocessing
+
+The pipeline uses two-stage normalization for stable training:
+
+1. **StandardScaler**: Z-score normalization (zero mean, unit variance)
+2. **MinMaxScaler**: Scale to [0, 1] range
+
+**Important**: 
+- Scalers are fitted **only** on training data (no data leakage)
+- Same scalers applied to validation, test, and evaluation sets
+- Scalers saved with model for consistent inference
+
+```python
+# During training (automatic)
+X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = \
+    two_stage_normalize(X_train, X_val, X_test)
+
+# During evaluation (automatic)
+scaler_std, scaler_mm = load_scalers(model_dir)
+X_test_scaled = apply_scalers_to_data(X_test, scaler_std, scaler_mm)
+```
+
+---
+
+## Configuration
+
+All experiments are configured in `config.py`:
+
+```python
+# Model architecture
+CONV1_FILTERS = 128
+CONV2_FILTERS = 64
+CONV3_FILTERS = 32
+DROPOUT_RATE = 0.3
+
+# Training
+BATCH_SIZE = 128
+EPOCHS = 50
+LEARNING_RATE = 1e-3
+
+# Data splits
+TRAIN_SPLIT = 0.7
+VAL_SPLIT = 0.15
+TEST_SPLIT = 0.15
+
+# Binary parameter sets
+BINARY_PARAM_SETS = {
+    'baseline': {...},
+    'distinct': {...},
+    'planetary': {...},
+    'stellar': {...},
 }
 ```
 
 ---
 
-## 🔄 Version History
+## Documentation
 
-**v3.1** (October 2025) - **CRITICAL BUG FIXES**:
-- ⚠️ Fixed double normalization bug
-- ⚠️ Fixed data leakage bug
-- ⚠️ Added scaler saving/loading for evaluation
-- ⚠️ All previous results INVALID - must re-run
-- Updated all documentation with warnings
-- Added CRITICAL_BUGS_AND_FIXES.md
-
-**v3.0** (October 2025):
-- Auto-detection of results directories
-- Timestamped experiment organization
-- Unified data loading via `load_npz_dataset()`
-- Improved experiment tracking
-
-**v2.0** (October 2025):
-- Fixed temporal aggregation bug
-- Added early detection analysis
-- Multi-GPU training support
-
-**v1.0** (September 2025):
-- Initial implementation
+- **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Complete installation instructions for local and HPC
+- **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Systematic experimental workflow for thesis
+- **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet for all experiments
 
 ---
 
-## ⚠️ Pre-Training Checklist (v3.1)
+## Performance Tips
 
-Before starting experiments:
+### For Training
 
-- [ ] Read [CRITICAL_BUGS_AND_FIXES.md](CRITICAL_BUGS_AND_FIXES.md)
-- [ ] Replace `code/utils.py` with `utils_FIXED.py`
-- [ ] Fix `train.py` (change `normalize=True` to `normalize=False`)
-- [ ] Fix `evaluate.py` (add scaler loading)
-- [ ] Fix `plot_samples.py` (add scaler loading)
-- [ ] Fix `benchmark_realtime.py` (add scaler loading)
-- [ ] Test with small dataset (verify logs show correct normalization)
-- [ ] Verify scaler files are created in results directory
-- [ ] Delete all old results (they are invalid)
+- **Multi-GPU**: Automatically uses DataParallel for 2+ GPUs
+- **Mixed Precision**: Enabled by default with torch.cuda.amp
+- **Batch Size**: 128 works well on 24GB GPUs; adjust for your hardware
+- **Data Loading**: Uses persistent workers for efficiency
+
+### For Inference
+
+- **Batch Processing**: Process 128-256 events simultaneously
+- **GPU Warmup**: First few batches are slower (GPU initialization)
+- **CPU Fallback**: Works without GPU but ~100× slower
 
 ---
 
-## 🎯 Next Steps
+## Reproducing Results
 
-1. **Apply all fixes** (see CRITICAL_BUGS_AND_FIXES.md)
-2. **Test with small dataset** to verify fixes work
-3. **Re-generate baseline dataset** (1M events)
-4. **Re-train baseline** with fixed code
-5. **Run all systematic experiments** with fixed code
-6. **Write thesis** with valid results
+All experiments are fully reproducible:
+
+1. **Fixed random seeds**: Set in config.py and enforced throughout
+2. **Saved configurations**: Every run logs all parameters to config.json
+3. **Saved scalers**: Normalization parameters preserved for consistent evaluation
+4. **Data permutations**: Shuffling applied consistently via saved permutation arrays
+5. **Exact versions**: See requirements.txt for all dependencies
+
+To reproduce a specific experiment:
+
+```bash
+# Load configuration from previous run
+CONFIG_FILE=results/baseline_20251027_143022/config.json
+
+# Extract parameters and re-run
+python train.py \
+    --data $(python -c "import json; print(json.load(open('$CONFIG_FILE'))['data_path'])") \
+    --experiment_name baseline_reproduction \
+    --batch_size $(python -c "import json; print(json.load(open('$CONFIG_FILE'))['batch_size'])")
+```
+
+---
+
+## Citation
+
+```bibtex
+@mastersthesis{bhatia2025realtime,
+  title={Real-Time Binary Microlensing Classification using Deep Learning},
+  author={Bhatia, Kunal},
+  year={2025},
+  school={University of Heidelberg},
+  note={Code: https://github.com/YOUR_USERNAME/Thesis}
+}
+```
 
 ---
 
@@ -399,4 +449,21 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ---
 
-**⚠️ REMEMBER: Version 3.1 fixes critical bugs. All previous results must be discarded and experiments re-run with the fixed code.** 🚨
+## Contact
+
+**Kunal Bhatia**  
+kunal29bhatia@gmail.com  
+University of Heidelberg
+
+**For Issues**:
+- Installation problems: See [SETUP_GUIDE.md](docs/SETUP_GUIDE.md)
+- Research workflow: See [RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)
+- Code bugs: Open GitHub issue
+
+---
+
+## Acknowledgments
+
+- VBMicrolensing library by Valerio Bozza
+- PyTorch team for deep learning framework
+- University of Heidelberg for computational resources

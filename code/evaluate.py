@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py - Evaluation with early-exit confidence thresholding
+evaluate.py - Evaluation with saved scalers (FIXED VERSION)
 
 Author: Kunal Bhatia
-Version: 3.0 - Fixed
+Version: 3.1 - Fixed to load scalers from training
 """
 
 import torch
@@ -21,7 +21,7 @@ from tqdm import tqdm
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_recall_curve
 
 from model import TimeDistributedCNN
-from utils import load_npz_dataset
+from utils import load_npz_dataset, load_scalers, apply_scalers_to_data
 import config as CFG
 
 def find_latest_results_dir(experiment_name, base_dir='../results'):
@@ -172,7 +172,7 @@ def plot_results(output_dir, cm, sweep_results, early_results, y_true, probs):
         plt.close()
         print(f"✓ Saved roc_curve.png")
     
-    # 3. Accuracy vs Decision Time (KEY PLOT from original)
+    # 3. Accuracy vs Decision Time
     if sweep_results:
         thresholds = [r['threshold'] for r in sweep_results]
         accuracies = [r['accuracy'] for r in sweep_results]
@@ -237,26 +237,49 @@ def main():
             args.model = str(results_dir / "best_model.pt")
         if args.output_dir is None:
             args.output_dir = str(results_dir / "evaluation")
+    else:
+        results_dir = Path(args.model).parent
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("EVALUATION WITH EARLY-EXIT CONFIDENCE THRESHOLDING")
+    print("EVALUATION WITH SAVED SCALERS (FIXED VERSION)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
     print(f"Output: {output_dir}")
     
-    # Load data
-    print("\nLoading data...")
-    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=True)
+    # =========================================================================
+    # CRITICAL FIX: Load RAW data and apply saved scalers
+    # =========================================================================
+    print("\n" + "="*80)
+    print("LOADING DATA AND SCALERS")
+    print("="*80)
+    
+    # Load RAW data (no normalization)
+    print("\n1. Loading RAW data (normalize=False)...")
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
     L = X.shape[1]
-    print(f"✓ Data loaded: {X.shape}")
+    print(f"✓ Raw data loaded: {X.shape}")
+    print(f"   Raw data range: [{X[X != CFG.PAD_VALUE].min():.3f}, {X[X != CFG.PAD_VALUE].max():.3f}]")
+    
+    # Load saved scalers from training
+    print("\n2. Loading scalers from training...")
+    scaler_std, scaler_mm = load_scalers(results_dir)
+    print(f"✓ Loaded scalers from {results_dir}")
+    
+    # Apply same transformation used during training
+    print("\n3. Applying saved scalers to data...")
+    X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+    print(f"✓ Applied same normalization as training")
+    print(f"   Normalized data range: [{X[X != CFG.PAD_VALUE].min():.3f}, {X[X != CFG.PAD_VALUE].max():.3f}]")
+    print(f"   Expected: approximately [0.0, 1.0]")
+    # =========================================================================
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
+    print(f"\nDevice: {device}")
     
     model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2)
     
@@ -275,7 +298,7 @@ def main():
     X_processed = X.copy()
     X_processed[X_processed == CFG.PAD_VALUE] = 0.0
     
-    # 1. Single threshold evaluation (0.9 like original)
+    # 1. Single threshold evaluation (0.9)
     print("\n" + "="*80)
     print("INFERENCE WITH CONFIDENCE THRESHOLD = 0.9")
     print("="*80)
@@ -343,7 +366,8 @@ def main():
         'early_detection': early_results,
         'metadata': meta,
         'data_path': str(args.data),
-        'model_path': str(args.model)
+        'model_path': str(args.model),
+        'scalers_used': str(results_dir)
     }
     
     with open(output_dir / 'evaluation_summary.json', 'w') as f:
@@ -356,9 +380,9 @@ def main():
     print("EVALUATION COMPLETE")
     print("="*80)
     
-    if acc > 0.60:
+    if acc > 0.65:
         print(f"✅ Good performance! Accuracy = {acc:.4f}")
-    elif acc > 0.50:
+    elif acc > 0.55:
         print(f"⚠️  Moderate performance. Accuracy = {acc:.4f}")
         print("   Consider training longer or adjusting hyperparameters")
     else:

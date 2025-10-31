@@ -1,433 +1,286 @@
-# Research Guide v3.1: Systematic Benchmarking (WITH CRITICAL BUG FIXES)
+# Research Guide - Systematic Benchmarking Methodology
 
-**Complete workflow for thesis research with v3.1 fixes applied**
-
----
-
-## 🚨 CRITICAL: Start Here
-
-**Version 3.1 fixes critical bugs that invalidated all v3.0 results.**
-
-**Before proceeding:**
-1. ✅ Read [CRITICAL_BUGS_AND_FIXES.md](../CRITICAL_BUGS_AND_FIXES.md)
-2. ✅ Apply all fixes to code (see [SETUP_GUIDE.md](SETUP_GUIDE.md))
-3. ✅ Verify fixes with test dataset
-4. ✅ Delete all old results (they are invalid)
-
-**Expected performance after fixes:**
-- Baseline accuracy: 70-75% (was ~55% with bugs)
-- Stable training curves
-- Test accuracy within 2-3% of validation
+Complete experimental workflow for thesis research.
 
 ---
 
-## 🎯 Research Questions
+## Research Questions
 
-Your thesis will quantitatively answer:
+This work quantitatively addresses:
 
-1. **What performance is achievable across diverse binary systems?**  
-   → Test with wide parameter ranges representing realistic populations
+1. **Baseline Performance**: What classification accuracy is achievable across realistic binary parameter distributions?
 
-2. **How does observing cadence affect classification?**  
-   → Test 5%, 20%, 30%, 40% missing observations
+2. **Cadence Dependence**: How does observation frequency affect detection performance?
 
-3. **How early can we reliably detect binary events?**  
-   → Test classification with partial light curves
+3. **Early Detection**: How early can we reliably identify binary events with partial light curves?
 
-4. **What's the physical detection limit?**  
-   → Test easy vs hard binary topologies (caustic-crossing vs PSPL-like)
+4. **Physical Limits**: What are the fundamental detection limits imposed by binary topology (impact parameter u₀)?
 
-5. **How do photometric errors impact performance?**  
-   → Test space-based vs ground-based quality
+5. **Photometric Quality**: How do measurement errors impact classification accuracy?
 
 ---
 
-## 🆕 v3.1 Changes for Research
+## Understanding Binary Microlensing
 
-### Bug Fixes Impact Research
+### Why Binary Detection Matters
 
-**What was wrong in v3.0:**
-- Double normalization → incorrect data scale
-- Data leakage → optimistic validation scores
-- Scaler mismatch → inconsistent train/eval results
+Binary microlensing events reveal:
+- **Exoplanets**: Low mass-ratio systems (q ~ 0.001 - 0.01)
+- **Stellar Binaries**: Equal-mass systems (q ~ 0.3 - 1.0)
+- **Black Hole Binaries**: Extreme mass ratios
 
-**What's fixed in v3.1:**
-- Single normalization → correct [0, 1] scale
-- No data leakage → honest generalization estimates
-- Saved scalers → consistent train/eval/test
+Traditional PSPL fitting requires days of computation per event. With 20,000+ events/year from LSST/Roman, automated classification becomes essential.
 
-### Key Implications
+### Key Physical Parameters
 
-1. **All v3.0 results are invalid** and cannot be used in thesis
-2. **Expected performance is lower** but more realistic (70-75% vs previous inflated scores)
-3. **Training is more stable** with proper normalization
-4. **Results are reproducible** with saved scalers
+#### 1. Impact Parameter (u₀) - Most Critical
 
-### Research Workflow Changes
+**Definition**: Minimum distance between source trajectory and lens (in Einstein radii)
 
-**v3.0 workflow (WRONG)**:
-```bash
-# ❌ This caused bugs:
-python train.py --data data.npz ...  # Normalized twice internally
-python evaluate.py --data data.npz ... # Re-fitted scalers
-```
+**Physical Significance**:
+- **Small u₀ (< 0.15)**: Close approach → High caustic crossing probability → Clearly distinguishable
+- **Medium u₀ (0.15 - 0.30)**: Moderate distance → Sometimes distinguishable
+- **Large u₀ (> 0.30)**: Far from lens → Fundamentally PSPL-like → Cannot reliably distinguish
 
-**v3.1 workflow (CORRECT)**:
-```bash
-# ✅ Fixed workflow:
-python train.py --data data.npz ...  
-# - Loads RAW data
-# - Normalizes after splitting
-# - Saves scalers
+**Research Implication**: ~15-25% of binary events have u₀ > 0.3 and are intrinsically indistinguishable. This is a **physical limit**, not an algorithm limitation.
 
-python evaluate.py --experiment_name exp --data data.npz ...
-# - Loads RAW data
-# - Loads saved scalers from training
-# - Applies same normalization
-```
+#### 2. Separation (s)
 
----
+**Definition**: Distance between binary components (in Einstein radii)
 
-## 📐 Understanding Binary Parameters
+**Key Values**:
+- **s ≈ 1.0**: Optimal caustic topology (wide, clear structures)
+- **s < 0.7 or s > 2.0**: Smaller, fainter caustics (harder to detect)
 
-[This section remains the same - physics doesn't change]
+#### 3. Mass Ratio (q)
 
-### The Physics Behind Detection
+**Definition**: m₂/m₁ (companion mass / primary mass)
 
-**Caustics** are critical curves where magnification becomes very large. When a source crosses a caustic:
-- Sharp, dramatic spikes
-- Complex, multi-peaked structure
-- Features that PSPL cannot produce
+**Regimes**:
+- **Planetary**: q ~ 0.0001 - 0.01 (small planetary perturbations)
+- **Brown Dwarf**: q ~ 0.01 - 0.1 (moderate perturbations)
+- **Stellar**: q ~ 0.3 - 1.0 (symmetric caustics)
 
-**This is the key signature for detecting binary lenses.**
+#### 4. Source Size (ρ)
 
-### Critical Parameters (in order of importance)
+**Definition**: Angular source radius / Einstein radius
 
-#### 1. **u₀ (Impact Parameter)** - MOST IMPORTANT
+**Effect**:
+- **Small ρ (< 0.01)**: Sharp, spiky features (easier to detect)
+- **Large ρ (> 0.05)**: Smoothed features (harder to detect)
 
-**Definition**: Minimum distance between source trajectory and lens center of mass (in Einstein radii)
+#### 5. Einstein Timescale (tE)
 
-**Physical significance**:
-- **Small u₀ (< 0.15)**: Source passes close to lens
-  - High probability of crossing caustics
-  - Strong, distinctive features
-  - Clearly different from PSPL
-  
-- **Medium u₀ (0.15 - 0.30)**: Moderate distance
-  - May or may not cross caustics
-  - Sometimes distinguishable, sometimes not
-  
-- **Large u₀ (> 0.30)**: Source passes far from lens
-  - Very low caustic crossing probability
-  - **Fundamentally PSPL-like**
-  - No algorithm can reliably distinguish these
-
-**Research finding** (expected with v3.1):
-- Approximately 15-25% of binary events have large u₀
-- These are intrinsically indistinguishable from PSPL
-- This is a **fundamental physical limit**, not ML limitation
-
-[Continue with other parameters as before: s, q, ρ, etc.]
+Duration of microlensing event (days). Typical range: 10-200 days.
 
 ---
 
-## 📊 Experimental Design with v3.1
+## Experimental Design
 
-### Baseline (Reference Experiment) - MUST RE-RUN
+### Baseline Experiment
+
+**Purpose**: Establish performance across mixed, realistic parameter ranges
 
 **Configuration**:
 ```python
-n_events = 1,000,000
-cadence_mask_prob = 0.20  # 20% missing observations
-mag_error_std = 0.10       # 0.1 mag photometric error
-binary_params = 'baseline' # Mixed difficulty
+N_events = 1,000,000
+N_pspl = 500,000
+N_binary = 500,000
+
+Binary Parameters:
+  s: 0.1 - 2.5        # Wide range
+  q: 0.1 - 1.0        # Planetary to stellar
+  u0: 0.01 - 0.5      # Mix of easy/hard
+  rho: 0.01 - 0.1     # Typical sources
+  tE: 10 - 100 days   # Realistic timescales
+
+Observational:
+  Cadence: 20% missing observations (LSST-like)
+  Photometry: 0.10 mag error (ground-based)
+  Points: 1500 per light curve
 ```
 
-**Commands (v3.1 - with fixes)**:
+**Commands**:
 ```bash
 cd code
 
-# 1. Generate data (same as before)
+# Generate
 python simulate.py \
     --n_pspl 500000 --n_binary 500000 \
-    --output ../data/raw/baseline_1M_v31.npz \
-    --binary_params baseline
+    --output ../data/raw/baseline_1M.npz \
+    --binary_params baseline \
+    --seed 42
 
-# 2. Train (creates timestamped directory + scalers)
+# Train
 python train.py \
-    --data ../data/raw/baseline_1M_v31.npz \
-    --experiment_name baseline_v31 \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
     --epochs 50
 
-# ✅ VERIFY IN LOGS:
-# - "FIT ON TRAIN ONLY - no data leakage"
-# - "Train data range: [0.000, 1.000]"
-# - "Scalers saved to results/baseline_v31_TIMESTAMP/"
-
-# 3. Check scalers created
-ls $(ls -td ../results/baseline_v31_*/ | head -1)/scaler_*.pkl
-# Should show: scaler_standard.pkl, scaler_minmax.pkl
-
-# 4. Evaluate (auto-loads scalers)
+# Evaluate
 python evaluate.py \
-    --experiment_name baseline_v31 \
-    --data ../data/raw/baseline_1M_v31.npz \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_1M.npz \
     --early_detection
-
-# ✅ VERIFY IN LOGS:
-# - "Loaded scalers from training"
-# - "Applied same normalization as training"
-
-# 5. Benchmark
-python benchmark_realtime.py \
-    --experiment_name baseline_v31 \
-    --data ../data/raw/baseline_1M_v31.npz
 ```
 
-**Results location**: `results/baseline_v31_TIMESTAMP/`
-
-**Expected Results (v3.1)**:
-- Training accuracy: 72-76%
-- Validation accuracy: 70-74%
-- Test accuracy: 70-74%
-- Train/val gap: < 3%
+**Expected Results**:
+- Test Accuracy: 70-75%
 - ROC AUC: 0.78-0.82
-
-Compare to v3.0 (with bugs):
-- Training accuracy: ~55% (was incorrect due to double normalization)
-- Validation accuracy: ~50% (was incorrect)
-- Large train/val gap (was sign of data leakage)
+- Early detection (50% observed): 68-72%
 
 ---
 
-### Systematic Experiment Suite (All Must Be Re-Run)
+### Systematic Experiments
 
-After baseline completes with v3.1 fixes, run these experiments:
+After baseline, run these experiments:
 
 #### 1. Cadence Experiments
 
-Test how observation frequency affects performance.
+**Purpose**: Quantify impact of observation frequency
 
-| Experiment | Missing % | Command | Expected Acc (v3.1) |
-|------------|-----------|---------|---------------------|
-| Dense | 5% | `--cadence_mask_prob 0.05` | 75-80% |
-| Baseline | 20% | Already done | 70-75% |
-| Sparse | 30% | `--cadence_mask_prob 0.30` | 65-70% |
-| Very Sparse | 40% | `--cadence_mask_prob 0.40` | 60-65% |
+| Experiment | Missing | Expected Acc | Survey Context |
+|------------|---------|--------------|----------------|
+| Dense      | 5%      | 75-80%       | Intensive follow-up |
+| Baseline   | 20%     | 70-75%       | LSST nominal |
+| Sparse     | 30%     | 65-70%       | Poor weather |
+| Very Sparse| 40%     | 60-65%       | Limited coverage |
 
-**Generation (example for dense)**:
+**Scientific Question**: Can we maintain >70% accuracy with sparse data?
+
+**Commands**:
 ```bash
-python simulate.py \
-    --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/cadence_05_v31.npz \
-    --binary_params baseline \
-    --cadence_mask_prob 0.05 \
-    --seed 42
-```
-
-**Batch training**:
-```bash
-for exp in cadence_05 cadence_30 cadence_40; do
-    echo "Training ${exp}_v31..."
-    python train.py \
-        --data ../data/raw/${exp}_v31.npz \
-        --experiment_name ${exp}_v31 \
-        --epochs 50
-    
-    # Verify after each
-    echo "Verifying ${exp}_v31..."
-    grep "Train data range" $(ls -td ../results/${exp}_v31_*/ | head -1)/training.log
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/cadence_${name}.npz \
+        --cadence_mask_prob $cadence --seed 42
+    python train.py --data ../data/raw/cadence_${name}.npz \
+        --experiment_name cadence_${name} --epochs 50
+    python evaluate.py --experiment_name cadence_${name} \
+        --data ../data/raw/cadence_${name}.npz --early_detection
 done
 ```
 
----
-
 #### 2. Photometric Error Experiments
 
-Test how measurement precision affects performance.
+**Purpose**: Test robustness to measurement precision
 
-| Experiment | Error (mag) | Quality | Expected Acc (v3.1) |
-|------------|-------------|---------|---------------------|
-| Low | 0.05 | Space-based (Roman) | 75-80% |
-| Baseline | 0.10 | Ground-based (LSST) | 70-75% |
-| High | 0.20 | Poor conditions | 65-70% |
+| Experiment | Error (mag) | Quality | Expected Acc |
+|------------|-------------|---------|--------------|
+| Low        | 0.05        | Space-based (Roman) | 75-80% |
+| Baseline   | 0.10        | Ground-based (LSST) | 70-75% |
+| High       | 0.20        | Poor conditions | 65-70% |
 
-**Hypothesis** (to test with v3.1):
-- Photometric error matters less than cadence for caustic-crossing events
-- Sharp features survive moderate noise
-- Difference between 0.05 and 0.20 should be ~10% accuracy
+**Scientific Question**: How much does photometric quality matter vs. cadence?
 
----
+**Hypothesis**: Caustic features are sharp enough to survive moderate noise. Expect ~5-10% accuracy difference between 0.05 and 0.20 mag.
+
+**Commands**:
+```bash
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/error_${name}.npz \
+        --mag_error_std $error --seed 42
+    python train.py --data ../data/raw/error_${name}.npz \
+        --experiment_name error_${name} --epochs 50
+    python evaluate.py --experiment_name error_${name} \
+        --data ../data/raw/error_${name}.npz --early_detection
+done
+```
 
 #### 3. Binary Topology Experiments
 
-Test fundamental limits set by caustic topology.
+**Purpose**: Test performance across different caustic structures
 
-| Experiment | Description | u₀ range | Expected Acc (v3.1) |
-|------------|-------------|----------|---------------------|
-| Distinct | u₀<0.15, s≈1 | 0.001-0.15 | 80-90% (easy) |
-| Planetary | q<<1 | 0.001-0.5 | 70-80% (moderate) |
-| Stellar | q~1 | 0.001-0.8 | 60-75% (hard) |
+| Experiment | Description | Parameters | Expected Acc |
+|------------|-------------|------------|--------------|
+| Distinct   | Clear caustics | s=0.8-1.5, q=0.1-0.5, u₀<0.15 | 80-90% |
+| Planetary  | Planet-hosting | q=0.0001-0.01, varied u₀ | 70-80% |
+| Stellar    | Equal-mass | q=0.3-1.0, varied u₀ | 60-75% |
 
-**Key Research Insight**:
-- Events with u₀ > 0.3 are fundamentally PSPL-like
-- Even with perfect data, these are indistinguishable
-- This is a **physics limit**, not an algorithm limit
+**Scientific Question**: Can we identify the physical detection limit (u₀ threshold)?
 
-**With v3.1 fixes, you can now properly quantify this:**
+**Key Analysis**: Plot accuracy vs. u₀ in bins. Expect performance drop at u₀ > 0.3.
+
+**Commands**:
 ```bash
-# After running all topology experiments:
-python -c "
-import numpy as np
-import json
-from pathlib import Path
-
-# Load results
-experiments = ['distinct_v31', 'planetary_v31', 'stellar_v31']
-for exp in experiments:
-    run_dir = sorted(Path('results').glob(f'{exp}_*'))[-1]
-    eval_file = run_dir / 'evaluation' / 'evaluation_summary.json'
-    
-    with open(eval_file) as f:
-        data = json.load(f)
-    
-    print(f'{exp}: {data[\"metrics\"][\"accuracy\"]:.3f}')
-    
-    # Analyze by u0 bins (if metadata available)
-    # This will show performance drops for large u0
-"
+for topo in distinct planetary stellar; do
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/${topo}.npz \
+        --binary_params ${topo} --seed 42
+    python train.py --data ../data/raw/${topo}.npz \
+        --experiment_name ${topo} --epochs 50
+    python evaluate.py --experiment_name ${topo} \
+        --data ../data/raw/${topo}.npz --early_detection
+done
 ```
-
----
 
 #### 4. Early Detection Analysis
 
-Test real-time classification capability.
+**Purpose**: Test real-time classification capability
 
-**v3.1 Improvement**: With correct normalization, early detection should work better!
+Evaluate model performance with 10%, 25%, 50%, 67%, 83%, 100% of observations.
 
-```bash
-python evaluate.py \
-    --experiment_name baseline_v31 \
-    --data ../data/raw/baseline_1M_v31.npz \
-    --early_detection
+**Scientific Question**: At what fraction can we trigger follow-up observations?
+
+**Expected Results**:
+```
+10% observed:  50-55% accuracy (too early)
+25% observed:  60-65% accuracy (marginal)
+50% observed:  68-72% accuracy (acceptable for high-priority targets)
+100% observed: 70-75% accuracy (baseline)
 ```
 
-**Expected Results (v3.1)**:
-- 10% observed: 50-55% accuracy
-- 25% observed: 60-65% accuracy
-- 50% observed: 68-72% accuracy
-- 100% observed: 70-75% accuracy
-
-**v3.0 results were unreliable** due to normalization bugs.
+**Enabled automatically**: Use `--early_detection` flag in evaluate.py
 
 ---
 
-## 🔬 Analysis Workflow with v3.1
+## Analysis Workflow
 
-### 1. Verify Each Experiment Completed Correctly
-
-For each experiment, check:
+### 1. Extract Results
 
 ```bash
-EXP=baseline_v31
-
-# 1. Find latest run
-LATEST=$(ls -td results/${EXP}_*/ | head -1)
-echo "Checking: $LATEST"
-
-# 2. Verify training completed
-if [ -f "$LATEST/best_model.pt" ]; then
-    echo "✓ Model saved"
-else
-    echo "❌ Training incomplete"
-fi
-
-# 3. Verify scalers saved
-if [ -f "$LATEST/scaler_standard.pkl" ] && [ -f "$LATEST/scaler_minmax.pkl" ]; then
-    echo "✓ Scalers saved"
-else
-    echo "❌ Scalers missing - TRAINING INVALID"
-fi
-
-# 4. Check normalization logs
-grep "Train data range" $LATEST/training.log
-# Should show approximately [0.000, 1.000]
-
-# 5. Check for data leakage warnings
-if grep -q "data leakage" $LATEST/training.log; then
-    echo "❌ DATA LEAKAGE DETECTED - RESULTS INVALID"
-else
-    echo "✓ No data leakage"
-fi
-```
-
----
-
-### 2. Extract Results for Thesis
-
-**Master comparison table (v3.1)**:
-
-```bash
+# Generate summary table
 python -c "
 import json
 from pathlib import Path
 
 experiments = [
-    'baseline_v31', 'cadence_05_v31', 'cadence_30_v31', 'cadence_40_v31',
-    'error_05_v31', 'error_20_v31', 'distinct_v31', 'planetary_v31', 'stellar_v31'
+    'baseline', 'cadence_dense', 'cadence_sparse', 
+    'error_low', 'error_high', 'distinct', 'planetary', 'stellar'
 ]
 
-print(f'{'Experiment':<20} {'Train Acc':<12} {'Val Acc':<12} {'Test Acc':<12} {'ROC AUC':<10}')
-print('-' * 70)
+print(f'{'Experiment':<20} {'Test Acc':<12} {'ROC AUC':<10}')
+print('-' * 45)
 
 for exp in experiments:
     runs = sorted(Path('results').glob(f'{exp}_*'))
     if runs:
-        latest = runs[-1]
-        
-        # Check scalers exist (validation)
-        if not (latest / 'scaler_standard.pkl').exists():
-            print(f'{exp:<20} {'INVALID':<12} {'(no scalers)':<12}')
-            continue
-        
-        summary_file = latest / 'summary.json'
-        eval_file = latest / 'evaluation' / 'evaluation_summary.json'
-        
-        if summary_file.exists():
-            with open(summary_file) as f:
-                summary = json.load(f)
-            
-            train_acc = summary.get('final_train_acc', 0)
-            val_acc = summary.get('best_val_acc', 0)
-            test_acc = summary.get('final_test_acc', 0)
-            
-            roc_auc = 0
-            if eval_file.exists():
-                with open(eval_file) as f:
-                    eval_data = json.load(f)
-                roc_auc = eval_data.get('metrics', {}).get('roc_auc', 0)
-            
-            print(f'{exp:<20} {train_acc*100:>10.2f}% {val_acc*100:>10.2f}% {test_acc*100:>10.2f}% {roc_auc:>8.3f}')
-"
+        summary = runs[-1] / 'summary.json'
+        if summary.exists():
+            data = json.load(open(summary))
+            acc = data.get('final_test_acc', 0) * 100
+            print(f'{exp:<20} {acc:>10.2f}%')
+" > results_summary.txt
+
+cat results_summary.txt
 ```
 
----
+### 2. Generate Comparison Plots
 
-### 3. Generate Comparison Plots
-
-**Cadence vs Performance**:
+**Cadence Analysis**:
 ```python
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path
 
-# Extract cadence results
 cadences = [5, 20, 30, 40]
 accuracies = []
 
 for cad in cadences:
-    exp = f'cadence_{cad:02d}_v31'
+    exp = f'cadence_{cad:02d}'
     runs = sorted(Path('results').glob(f'{exp}_*'))
     if runs:
         with open(runs[-1] / 'summary.json') as f:
@@ -438,211 +291,242 @@ plt.figure(figsize=(10, 6))
 plt.plot(cadences, accuracies, 'o-', linewidth=2.5, markersize=10)
 plt.xlabel('Missing Observations (%)', fontsize=12)
 plt.ylabel('Test Accuracy (%)', fontsize=12)
-plt.title('Performance vs Observing Cadence (v3.1 - Fixed)', fontsize=14, fontweight='bold')
+plt.title('Performance vs. Observing Cadence', fontsize=14, fontweight='bold')
 plt.grid(alpha=0.3)
-plt.savefig('figures/cadence_comparison_v31.png', dpi=300, bbox_inches='tight')
-print("✓ Saved cadence comparison")
+plt.savefig('figures/cadence_comparison.png', dpi=300, bbox_inches='tight')
 ```
 
-**Error vs Performance**:
+**Error Analysis**:
 ```python
-# Similar plot for photometric errors
 errors = [0.05, 0.10, 0.20]
 accuracies = []
 
 for err in errors:
-    exp = f'error_{int(err*100):02d}_v31'
-    # ... extract results ...
+    exp = f'error_{int(err*100):02d}'
+    runs = sorted(Path('results').glob(f'{exp}_*'))
+    if runs:
+        with open(runs[-1] / 'summary.json') as f:
+            data = json.load(f)
+        accuracies.append(data['final_test_acc'] * 100)
 
 plt.figure(figsize=(10, 6))
 plt.plot(errors, accuracies, 'o-', linewidth=2.5, markersize=10, color='red')
 plt.xlabel('Photometric Error (mag)', fontsize=12)
 plt.ylabel('Test Accuracy (%)', fontsize=12)
-plt.title('Performance vs Photometric Quality (v3.1 - Fixed)', fontsize=14, fontweight='bold')
+plt.title('Performance vs. Photometric Quality', fontsize=14, fontweight='bold')
 plt.grid(alpha=0.3)
-plt.savefig('figures/error_comparison_v31.png', dpi=300, bbox_inches='tight')
-print("✓ Saved error comparison")
+plt.savefig('figures/error_comparison.png', dpi=300, bbox_inches='tight')
 ```
 
----
+### 3. Physical Interpretation
 
-## 📝 Thesis Structure (Updated for v3.1)
+**u₀ Dependency Analysis**:
 
-### Chapter 4: Results - CRITICAL UPDATES
-
-**⚠️ You MUST include a section on the bug fixes:**
-
-#### 4.1 Methodological Improvements (v3.1)
-
-"During the course of this research, critical bugs were discovered in the normalization pipeline that invalidated initial results. Version 3.1 implements the following fixes:
-
-1. **Single-stage normalization**: Data is now normalized only once, after train/val/test splitting, preventing double normalization artifacts.
-
-2. **No data leakage**: Scalers are fitted exclusively on training data and applied consistently to validation and test sets, ensuring honest generalization estimates.
-
-3. **Saved scalers**: Normalization parameters are saved during training and reused during evaluation, guaranteeing consistent data preprocessing across all stages.
-
-These fixes resulted in [X]% lower reported accuracy compared to preliminary results, but provide substantially more reliable performance estimates. All results reported in this thesis are from v3.1 with fixes applied."
-
-#### 4.2 Baseline Performance
-
-Report v3.1 results with confidence:
-- Training accuracy: 72-76%
-- Validation accuracy: 70-74%
-- Test accuracy: 70-74%
-- ROC AUC: 0.78-0.82
-
-**Emphasize**: These are honest, reproducible results with proper methodology.
-
-#### 4.3 Comparative Analysis
-
-Show how performance varies across:
-- Cadence (5% to 40% missing)
-- Photometric error (0.05 to 0.20 mag)
-- Binary topology (distinct to stellar)
-
-**Key insight**: With correct normalization (v3.1), we can now trust these comparisons.
-
----
-
-## 🎯 Expected Contributions (Updated)
-
-Your thesis will provide:
-
-1. **Methodologically Sound Benchmarking**: v3.1 fixes ensure results are valid
-2. **Quantitative Performance Estimates**: Honest accuracy across conditions
-3. **Physical Interpretation**: u₀ threshold correctly identified
-4. **Survey Design Guidance**: LSST/Roman strategies based on valid results
-5. **Open-Source Pipeline**: Fixed code ready for community use
-
----
-
-## 🚀 Execution Timeline (v3.1)
-
-### Phase 1: Fix and Verify (Week 1)
-- ✅ Apply all v3.1 fixes
-- ✅ Test with small dataset
-- ✅ Verify normalization logs
-- ✅ Confirm scalers saved/loaded
-
-### Phase 2: Baseline (Week 2)
-- Generate 1M event dataset
-- Train baseline_v31
-- Verify performance (70-75%)
-- Full evaluation + early detection
-
-### Phase 3: Systematic Experiments (Weeks 3-6)
-- Cadence experiments (4 configs)
-- Error experiments (3 configs)
-- Topology experiments (4 configs)
-- All with v3.1 fixes verified
-
-### Phase 4: Analysis (Weeks 7-8)
-- Generate comparison plots
-- Physical interpretation
-- Statistical analysis
-- Document methodology fixes in thesis
-
-### Phase 5: Writing (Weeks 9-12)
-- Include section on v3.1 fixes
-- Present validated results
-- Discuss physical limits
-- Provide survey recommendations
-
----
-
-## 💡 Key Research Questions to Answer (v3.1)
-
-1. **What fraction of realistic binaries are detectable?**
-   - Now answerable with correct normalization
-   
-2. **How dense must survey cadence be?**
-   - v3.1 results show true impact of cadence
-   
-3. **Can we trigger follow-up observations early?**
-   - Early detection analysis now reliable
-   
-4. **Do planetary systems differ from stellar?**
-   - With fixes, differences are meaningful
-   
-5. **What's the intrinsic physical limit?**
-   - u₀ threshold analysis now valid
-
----
-
-## 📊 Results Documentation (v3.1)
-
-### Master Table Template
-
-```
-| Experiment       | v3.0 (buggy) | v3.1 (fixed) | Improvement | Notes          |
-|------------------|--------------|--------------|-------------|----------------|
-| Baseline         | ~55%         | 72-76%       | +20%        | Correct scale  |
-| Dense (5%)       | ~60%         | 75-80%       | +20%        | No leakage     |
-| Sparse (30%)     | ~45%         | 65-70%       | +23%        | Valid results  |
-| Error 0.05       | ~58%         | 75-80%       | +20%        | Space quality  |
-| Distinct         | ~65%         | 80-90%       | +20%        | Clear caustics |
-```
-
-**Include this table in your thesis** to show:
-- v3.0 results were artificially low (double normalization)
-- v3.1 fixes brought performance to expected range
-- Results are now scientifically valid
-
----
-
-## 💬 Key Messages for Thesis
-
-### In Introduction
-"This work uses a carefully validated deep learning pipeline with proper normalization and no data leakage (v3.1) to ensure reliable performance estimates."
-
-### In Methods
-"Critical attention was paid to data preprocessing, particularly normalization. Scalers were fitted exclusively on training data and applied consistently across all evaluation stages to prevent data leakage."
-
-### In Results
-"All results reported here are from version 3.1 of the pipeline, which fixes critical normalization bugs discovered during development. This ensures scientific validity of our performance estimates."
-
-### In Discussion
-"The performance levels achieved (70-75% accuracy for baseline) represent realistic expectations for automated binary microlensing classification, accounting for the fundamental physical limits imposed by impact parameter u₀."
-
----
-
-## 📚 Additional Analysis (Now Possible with v3.1)
-
-### u₀ Dependency Analysis
-
-With correct normalization, you can now trust this analysis:
+Extract binary event metadata and plot accuracy vs. u₀:
 
 ```python
-# Load metadata and results
 import numpy as np
-import json
 
-# For baseline experiment
-# Bin results by u0
+# Load baseline results with metadata
+# Bin events by u0
 u0_bins = np.linspace(0, 1, 11)
-accuracies = []
+accuracies_by_u0 = []
 
 for i in range(len(u0_bins)-1):
     u0_low, u0_high = u0_bins[i], u0_bins[i+1]
-    # Filter events in this u0 range
-    # Calculate accuracy for this bin
+    # Filter events in this bin
+    # Calculate accuracy for this subset
     # ...
 
 plt.figure(figsize=(10, 6))
-plt.plot(u0_bin_centers, accuracies, 'o-', linewidth=2.5)
-plt.axvline(x=0.3, color='red', linestyle='--', label='Physical limit (u₀=0.3)')
+plt.plot(u0_bin_centers, accuracies_by_u0, 'o-', linewidth=2.5)
+plt.axvline(x=0.3, color='red', linestyle='--', label='Physical limit (u₀ = 0.3)')
 plt.xlabel('Impact Parameter u₀', fontsize=12)
 plt.ylabel('Classification Accuracy (%)', fontsize=12)
-plt.title('Accuracy vs Impact Parameter (v3.1)', fontsize=14)
+plt.title('Accuracy vs. Impact Parameter', fontsize=14, fontweight='bold')
 plt.legend()
-plt.savefig('figures/u0_dependency_v31.png', dpi=300)
+plt.savefig('figures/u0_dependency.png', dpi=300, bbox_inches='tight')
 ```
 
-This will show the expected drop-off at u₀ > 0.3!
+**Expected Finding**: Clear performance drop at u₀ > 0.3, demonstrating fundamental physical limit.
 
 ---
 
-**Remember: v3.1 fixes make your research scientifically valid!** 🚀🔭
+## Thesis Structure
 
-All reported results must be from v3.1. Never mix v3.0 and v3.1 results.
+### Chapter 4: Results
+
+#### 4.1 Baseline Performance
+
+Report:
+- Training/validation/test accuracy
+- ROC curve and AUC
+- Confusion matrix
+- Sample predictions (6-12 examples)
+
+**Key Message**: Demonstrate ~70-75% accuracy across realistic parameter distributions.
+
+#### 4.2 Observational Dependence
+
+**Cadence Study**:
+- Plot: Accuracy vs. missing observations (5% to 40%)
+- Finding: "Performance degrades gracefully with sparse data"
+- Survey recommendation: "LSST nominal cadence (20% missing) sufficient for 70%+ accuracy"
+
+**Photometric Quality Study**:
+- Plot: Accuracy vs. photometric error (0.05 to 0.20 mag)
+- Finding: "Caustic features robust to moderate noise"
+- Survey recommendation: "Ground-based quality (0.10 mag) nearly as effective as space-based (0.05 mag)"
+
+#### 4.3 Physical Limits
+
+**Binary Topology Study**:
+- Distinct (clear caustics): 80-90% accuracy
+- Planetary: 70-80% accuracy
+- Stellar: 60-75% accuracy
+
+**u₀ Dependency**:
+- Plot accuracy vs. impact parameter
+- Demonstrate performance drop at u₀ > 0.3
+- Conclusion: "~20% of binary events fundamentally indistinguishable due to large impact parameter"
+
+#### 4.4 Early Detection Capability
+
+- Plot: Accuracy vs. observation completeness
+- Finding: "50% of observations sufficient for ~70% accuracy"
+- Application: "Enable follow-up trigger decisions hours to days earlier than traditional fitting"
+
+#### 4.5 Real-Time Performance
+
+- Inference latency: <1 ms per event
+- Throughput: 10,000+ events/second on single GPU
+- Comparison: "~1000× faster than traditional PSPL fitting"
+
+---
+
+## Expected Contributions
+
+Your thesis will provide:
+
+1. **Quantitative Performance Estimates**: First comprehensive benchmarking of ML for binary microlensing
+
+2. **Physical Interpretation**: Identification of u₀ threshold as fundamental detection limit
+
+3. **Survey Operations Guidance**:
+   - LSST: Nominal cadence sufficient
+   - Roman: Space-based quality provides modest benefit
+   - Follow-up: 50% completeness sufficient for triggering
+
+4. **Open-Source Pipeline**: Ready for community adoption
+
+5. **Real-Time Capability**: Demonstrate feasibility for alert stream processing
+
+---
+
+## Timeline
+
+### Phase 1: Setup & Baseline (Weeks 1-2)
+- Environment setup
+- Generate baseline dataset (1M events)
+- Train baseline model
+- Full evaluation
+
+### Phase 2: Systematic Experiments (Weeks 3-6)
+- Cadence experiments (4 configs)
+- Error experiments (3 configs)
+- Topology experiments (4 configs)
+
+### Phase 3: Analysis (Weeks 7-8)
+- Generate all comparison plots
+- u₀ dependency analysis
+- Statistical significance tests
+- Physical interpretation
+
+### Phase 4: Writing (Weeks 9-12)
+- Introduction & Methods
+- Results chapter (figures & analysis)
+- Discussion (physical interpretation)
+- Conclusions & future work
+
+---
+
+## Key Metrics to Report
+
+For each experiment:
+
+1. **Classification Metrics**:
+   - Accuracy, Precision, Recall, F1
+   - ROC AUC
+   - Confusion matrix
+
+2. **Early Detection**:
+   - Accuracy at 25%, 50%, 75% observation completeness
+
+3. **Decision Time**:
+   - Average timesteps to confident classification
+   - Distribution of decision times
+
+4. **Real-Time Performance**:
+   - Inference latency (ms)
+   - Throughput (events/sec)
+
+---
+
+## Statistical Significance
+
+For comparing experiments:
+
+```python
+from scipy.stats import ttest_ind
+
+# Load predictions from two experiments
+acc1 = load_accuracies('baseline')
+acc2 = load_accuracies('cadence_dense')
+
+# T-test
+t_stat, p_value = ttest_ind(acc1, acc2)
+
+print(f"Cadence improvement: {(acc2.mean() - acc1.mean())*100:.2f}%")
+print(f"p-value: {p_value:.4f}")
+print(f"Significant: {'Yes' if p_value < 0.05 else 'No'}")
+```
+
+Report p-values for all comparisons in thesis.
+
+---
+
+## Survey Design Recommendations
+
+Based on results, provide concrete guidance:
+
+**For LSST**:
+- "Nominal cadence (80% completeness) achieves 70-75% accuracy"
+- "Dense follow-up (95% completeness) improves to 75-80%"
+- "Recommendation: Standard survey cadence sufficient; intensive follow-up not required"
+
+**For Roman**:
+- "Space-based photometry (0.05 mag) vs. ground-based (0.10 mag): ~5% accuracy improvement"
+- "Recommendation: Roman's photometric advantage modest for binary classification"
+
+**For Follow-up**:
+- "50% observation completeness: 68-72% accuracy"
+- "Recommendation: Early trigger decisions possible after ~half event duration"
+
+---
+
+## Reproducibility
+
+All results are fully reproducible:
+
+1. **Fixed seeds**: Random seeds set in config.py
+2. **Saved configurations**: All parameters logged
+3. **Saved scalers**: Normalization preserved
+4. **Exact versions**: requirements.txt pins all dependencies
+
+To reproduce: Use commands exactly as specified above with same data paths.
+
+---
+
+You now have a complete experimental plan for your thesis! 🔬🔭
+
+Follow this guide systematically, and you'll produce publication-quality results.

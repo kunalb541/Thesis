@@ -351,7 +351,15 @@ def main():
     print("\nLoading original data (unscaled)...")
     X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
     print(f"✓ Original data loaded: {X_original.shape}")
-    
+    # Load RAW data
+    X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
+
+    # Load scalers
+    from utils import load_scalers, apply_scalers_to_data
+    scaler_std, scaler_mm = load_scalers(results_dir)
+
+# Apply scalers
+    X_normalized = apply_scalers_to_data(X_original, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
     # Load data WITH normalization (for model inference)
     print("Loading normalized data (for model)...")
     X_normalized, _, _, _ = load_npz_dataset(args.data, apply_perm=True, normalize=True)
