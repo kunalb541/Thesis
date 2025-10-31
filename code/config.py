@@ -116,21 +116,21 @@ EXPERIMENTS = {
 
 # BASELINE: Wide range from planetary to stellar (realistic population)
 BINARY_PARAMS_BASELINE = {
-    's_min': 0.1, 's_max': 10.0,
-    'q_min': 0.001, 'q_max': 1.0,
-    'u0_min': 0.001, 'u0_max': 1.0,
-    'rho_min': 0.0001, 'rho_max': 0.1,
+    's_min': 0.1, 's_max': 2.5,      # ✅ Match your notebook
+    'q_min': 0.1, 'q_max': 1.0,      # ✅ Match your notebook
+    'u0_min': 0.01, 'u0_max': 0.5,   # ✅ Match your notebook
+    'rho_min': 0.01, 'rho_max': 0.1, # ✅ Match your notebook
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 10, 'tE_max': 200,
-    't0_min': 0, 't0_max': 1000,
+    'tE_min': 10, 'tE_max': 100,     # ✅ Match your notebook
+    't0_min': 0, 't0_max': 1000,     # ✅ Match your notebook
 }
 
 # DISTINCT: Clear caustic-crossing binaries (maximally distinguishable from PSPL)
 BINARY_PARAMS_DISTINCT = {
-    's_min': 0.8, 's_max': 1.5,
-    'q_min': 0.01, 'q_max': 0.5,
-    'u0_min': 0.001, 'u0_max': 0.15,
-    'rho_min': 0.0001, 'rho_max': 0.01,
+    's_min': 0.8, 's_max': 1.5,      # Optimal for caustics
+    'q_min': 0.1, 'q_max': 0.5,
+    'u0_min': 0.01, 'u0_max': 0.15,  # Very close approach = caustics
+    'rho_min': 0.01, 'rho_max': 0.05, # Smaller = sharper features
     'alpha_min': 0, 'alpha_max': 3.14159,
     'tE_min': 20, 'tE_max': 150,
     't0_min': 0, 't0_max': 1000,
@@ -176,9 +176,9 @@ N_PSPL = 500_000
 N_BINARY = 500_000
 
 # Time series parameters
-N_POINTS = 1500
-TIME_MIN = -100      # unified with simulator
-TIME_MAX = 100       # unified with simulator
+N_POINTS = 100  # ✅ FIXED: Was 1500, now matches training
+TIME_MIN = 0    # ✅ FIXED: Match your original notebook (0 to 1000)
+TIME_MAX = 1000 # ✅ FIXED: Match your original notebook
 
 # PSPL parameters (for single-lens events)
 PSPL_BASELINE_MIN = 19
@@ -321,40 +321,3 @@ SAVE_BEST_ONLY = True
 MONITOR_METRIC = 'val_acc'
 MONITOR_MODE = 'max'
 
-# ============================================================================
-# NOTES AND USAGE
-# ============================================================================
-
-"""
-USAGE EXAMPLES:
-
-1. Generate baseline dataset:
-   python simulate.py --output data/raw/events_baseline_1M.npz
-
-2. Train baseline model:
-   python train.py --data data/raw/events_baseline_1M.npz \
-                   --output models/baseline.pt \
-                   --experiment_name baseline
-
-3. Evaluate model:
-   python evaluate.py --model models/baseline.pt \
-                      --data data/raw/events_baseline_1M.npz \
-                      --output_dir results/baseline_eval \
-                      --early_detection
-
-4. Run experiment from EXPERIMENTS dict:
-   experiment = EXPERIMENTS['cadence_dense']
-   python simulate.py --cadence {experiment['cadence_mask_prob']} ...
-
-PARAMETER TUNING:
-- Adjust BATCH_SIZE based on GPU memory (64, 128, 256, 512)
-- Increase EPOCHS for better convergence (50-100)
-- Adjust LEARNING_RATE if training is unstable (1e-4 to 1e-2)
-- Modify binary parameter ranges to test specific physics
-
-PHYSICAL INTERPRETATION:
-- u0 < 0.15: Binary likely detectable (crosses caustics)
-- u0 > 0.3:  Binary fundamentally PSPL-like (physical limit)
-- s ~ 1:     Optimal separation for largest caustics
-- Small rho: Sharp features (better for detection)
-"""

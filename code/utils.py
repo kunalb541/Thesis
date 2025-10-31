@@ -9,28 +9,87 @@ Date: October 2025
 import json
 import numpy as np
 import torch
-
-import config as CFG
-
-
-
+import numpy as np
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import pickle
+import config as CFG
+#!/usr/bin/env python3
+"""
+Two-stage normalization matching original TensorFlow approach
+"""
 
-def preprocess_data(X_train, X_val, X_test):
-    """Two-stage normalization like original TensorFlow code"""
-    # Stage 1: StandardScaler
+
+def two_stage_normalize(X_train, X_val, X_test, pad_value=-1):
+    """
+    Reproduce exact normalization from original TensorFlow notebook
+    
+    Returns:
+        Normalized arrays and fitted scalers
+    """
+    # Mask padding values
+    train_mask = (X_train != pad_value)
+    val_mask = (X_val != pad_value)
+    test_mask = (X_test != pad_value)
+    
+    # Stage 1: StandardScaler (per-feature normalization)
+    print("Applying StandardScaler...")
     scaler_standard = StandardScaler()
-    X_train_norm = scaler_standard.fit_transform(X_train)
-    X_val_norm = scaler_standard.transform(X_val)
-    X_test_norm = scaler_standard.transform(X_test)
+    
+    # Fit only on non-padded values
+    X_train_flat = X_train[train_mask].reshape(-1, 1)
+    scaler_standard.fit(X_train_flat)
+    
+    # Transform
+    X_train_norm = X_train.copy()
+    X_train_norm[train_mask] = scaler_standard.transform(
+        X_train[train_mask].reshape(-1, 1)
+    ).flatten()
+    
+    X_val_norm = X_val.copy()
+    X_val_norm[val_mask] = scaler_standard.transform(
+        X_val[val_mask].reshape(-1, 1)
+    ).flatten()
+    
+    X_test_norm = X_test.copy()
+    X_test_norm[test_mask] = scaler_standard.transform(
+        X_test[test_mask].reshape(-1, 1)
+    ).flatten()
     
     # Stage 2: MinMaxScaler
+    print("Applying MinMaxScaler...")
     scaler_minmax = MinMaxScaler()
-    X_train_scaled = scaler_minmax.fit_transform(X_train_norm)
-    X_val_scaled = scaler_minmax.transform(X_val_norm)
-    X_test_scaled = scaler_minmax.transform(X_test_norm)
+    
+    # Fit on normalized train data
+    X_train_flat_norm = X_train_norm[train_mask].reshape(-1, 1)
+    scaler_minmax.fit(X_train_flat_norm)
+    
+    # Transform
+    X_train_scaled = X_train_norm.copy()
+    X_train_scaled[train_mask] = scaler_minmax.transform(
+        X_train_norm[train_mask].reshape(-1, 1)
+    ).flatten()
+    
+    X_val_scaled = X_val_norm.copy()
+    X_val_scaled[val_mask] = scaler_minmax.transform(
+        X_val_norm[val_mask].reshape(-1, 1)
+    ).flatten()
+    
+    X_test_scaled = X_test_norm.copy()
+    X_test_scaled[test_mask] = scaler_minmax.transform(
+        X_test_norm[test_mask].reshape(-1, 1)
+    ).flatten()
+    
+    print(f"Final ranges: Train [{X_train_scaled[train_mask].min():.3f}, {X_train_scaled[train_mask].max():.3f}]")
     
     return X_train_scaled, X_val_scaled, X_test_scaled, scaler_standard, scaler_minmax
+
+def save_scalers(scaler_standard, scaler_minmax, output_dir):
+    """Save scalers for later use"""
+    with open(f"{output_dir}/scaler_standard.pkl", 'wb') as f:
+        pickle.dump(scaler_standard, f)
+    with open(f"{output_dir}/scaler_minmax.pkl", 'wb') as f:
+        pickle.dump(scaler_minmax, f)
+
 
 def load_npz_dataset(path, apply_perm=False, normalize=True):
     """Load dataset with proper normalization"""

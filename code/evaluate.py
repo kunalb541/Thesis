@@ -1,36 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py — FIXED VERSION with proper temporal loss
-Matches train.py and TensorFlow notebook approach
+evaluate.py - Evaluation with early-exit confidence thresholding
 
 Author: Kunal Bhatia
-Version: FIXED
+Version: 3.0 - Fixed
 """
 
-
-from __future__ import annotations
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for HPC
-import matplotlib.pyplot as plt
-import seaborn as sns
-import argparse
-import os
-import json
-from pathlib import Path
-from typing import Dict, Tuple, Optional, List
-
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_curve, average_precision_score
+import numpy as np
+from pathlib import Path
+import argparse
+import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_recall_curve
 
-# Local imports
-import config as CFG
 from model import TimeDistributedCNN
 from utils import load_npz_dataset
+import config as CFG
 
 def find_latest_results_dir(experiment_name, base_dir='../results'):
     """Find the most recent results directory for an experiment"""
@@ -44,171 +36,193 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
     
     return matching_dirs[0]
 
-# -------------------------
-# Dataset wrapper
-# -------------------------
-
-class NumpyDataset(Dataset):
-    def __init__(self, X: np.ndarray, y: np.ndarray):
-        X_copy = X.copy()
-        #X_copy[X_copy == CFG.PAD_VALUE] = 0.0
-        self.X = torch.from_numpy(X_copy).float().unsqueeze(1)  # [N, 1, L]
-        self.y = torch.from_numpy(y).long()
-
-    def __len__(self):
-        return self.X.shape[0]
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
-
-# -------------------------
-# Evaluation helpers
-# -------------------------
-
-@torch.no_grad()
-def run_inference(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def early_exit_inference(model, X, device, confidence_threshold=0.9, batch_size=128):
     """
-    FIXED: Computes per-timestep loss for consistency with training
+    Reproduce original make_decision logic with early-exit
+    
+    Returns:
+        predictions: Final class predictions
+        decision_times: Timestep at which decision was made
+        confidences: Confidence at decision time
     """
     model.eval()
-    logits_list, labels_list, all_logits_t_list = [], [], []
-    criterion = nn.CrossEntropyLoss()
-    total_loss = 0.0
-    n_samples = 0
     
-    for xb, yb in tqdm(loader, desc="Running Inference"):
-        xb = xb.to(device)
-        yb = yb.to(device)
-        
-        outputs = model(xb)  # [B, L, 2]
-        
-        # ============================================================
-        # 🔥 KEY FIX: Compute loss at EVERY timestep (consistency with training)
-        # ============================================================
-        B, L, C = outputs.shape
-        
-        # Repeat labels across timesteps
-        yb_repeated = yb.unsqueeze(1).expand(B, L)  # [B, L]
-        
-        # Reshape and compute loss
-        outputs_flat = outputs.reshape(B * L, C)  # [B*L, 2]
-        yb_flat = yb_repeated.reshape(B * L)  # [B*L]
-        
-        loss = criterion(outputs_flat, yb_flat)
-        total_loss += loss.item() * B
-        n_samples += B
-        # ============================================================
-        
-        all_logits_t_list.append(outputs.cpu().numpy())
-        
-        # Aggregate over time dimension for final prediction
-        logits = outputs.mean(dim=1)  # [B, 2]
-        logits_list.append(logits.cpu().numpy())
-        labels_list.append(yb.cpu().numpy())
-        
-    avg_loss = total_loss / n_samples
-    logits = np.concatenate(logits_list, axis=0)
-    labels = np.concatenate(labels_list, axis=0)
-    logits_t = np.concatenate(all_logits_t_list, axis=0)
+    predictions = []
+    decision_times = []
+    confidences = []
     
-    print(f"\n✓ Average loss (per-timestep): {avg_loss:.4f}")
+    # Process in batches
+    n_samples = len(X)
+    for i in range(0, n_samples, batch_size):
+        batch_end = min(i + batch_size, n_samples)
+        X_batch = X[i:batch_end]
+        
+        # Convert to tensor
+        X_tensor = torch.from_numpy(X_batch).float().unsqueeze(1).to(device)
+        
+        with torch.no_grad():
+            outputs = model(X_tensor)  # [B, L, 2]
+            probs = torch.softmax(outputs, dim=2)  # [B, L, 2]
+        
+        probs_np = probs.cpu().numpy()
+        B, L, C = probs_np.shape
+        
+        for j in range(B):
+            decided = False
+            
+            # Check each timestep for confident prediction
+            for t in range(L):
+                class_probs = probs_np[j, t]
+                max_conf = np.max(class_probs)
+                pred_class = np.argmax(class_probs)
+                
+                if max_conf >= confidence_threshold:
+                    predictions.append(pred_class)
+                    decision_times.append(t + 1)  # 1-indexed
+                    confidences.append(max_conf)
+                    decided = True
+                    break
+            
+            # Fallback: use final timestep
+            if not decided:
+                predictions.append(np.argmax(probs_np[j, -1]))
+                decision_times.append(L)
+                confidences.append(np.max(probs_np[j, -1]))
     
-    return logits, labels, logits_t
+    return np.array(predictions), np.array(decision_times), np.array(confidences)
 
-def compute_metrics(logits: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
-    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
-    p1 = probs[:, 1]
-    preds = probs.argmax(axis=1)
-
-    acc = (preds == labels).mean().item()
-    
-    try:
-        fpr, tpr, _ = roc_curve(labels, p1)
-        roc_auc = auc(fpr, tpr)
-    except ValueError:
-        roc_auc = float('nan')
-
-    precision, recall, _ = precision_recall_curve(labels, p1)
-    pr_auc = auc(recall, precision)
-    ap = average_precision_score(labels, p1)
-
-    cm = confusion_matrix(labels, preds)
-    return {
-        "accuracy": float(acc),
-        "roc_auc": float(roc_auc),
-        "pr_auc": float(pr_auc),
-        "average_precision": float(ap),
-        "tn": int(cm[0,0]), "fp": int(cm[0,1]), "fn": int(cm[1,0]), "tp": int(cm[1,1]),
-    }
-
-def early_detection_subset(X: np.ndarray, frac: float) -> np.ndarray:
+def sweep_confidence_threshold(model, X, y, device, thresholds, batch_size=128):
     """
-    Crop each sequence to the first `frac` fraction, pad the rest to PAD_VALUE -> then 0.0 for convs.
+    Reproduce 'Accuracy vs. Average Decision Time' plot
     """
+    results = []
+    
+    for thresh in tqdm(thresholds, desc="Sweeping thresholds"):
+        preds, times, confs = early_exit_inference(model, X, device, thresh, batch_size)
+        
+        acc = (preds == y).mean()
+        avg_time = times.mean()
+        
+        results.append({
+            'threshold': float(thresh),
+            'accuracy': float(acc),
+            'avg_decision_time': float(avg_time)
+        })
+    
+    return results
+
+def early_detection_analysis(model, X, y, device, fractions=[0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0], batch_size=128):
+    """
+    Test performance when only observing fraction of light curve
+    """
+    results = {}
     L = X.shape[1]
-    keep = max(1, int(np.ceil(L * frac)))
-    X_early = np.full_like(X, fill_value=CFG.PAD_VALUE)
-    X_early[:, :keep] = X[:, :keep]
     
-    X_early_conv = X_early.copy()
-    X_early_conv[X_early_conv == CFG.PAD_VALUE] = 0.0
-    return X_early_conv
-
-def plot_curves(save_dir: Optional[str], logits: np.ndarray, labels: np.ndarray):
-    if not save_dir:
-        return
-    os.makedirs(save_dir, exist_ok=True)
-    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()[:, 1]
-
-    import matplotlib.pyplot as plt
+    for frac in tqdm(fractions, desc="Early detection analysis"):
+        # Truncate data
+        cutoff = max(1, int(L * frac))
+        X_truncated = X.copy()
+        X_truncated[:, cutoff:] = CFG.PAD_VALUE
+        
+        # Replace PAD_VALUE with 0.0 for model
+        X_processed = X_truncated.copy()
+        X_processed[X_processed == CFG.PAD_VALUE] = 0.0
+        
+        # Get predictions
+        preds, _, _ = early_exit_inference(model, X_processed, device, 0.9, batch_size)
+        acc = (preds == y).mean()
+        
+        results[frac] = float(acc)
+        print(f"  {frac:>4.0%} observed -> accuracy {acc:.4f}")
     
-    # ROC
-    try:
-        fpr, tpr, _ = roc_curve(labels, probs)
-        plt.figure()
-        plt.plot(fpr, tpr, label=f"AUC={auc(fpr,tpr):.3f}")
-        plt.plot([0,1], [0,1], linestyle="--")
-        plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate"); plt.title("ROC Curve"); plt.legend()
+    return results
+
+def plot_results(output_dir, cm, sweep_results, early_results, y_true, probs):
+    """Generate all evaluation plots"""
+    output_dir = Path(output_dir)
+    
+    # 1. Confusion Matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=['PSPL', 'Binary'], 
+                yticklabels=['PSPL', 'Binary'])
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix (Confidence Threshold = 0.9)')
+    plt.tight_layout()
+    plt.savefig(output_dir / 'confusion_matrix.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved confusion_matrix.png")
+    
+    # 2. ROC Curve
+    if len(np.unique(y_true)) > 1:
+        fpr, tpr, _ = roc_curve(y_true, probs)
+        roc_auc = auc(fpr, tpr)
+        
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, linewidth=2, label=f'ROC (AUC = {roc_auc:.3f})')
+        plt.plot([0, 1], [0, 1], 'k--', linewidth=1)
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve')
+        plt.legend()
+        plt.grid(alpha=0.3)
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "roc.png"), dpi=getattr(CFG, "DPI", 150))
+        plt.savefig(output_dir / 'roc_curve.png', dpi=300, bbox_inches='tight')
         plt.close()
-    except ValueError:
-        print("Skipping ROC plot: Single class data or all predictions identical.")
-
-    # PR
-    precision, recall, _ = precision_recall_curve(labels, probs)
-    plt.figure()
-    plt.plot(recall, precision, label=f"AUC={auc(recall,precision):.3f}")
-    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("PR Curve"); plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "pr.png"), dpi=getattr(CFG, "DPI", 150))
-    plt.close()
-
-    # Confusion matrix
-    preds = (probs >= 0.5).astype(np.uint8)
-    cm = confusion_matrix(labels, preds)
-    plt.figure()
-    import seaborn as sns
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False,
-                xticklabels=["PSPL","Binary"], yticklabels=["PSPL","Binary"])
-    plt.xlabel("Predicted"); plt.ylabel("True"); plt.title("Confusion Matrix")
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "confusion_matrix.png"), dpi=getattr(CFG, "DPI", 150))
-    plt.close()
-
-# -------------------------
-# Main
-# -------------------------
+        print(f"✓ Saved roc_curve.png")
+    
+    # 3. Accuracy vs Decision Time (KEY PLOT from original)
+    if sweep_results:
+        thresholds = [r['threshold'] for r in sweep_results]
+        accuracies = [r['accuracy'] for r in sweep_results]
+        avg_times = [r['avg_decision_time'] for r in sweep_results]
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(avg_times, accuracies, 'o-', linewidth=2.5, markersize=8, color='green')
+        
+        # Mark optimal point
+        max_idx = np.argmax(accuracies)
+        plt.annotate(f"Optimal\nAcc: {accuracies[max_idx]:.3f}\nTime: {avg_times[max_idx]:.1f}",
+                    xy=(avg_times[max_idx], accuracies[max_idx]),
+                    xytext=(20, -20), textcoords='offset points',
+                    bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+        
+        plt.xlabel('Average Decision Time (timesteps)', fontsize=12)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.title('Accuracy vs. Average Decision Time', fontsize=14, fontweight='bold')
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_dir / 'accuracy_vs_decision_time.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved accuracy_vs_decision_time.png")
+    
+    # 4. Early Detection Performance
+    if early_results:
+        fractions = sorted(early_results.keys())
+        accuracies = [early_results[f] for f in fractions]
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot([f*100 for f in fractions], accuracies, 'o-', linewidth=2.5, markersize=10, color='blue')
+        plt.xlabel('Percentage of Light Curve Observed (%)', fontsize=12)
+        plt.ylabel('Classification Accuracy', fontsize=12)
+        plt.title('Early Detection Performance', fontsize=14, fontweight='bold')
+        plt.grid(alpha=0.3)
+        plt.ylim([0, 1.05])
+        plt.tight_layout()
+        plt.savefig(output_dir / 'early_detection.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved early_detection.png")
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=None, help="Path to model checkpoint (auto-detect if not provided)")
-    parser.add_argument("--data", type=str, required=True, help="Path to test data")
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory (auto-detect if not provided)")
-    parser.add_argument("--experiment_name", type=str, default=None, help="Experiment name (for auto-detect)")
-    parser.add_argument("--batch_size", type=int, default=CFG.BATCH_SIZE)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--early_detection", action="store_true", help="Run early detection analysis")
+    parser = argparse.ArgumentParser(description='Evaluate model with early-exit strategy')
+    parser.add_argument("--model", type=str, default=None, help='Path to model checkpoint (auto-detect if not provided)')
+    parser.add_argument("--data", type=str, required=True, help='Path to test data')
+    parser.add_argument("--output_dir", type=str, default=None, help='Output directory (auto-detect if not provided)')
+    parser.add_argument("--experiment_name", type=str, default=None, help='Experiment name (for auto-detect)')
+    parser.add_argument("--early_detection", action='store_true', help='Run early detection analysis')
+    parser.add_argument("--batch_size", type=int, default=128, help='Batch size for inference')
     args = parser.parse_args()
     
     # Auto-detect model and output_dir if not provided
@@ -224,96 +238,138 @@ def main():
         if args.output_dir is None:
             args.output_dir = str(results_dir / "evaluation")
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     print("="*80)
-    print("🔥 FIXED EVALUATION WITH TEMPORAL LOSS")
+    print("EVALUATION WITH EARLY-EXIT CONFIDENCE THRESHOLDING")
     print("="*80)
-    print("\n✅ Loss computed at EVERY timestep (matches training)")
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
-    print(f"Output: {args.output_dir}")
-
-    # Load dataset (perm-aware)
-    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=True) 
+    print(f"Output: {output_dir}")
+    
+    # Load data
+    print("\nLoading data...")
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=True)
     L = X.shape[1]
-
-    # Build model and load weights
-    device = torch.device(args.device)
-    model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2).to(device)
-
-    ckpt = torch.load(args.model, map_location=device)
-    if "model_state_dict" in ckpt:
-        state = ckpt["model_state_dict"]
-    elif "model" in ckpt:
-        state = ckpt["model"]
-    else:
-        state = ckpt
-    model.load_state_dict(state)
-
-    # Inference
-    ds = NumpyDataset(X, y)
-    num_workers = min(8, os.cpu_count() or 4)
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    logits, labels, logits_t = run_inference(model, loader, device)
-
-    # Metrics
-    metrics = compute_metrics(logits, labels)
-    print("\n=== Evaluation ===")
-    for k in ["accuracy", "roc_auc", "pr_auc", "average_precision", "tn", "fp", "fn", "tp"]:
-        print(f"{k:>18}: {metrics[k]}")
-
-    # Early detection
-    early_metrics = {}
-    if args.early_detection and getattr(CFG, "EARLY_DETECTION_CHECKPOINTS", None):
-        print("\n=== Early Detection ===")
-        early_detection_accuracies = {}
-        for frac in CFG.EARLY_DETECTION_CHECKPOINTS:
-            # Prepare early data
-            Xe_padded_conv = early_detection_subset(X, frac)
-            dse = NumpyDataset(Xe_padded_conv, y)
-            num_workers = min(8, os.cpu_count() or 4)
-            loe = DataLoader(dse, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-            
-            # Run inference on early data
-            loge, labe, _ = run_inference(model, loe, device)
-            
-            # Compute metrics
-            me = compute_metrics(loge, labe)
-            early_detection_accuracies[frac] = me["accuracy"]
-            print(f"{frac:>5.2f} observed -> acc {me['accuracy']:.4f}")
-        early_metrics = early_detection_accuracies
-
-    # Plots
-    plot_curves(args.output_dir, logits, labels)
-
-    # Save summary
-    summary = {
-        "metrics": metrics,
-        "early_detection": early_metrics,
-        "meta": meta,
-        "data": os.path.abspath(args.data),
-        "model": os.path.abspath(args.model),
-        "fix_applied": "temporal_loss_per_timestep",
+    print(f"✓ Data loaded: {X.shape}")
+    
+    # Load model
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+    
+    model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2)
+    
+    ckpt = torch.load(args.model, map_location=device, weights_only=False)
+    state_dict = ckpt.get('model_state_dict', ckpt)
+    
+    # Handle DataParallel
+    if list(state_dict.keys())[0].startswith('module.'):
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict)
+    model = model.to(device)
+    print("✓ Model loaded")
+    
+    # Replace PAD_VALUE with 0.0 for inference
+    X_processed = X.copy()
+    X_processed[X_processed == CFG.PAD_VALUE] = 0.0
+    
+    # 1. Single threshold evaluation (0.9 like original)
+    print("\n" + "="*80)
+    print("INFERENCE WITH CONFIDENCE THRESHOLD = 0.9")
+    print("="*80)
+    
+    preds, times, confs = early_exit_inference(model, X_processed, device, confidence_threshold=0.9, batch_size=args.batch_size)
+    acc = (preds == y).mean()
+    
+    print(f"\nResults:")
+    print(f"  Accuracy: {acc:.4f}")
+    print(f"  Avg decision time: {times.mean():.1f} / {L}")
+    print(f"  Median decision time: {np.median(times):.1f}")
+    print(f"  Min decision time: {times.min()}")
+    print(f"  Max decision time: {times.max()}")
+    
+    # Confusion matrix
+    cm = confusion_matrix(y, preds)
+    print("\nConfusion Matrix:")
+    print(cm)
+    print("\nClassification Report:")
+    print(classification_report(y, preds, target_names=['PSPL', 'Binary']))
+    
+    # Get probabilities for ROC
+    probs = confs  # Confidence values
+    
+    # 2. Threshold sweep
+    print("\n" + "="*80)
+    print("CONFIDENCE THRESHOLD SWEEP")
+    print("="*80)
+    
+    thresholds = np.arange(0.5, 1.0, 0.05)
+    sweep_results = sweep_confidence_threshold(model, X_processed, y, device, thresholds, args.batch_size)
+    
+    # Print summary
+    print("\nThreshold Sweep Results:")
+    print(f"{'Threshold':<12} {'Accuracy':<12} {'Avg Time':<12}")
+    print("-" * 40)
+    for res in sweep_results:
+        print(f"{res['threshold']:<12.2f} {res['accuracy']:<12.4f} {res['avg_decision_time']:<12.1f}")
+    
+    # 3. Early detection analysis
+    early_results = {}
+    if args.early_detection:
+        print("\n" + "="*80)
+        print("EARLY DETECTION ANALYSIS")
+        print("="*80)
+        
+        early_results = early_detection_analysis(model, X, y, device, batch_size=args.batch_size)
+    
+    # 4. Generate plots
+    print("\n" + "="*80)
+    print("GENERATING PLOTS")
+    print("="*80)
+    
+    plot_results(output_dir, cm, sweep_results, early_results, y, probs)
+    
+    # 5. Save results
+    results_summary = {
+        'single_threshold_0.9': {
+            'accuracy': float(acc),
+            'avg_decision_time': float(times.mean()),
+            'median_decision_time': float(np.median(times)),
+            'confusion_matrix': cm.tolist()
+        },
+        'threshold_sweep': sweep_results,
+        'early_detection': early_results,
+        'metadata': meta,
+        'data_path': str(args.data),
+        'model_path': str(args.model)
     }
     
-    # Save per-timestep logits for analysis
-    np.savez_compressed(os.path.join(args.output_dir, "predictions_full.npz"), 
-                        logits_agg=logits, labels=labels, logits_t=logits_t, timestamps=timestamps)
+    with open(output_dir / 'evaluation_summary.json', 'w') as f:
+        json.dump(results_summary, f, indent=2)
     
-    out_path = os.path.join(args.output_dir, "evaluation_summary.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-    print(f"\n✓ Summary saved to: {out_path}")
+    print(f"\n✓ Results saved to {output_dir}/evaluation_summary.json")
     
-    # Success message
-    if metrics['accuracy'] > 0.65:
-        print("\n🎉 SUCCESS! Accuracy > 65% - the temporal loss fix worked!")
-    elif metrics['accuracy'] > 0.55:
-        print("\n⚠️  Partial improvement. Model may need more training epochs.")
+    # Final summary
+    print("\n" + "="*80)
+    print("EVALUATION COMPLETE")
+    print("="*80)
+    
+    if acc > 0.60:
+        print(f"✅ Good performance! Accuracy = {acc:.4f}")
+    elif acc > 0.50:
+        print(f"⚠️  Moderate performance. Accuracy = {acc:.4f}")
+        print("   Consider training longer or adjusting hyperparameters")
     else:
-        print("\n❌ Still low accuracy. Check training logs and data quality.")
+        print(f"❌ Low performance. Accuracy = {acc:.4f}")
+        print("   Check data generation and model architecture")
+    
+    print(f"\nKey outputs:")
+    print(f"  - Confusion matrix: {output_dir}/confusion_matrix.png")
+    print(f"  - Accuracy vs Time: {output_dir}/accuracy_vs_decision_time.png")
+    if args.early_detection:
+        print(f"  - Early detection: {output_dir}/early_detection.png")
 
 if __name__ == "__main__":
     main()

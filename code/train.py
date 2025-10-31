@@ -14,7 +14,7 @@ import os
 import random
 from pathlib import Path
 import time
-
+from utils import two_stage_normalize, save_scalers
 import numpy as np
 import torch
 import torch.nn as nn
@@ -28,7 +28,6 @@ from pathlib import Path
 import config as CFG
 from model import TimeDistributedCNN
 from utils import load_npz_dataset
-from utils import preprocess_data
 
 
 class NumpyDataset(Dataset):
@@ -278,8 +277,12 @@ def main():
     X_test, y_test = X[n_train+n_val:], y[n_train+n_val:]
 
     logger.info(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test: {len(X_test):,}")
-    # After splitting data
-    X_train_scaled, X_val_scaled, X_test_scaled, _, _ = preprocess_data(X_train, X_val, X_test)
+    # In main(), after splitting data:
+    logger.info("Applying two-stage normalization...")
+    X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = two_stage_normalize(
+        X_train, X_val, X_test, pad_value=CFG.PAD_VALUE
+    )
+    save_scalers(scaler_std, scaler_mm, output_dir)
     # Check class balance
     train_balance = (np.sum(y_train==0), np.sum(y_train==1))
     val_balance = (np.sum(y_val==0), np.sum(y_val==1))
@@ -294,9 +297,9 @@ def main():
         logger.warning(f"Class imbalance detected (ratio: {train_ratio:.3f})")
 
     # Datasets
-    train_ds = NumpyDataset(X_train, y_train)
-    val_ds = NumpyDataset(X_val, y_val)
-    test_ds = NumpyDataset(X_test, y_test)
+    train_ds = NumpyDataset(X_train_scaled, y_train)
+    val_ds = NumpyDataset(X_val_scaled, y_val)
+    test_ds = NumpyDataset(X_test_scaled, y_test)
 
     # DataLoaders
     num_workers = min(32, os.cpu_count())
