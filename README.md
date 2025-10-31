@@ -65,6 +65,9 @@ pip install -r requirements.txt
 
 # Verify installation
 python code/utils.py
+
+# Validate VBMicrolensing (recommended before data generation)
+python code/test_vbm.py
 ```
 
 ### Basic Usage
@@ -109,6 +112,7 @@ Thesis/
 │   ├── evaluate.py           # Model evaluation
 │   ├── benchmark_realtime.py # Inference benchmarking
 │   ├── plot_samples.py       # Visualization
+│   ├── test_vbm.py           # VBMicrolensing validation
 │   ├── model.py              # CNN architecture
 │   ├── config.py             # Configuration
 │   └── utils.py              # Utilities
@@ -131,6 +135,7 @@ Thesis/
 │   ├── RESEARCH_GUIDE.md     # Experimental workflow
 │   └── QUICK_REFERENCE.md    # Command cheatsheet
 │
+├── run_all_experiments.sh    # Batch script for all experiments
 └── README.md                 # This file
 ```
 
@@ -207,6 +212,17 @@ python simulate.py --binary_params planetary \
 python simulate.py --binary_params stellar \
     --output ../data/raw/stellar.npz
 ```
+
+### Run All Experiments
+
+For HPC clusters with SLURM:
+
+```bash
+# Submit complete experiment suite
+sbatch run_all_experiments.sh
+```
+
+This script runs all data generation, training, and evaluation automatically.
 
 ---
 

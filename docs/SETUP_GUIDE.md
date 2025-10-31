@@ -117,7 +117,38 @@ Testing Scaler Functions:
 ============================================================
 ```
 
-### 6. Quick Test
+### 6. Validate VBMicrolensing
+
+```bash
+python code/test_vbm.py
+```
+
+Expected output:
+```
+============================================================
+VBMicrolensing Validation Test
+============================================================
+✓ VBMicrolensing imported successfully
+
+============================================================
+Test 1: Strong Binary Caustic (s=1.0, q=0.1, u0=0.05)
+============================================================
+  Max magnification: 45.23
+  Mean magnification: 3.14
+  ✅ Strong caustic spike detected!
+
+============================================================
+Test 3: Binary vs PSPL Comparison
+============================================================
+  Binary/PSPL peak ratio: 2.31
+  ✅ Binary events are clearly distinguishable from PSPL!
+
+============================================================
+VALIDATION COMPLETE
+============================================================
+```
+
+### 7. Quick Test
 
 ```bash
 cd code
@@ -160,9 +191,14 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
 
-**2. Create batch script:**
+**2. Submit batch job:**
 
 ```bash
+# For complete experiment suite
+sbatch run_all_experiments.sh
+
+# Or create custom batch script
+cat > train_baseline.sh << 'EOF'
 #!/bin/bash
 #SBATCH --job-name=baseline
 #SBATCH --partition=gpu
@@ -174,30 +210,21 @@ pip install -r requirements.txt
 #SBATCH --output=logs/baseline_%j.out
 #SBATCH --error=logs/baseline_%j.err
 
-# Load modules
 module load cuda/12.1
-
-# Activate environment
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate microlens
 
-# Run training
 cd ~/Thesis/code
 python train.py \
     --data ../data/raw/baseline_1M.npz \
     --experiment_name baseline \
-    --epochs 50 \
-    --batch_size 128
-```
+    --epochs 50
+EOF
 
-**3. Submit job:**
-
-```bash
-mkdir -p logs
 sbatch train_baseline.sh
 ```
 
-**4. Monitor:**
+**3. Monitor:**
 
 ```bash
 # Check queue
@@ -296,6 +323,7 @@ Thesis/
 ├── models/            # (unused, results has models)
 ├── docs/              # Documentation
 ├── requirements.txt
+├── run_all_experiments.sh
 └── README.md
 ```
 
@@ -379,6 +407,16 @@ nvidia-smi
 # Reinstall matching PyTorch
 pip uninstall torch torchvision
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+**VBMicrolensing validation fails**:
+```bash
+# Check installation
+python -c "import VBBinaryLensing; print('OK')"
+
+# Reinstall
+pip uninstall VBMicrolensing
+pip install VBMicrolensing
 ```
 
 ### Runtime Issues
@@ -477,6 +515,7 @@ Before starting experiments:
 - [ ] All requirements installed
 - [ ] GPU detected (`nvidia-smi` or `rocm-smi`)
 - [ ] Code runs without errors (`python code/utils.py`)
+- [ ] VBMicrolensing validation passed (`python code/test_vbm.py`)
 - [ ] Quick test completes successfully
 - [ ] Results directory created
 - [ ] Sufficient disk space (100+ GB)
@@ -484,6 +523,7 @@ Before starting experiments:
 Run verification:
 ```bash
 python code/utils.py
+python code/test_vbm.py
 ```
 
 ---
@@ -510,7 +550,10 @@ After successful setup:
        --data ../data/raw/baseline_1M.npz --early_detection
    ```
 
-4. **Run systematic experiments** (see [RESEARCH_GUIDE.md](RESEARCH_GUIDE.md))
+4. **Run systematic experiments**:
+   ```bash
+   sbatch run_all_experiments.sh
+   ```
 
 ---
 
@@ -536,9 +579,10 @@ After successful setup:
 Include:
 1. Full error message
 2. Output of `python code/utils.py`
-3. GPU info (`nvidia-smi` output)
-4. Command that failed
-5. Python/PyTorch versions
+3. Output of `python code/test_vbm.py`
+4. GPU info (`nvidia-smi` output)
+5. Command that failed
+6. Python/PyTorch versions
 
 ---
 

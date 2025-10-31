@@ -12,6 +12,9 @@ Fast command reference for all experiments.
 # Check GPU
 python code/utils.py
 
+# Validate VBMicrolensing
+python code/test_vbm.py
+
 # Quick test (2K events, 5 min)
 cd code
 python simulate.py --n_pspl 1000 --n_binary 1000 --output ../data/raw/test.npz
@@ -132,7 +135,21 @@ python train.py --data ../data/raw/stellar.npz \
 
 ## Batch Processing
 
-### All Cadence Experiments
+### Run All Experiments (HPC/SLURM)
+
+```bash
+# Submit complete experiment suite
+sbatch run_all_experiments.sh
+```
+
+This automated script handles:
+- VBMicrolensing validation
+- All data generation (baseline + systematic experiments)
+- Distributed training across all experiments
+- Complete evaluation and analysis
+- Results summary
+
+### Manual Batch: All Cadence Experiments
 
 ```bash
 for cadence in 0.05 0.20 0.30 0.40; do
@@ -147,7 +164,7 @@ for cadence in 0.05 0.20 0.30 0.40; do
 done
 ```
 
-### All Topology Experiments
+### Manual Batch: All Topology Experiments
 
 ```bash
 for topo in distinct planetary stellar; do
@@ -241,6 +258,9 @@ grep "Train data range" results/*/training.log
 
 # Check training convergence
 grep "Epoch" results/*/training.log | tail -20
+
+# Validate VBMicrolensing signatures
+python code/test_vbm.py
 ```
 
 ### GPU Memory Issues
@@ -303,6 +323,9 @@ results/experiment_TIMESTAMP/
 - `--data`: Path to test data
 - `--early_detection`: Run partial observation analysis
 - `--batch_size`: Inference batch size
+
+### test_vbm.py
+No arguments - validates VBMicrolensing installation and binary signatures
 
 ---
 
