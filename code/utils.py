@@ -13,45 +13,47 @@ import torch
 import config as CFG
 
 
-def load_npz_dataset(path, apply_perm=False):
-    """
-    Load dataset from NPZ file with optional permutation
-    
-    Args:
-        path: Path to .npz file
-        apply_perm: If True, apply saved permutation for shuffling
-        
-    Returns:
-        X: Light curves [N, L]
-        y: Labels [N] (0=PSPL, 1=Binary)
-        timestamps: Time array [L]
-        meta: Metadata dictionary
-    """
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+def load_npz_dataset(path, apply_perm=False, normalize=True):
+    """Load dataset with proper normalization"""
     data = np.load(path, allow_pickle=False)
     
     X = data['X']
     y = data['y']
     timestamps = data['timestamps']
     
-    # Parse metadata JSON
     meta_json = str(data['meta_json'])
     meta = json.loads(meta_json)
     
-    # Apply permutation if requested and available
     if apply_perm and 'perm' in data.files:
         perm = data['perm']
         X = X[perm]
         y = y[perm]
     
-    # Handle label encoding (in case labels are strings)
+    # Handle label encoding
     if y.dtype.kind in ('U', 'S', 'O'):
-        # Convert string labels to integers
         y = np.array([0 if 'PSPL' in str(v).upper() else 1 for v in y], dtype=np.uint8)
     else:
         y = y.astype(np.uint8)
     
+    # 🔥 ADD THIS: Double normalization like TensorFlow
+    if normalize:
+        # Replace PAD_VALUE with 0 first
+        X_normalized = X.copy()
+        X_normalized[X_normalized == -1.0] = 0.0
+        
+        # StandardScaler first
+        scaler_standard = StandardScaler()
+        X_normalized = scaler_standard.fit_transform(X_normalized)
+        
+        # MinMaxScaler second
+        scaler_minmax = MinMaxScaler()
+        X_normalized = scaler_minmax.fit_transform(X_normalized)
+        
+        X = X_normalized
+    
     return X, y, timestamps, meta
-
 
 def check_gpu():
     """

@@ -196,7 +196,7 @@ CADENCE_MASK_PROB = 0.2
 PAD_VALUE = -1       # unified with simulator
 
 # Normalization: divide each curve by its own median before padding
-NORMALIZE_PER_EVENT = True
+NORMALIZE_PER_EVENT = False
 
 # Optional fairness: share cadence masks between classes
 USE_SHARED_MASK = False  # FIXED: Enable cadence masking

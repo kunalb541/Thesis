@@ -32,8 +32,8 @@ from utils import load_npz_dataset
 
 class NumpyDataset(Dataset):
     def __init__(self, X, y):
-        X = X.copy()
-        X[X == CFG.PAD_VALUE] = 0.0
+        # X = X.copy()
+        # X[X == CFG.PAD_VALUE] = 0.0
         self.X = torch.from_numpy(X).float().unsqueeze(1)
         self.y = torch.from_numpy(y).long()
     
@@ -263,7 +263,7 @@ def main():
     
     # Load data
     logger.info(f"Loading dataset: {args.data}")
-    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True,normalize=True)
     L = X.shape[1]
     logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
 

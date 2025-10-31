@@ -51,7 +51,7 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
 class NumpyDataset(Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray):
         X_copy = X.copy()
-        X_copy[X_copy == CFG.PAD_VALUE] = 0.0
+        #X_copy[X_copy == CFG.PAD_VALUE] = 0.0
         self.X = torch.from_numpy(X_copy).float().unsqueeze(1)  # [N, 1, L]
         self.y = torch.from_numpy(y).long()
 
@@ -236,7 +236,7 @@ def main():
     print(f"Output: {args.output_dir}")
 
     # Load dataset (perm-aware)
-    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=True) 
     L = X.shape[1]
 
     # Build model and load weights
