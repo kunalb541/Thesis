@@ -226,7 +226,7 @@ def broadcast_object_from_rank0(obj):
     if world_size == 1:
         return obj
     if get_rank() == 0:
-        payload = bytearray(pickle.dumps(obj))  # FIX: Convert to mutable bytearray!
+        payload = bytearray(pickle.dumps(obj))
         sz = torch.tensor([len(payload)], dtype=torch.long, device="cuda" if torch.cuda.is_available() else "cpu")
     else:
         payload = None
@@ -234,14 +234,15 @@ def broadcast_object_from_rank0(obj):
 
     dist.broadcast(sz, src=0)
     if get_rank() != 0:
-        payload = bytearray(sz.item())
+        payload = bytearray(int(sz.item()))
     tensor = torch.frombuffer(payload, dtype=torch.uint8)
     if torch.cuda.is_available():
         tensor = tensor.to("cuda")
     dist.broadcast(tensor, src=0)
     if torch.cuda.is_available():
         tensor = tensor.cpu()
-    return pickle.loads(bytes(tensor.tolist()))
+    # FIX: Use payload directly instead of inefficient tensor.tolist()
+    return pickle.loads(payload)
 
 
 # -----------------------------
