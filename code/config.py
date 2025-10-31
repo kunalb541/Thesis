@@ -20,6 +20,20 @@ INSTITUTION = "University of Heidelberg"
 CONTACT = "kunal29bhatia@gmail.com"
 
 # ============================================================================
+# COMMON PARAMETERS (shared between PSPL and Binary)
+# ============================================================================
+
+# Shared timing and physical parameters
+COMMON_PARAMS = {
+    'tE_min': 10.0,        # Einstein timescale minimum (days)
+    'tE_max': 150.0,       # Einstein timescale maximum (days)
+    't0_min': 300.0,       # Event start time (ensures flat baseline before event)
+    't0_max': 700.0,       # Event end time (ensures flat baseline after event)
+    'u0_min': 0.01,        # Impact parameter minimum
+    'u0_max': 1.0,         # Impact parameter maximum
+}
+
+# ============================================================================
 # BENCHMARK EXPERIMENT SUITE
 # ============================================================================
 
@@ -91,47 +105,43 @@ EXPERIMENTS = {
 }
 
 # ============================================================================
-# BINARY PARAMETERS - COVERING PLANETARY TO STELLAR SYSTEMS
+# BINARY PARAMETERS - Using COMMON_PARAMS for consistency
 # ============================================================================
 
 BINARY_PARAMS_BASELINE = {
+    **COMMON_PARAMS,  # Inherit all common parameters
     's_min': 0.1, 's_max': 2.5,
     'q_min': 0.1, 'q_max': 1.0,
-    'u0_min': 0.01, 'u0_max': 0.5,
     'rho_min': 0.01, 'rho_max': 0.1,
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 10, 'tE_max': 100,
-    't0_min': 0, 't0_max': 1000,
 }
 
 BINARY_PARAMS_DISTINCT = {
+    **COMMON_PARAMS,  # Inherit all common parameters
     's_min': 0.8, 's_max': 1.5,
     'q_min': 0.1, 'q_max': 0.5,
-    'u0_min': 0.01, 'u0_max': 0.15,
     'rho_min': 0.01, 'rho_max': 0.05,
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 20, 'tE_max': 150,
-    't0_min': 0, 't0_max': 1000,
+    'u0_max': 0.15,  # Override for distinct (closer approaches)
 }
 
 BINARY_PARAMS_PLANETARY = {
+    **COMMON_PARAMS,  # Inherit all common parameters
     's_min': 0.5, 's_max': 3.0,
     'q_min': 0.0001, 'q_max': 0.01,
-    'u0_min': 0.001, 'u0_max': 0.5,
     'rho_min': 0.0001, 'rho_max': 0.05,
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 10, 'tE_max': 150,
-    't0_min': 0, 't0_max': 1000,
+    'u0_min': 0.001, 'u0_max': 0.5,  # Override for planetary
 }
 
 BINARY_PARAMS_STELLAR = {
+    **COMMON_PARAMS,  # Inherit all common parameters
     's_min': 0.3, 's_max': 5.0,
     'q_min': 0.3, 'q_max': 1.0,
-    'u0_min': 0.001, 'u0_max': 0.8,
     'rho_min': 0.001, 'rho_max': 0.1,
     'alpha_min': 0, 'alpha_max': 3.14159,
-    'tE_min': 20, 'tE_max': 200,
-    't0_min': 0, 't0_max': 1000,
+    'u0_min': 0.001, 'u0_max': 0.8,  # Override for stellar
+    'tE_min': 20.0, 'tE_max': 200.0,  # Override for stellar (longer events)
 }
 
 BINARY_PARAM_SETS = {
@@ -150,17 +160,21 @@ N_PSPL = 500_000
 N_BINARY = 500_000
 
 N_POINTS = 1500
-TIME_MIN = 0
-TIME_MAX = 1000
+TIME_MIN = 0           # Observation window starts at 0
+TIME_MAX = 1000        # Observation window ends at 1000
+                       # Events occur between t0_min=300 and t0_max=700
+                       # This ensures ~300 days flat baseline before and after
 
 PSPL_BASELINE_MIN = 19
 PSPL_BASELINE_MAX = 22
-PSPL_T0_MIN = 0
-PSPL_T0_MAX = 1000
-PSPL_U0_MIN = 0.01
-PSPL_U0_MAX = 1.0
-PSPL_TE_MIN = 10
-PSPL_TE_MAX = 150
+
+# PSPL uses common params directly
+PSPL_T0_MIN = COMMON_PARAMS['t0_min']
+PSPL_T0_MAX = COMMON_PARAMS['t0_max']
+PSPL_U0_MIN = COMMON_PARAMS['u0_min']
+PSPL_U0_MAX = COMMON_PARAMS['u0_max']
+PSPL_TE_MIN = COMMON_PARAMS['tE_min']
+PSPL_TE_MAX = COMMON_PARAMS['tE_max']
 
 MAG_ERROR_STD = 0.1
 CADENCE_MASK_PROB = 0.2
