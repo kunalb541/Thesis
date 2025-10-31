@@ -3,7 +3,11 @@
 # Multi-node / multi-GPU friendly training script with clean logging,
 # single-rank artifact saving, consistent two-stage normalization,
 # and graceful DDP shutdown to prevent TCPStore "Broken pipe" warnings.
-
+import warnings
+warnings.filterwarnings('ignore')
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import argparse
 import json
 import os

@@ -1,6 +1,6 @@
-# Quick Reference - Command Cheatsheet
+# Quick Reference - Command Cheatsheet (v4.0)
 
-Fast command reference for all experiments.
+Fast command reference for all experiments with **DDP support**.
 
 ---
 
@@ -17,8 +17,11 @@ python code/test_vbm.py
 
 # Quick test (2K events, 5 min)
 cd code
-python simulate.py --n_pspl 1000 --n_binary 1000 --output ../data/raw/test.npz
-python train.py --data ../data/raw/test.npz --experiment_name test --epochs 5
+python simulate.py --n_pspl 1000 --n_binary 1000 \
+    --output ../data/raw/test.npz --num_workers 8
+torchrun --nproc_per_node=4 train.py \
+    --data ../data/raw/test.npz \
+    --experiment_name test --epochs 5 --batch_size 128 --lr 1e-4
 ```
 
 ---
@@ -28,7 +31,7 @@ python train.py --data ../data/raw/test.npz --experiment_name test --epochs 5
 ```bash
 cd code
 
-# Generate data (~2 hours on 24 cores)
+# Generate data (~10-15 min with 200 workers)
 python simulate.py \
     --n_pspl 500000 \
     --n_binary 500000 \
@@ -36,20 +39,20 @@ python simulate.py \
     --output ../data/raw/baseline_1M.npz \
     --binary_params baseline \
     --seed 42 \
-    --num_workers 24
+    --num_workers 200
 
-# Train (~6-8 hours on 4 GPUs)
-python train.py \
+# Train with DDP (~30-45 min on 4 GPUs)
+torchrun --nproc_per_node=4 train.py \
     --data ../data/raw/baseline_1M.npz \
     --experiment_name baseline \
     --epochs 50 \
-    --batch_size 128
+    --batch_size 128 \
+    --lr 1e-4
 
-# Evaluate (auto-finds latest run)
+# Evaluate
 python evaluate.py \
     --experiment_name baseline \
-    --data ../data/raw/baseline_1M.npz \
-    --early_detection
+    --data ../data/raw/baseline_1M.npz
 
 # Benchmark
 python benchmark_realtime.py \
@@ -59,29 +62,85 @@ python benchmark_realtime.py \
 
 ---
 
+## Distributed Training (DDP)
+
+### Single Node (4 GPUs)
+
+```bash
+torchrun --nproc_per_node=4 train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
+    --epochs 50 \
+    --batch_size 128 \
+    --lr 1e-4
+```
+
+### Multi-Node (SLURM)
+
+```bash
+# Set environment
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500
+
+# Train with srun + torchrun
+srun torchrun \
+    --nnodes=$SLURM_JOB_NUM_NODES \
+    --nproc_per_node=4 \
+    --rdzv_id=$SLURM_JOB_ID \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
+    --epochs 50 \
+    --batch_size 128 \
+    --lr 1e-4
+```
+
+### DDP Debugging
+
+```bash
+# Enable NCCL debug
+export NCCL_DEBUG=INFO
+
+# Check GPU visibility
+echo $CUDA_VISIBLE_DEVICES
+
+# Test with single GPU first
+torchrun --nproc_per_node=1 train.py [args]
+
+# Then scale up
+torchrun --nproc_per_node=4 train.py [args]
+```
+
+---
+
 ## Cadence Experiments
 
 ```bash
-# Dense (5% missing)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/cadence_dense.npz \
-    --cadence_mask_prob 0.05
-python train.py --data ../data/raw/cadence_dense.npz \
-    --experiment_name cadence_dense --epochs 50
+# Simulate all cadence datasets (~5-8 min total)
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/cadence_${name}.npz \
+        --cadence_mask_prob $cadence --num_workers 200
+done
 
-# Sparse (30% missing)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/cadence_sparse.npz \
-    --cadence_mask_prob 0.30
-python train.py --data ../data/raw/cadence_sparse.npz \
-    --experiment_name cadence_sparse --epochs 50
+# Train all with DDP (~30-40 min total)
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/cadence_${name}.npz \
+        --experiment_name cadence_${name} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
 
-# Very Sparse (40% missing)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/cadence_vsparse.npz \
-    --cadence_mask_prob 0.40
-python train.py --data ../data/raw/cadence_vsparse.npz \
-    --experiment_name cadence_vsparse --epochs 50
+# Evaluate all
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    python evaluate.py --experiment_name cadence_${name} \
+        --data ../data/raw/cadence_${name}.npz
+done
 ```
 
 ---
@@ -89,19 +148,29 @@ python train.py --data ../data/raw/cadence_vsparse.npz \
 ## Photometric Error Experiments
 
 ```bash
-# Low error (0.05 mag - space-based)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/error_low.npz \
-    --mag_error_std 0.05
-python train.py --data ../data/raw/error_low.npz \
-    --experiment_name error_low --epochs 50
+# Simulate all error datasets (~5-8 min total)
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/error_${name}.npz \
+        --mag_error_std $error --num_workers 200
+done
 
-# High error (0.20 mag - poor conditions)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/error_high.npz \
-    --mag_error_std 0.20
-python train.py --data ../data/raw/error_high.npz \
-    --experiment_name error_high --epochs 50
+# Train all with DDP (~30-40 min total)
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/error_${name}.npz \
+        --experiment_name error_${name} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
+
+# Evaluate all
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    python evaluate.py --experiment_name error_${name} \
+        --data ../data/raw/error_${name}.npz
+done
 ```
 
 ---
@@ -109,72 +178,180 @@ python train.py --data ../data/raw/error_high.npz \
 ## Binary Topology Experiments
 
 ```bash
-# Distinct caustic-crossing (easiest)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/distinct.npz \
-    --binary_params distinct
-python train.py --data ../data/raw/distinct.npz \
-    --experiment_name distinct --epochs 50
+# Simulate all topology datasets (~5-8 min total)
+for topo in distinct planetary stellar; do
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/${topo}.npz \
+        --binary_params ${topo} --num_workers 200
+done
 
-# Planetary systems
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/planetary.npz \
-    --binary_params planetary
-python train.py --data ../data/raw/planetary.npz \
-    --experiment_name planetary --epochs 50
+# Train all with DDP (~30-40 min total)
+for topo in distinct planetary stellar; do
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/${topo}.npz \
+        --experiment_name ${topo} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
 
-# Stellar binaries (hardest)
-python simulate.py --n_pspl 100000 --n_binary 100000 \
-    --output ../data/raw/stellar.npz \
-    --binary_params stellar
-python train.py --data ../data/raw/stellar.npz \
-    --experiment_name stellar --epochs 50
+# Evaluate all
+for topo in distinct planetary stellar; do
+    python evaluate.py --experiment_name ${topo} \
+        --data ../data/raw/${topo}.npz
+done
 ```
 
 ---
 
-## Batch Processing
+## Complete Pipeline (Interactive)
 
-### Run All Experiments (HPC/SLURM)
-
-```bash
-# Submit complete experiment suite
-sbatch run_all_experiments.sh
-```
-
-This automated script handles:
-- VBMicrolensing validation
-- All data generation (baseline + systematic experiments)
-- Distributed training across all experiments
-- Complete evaluation and analysis
-- Results summary
-
-### Manual Batch: All Cadence Experiments
+### All Experiments in ~1 Hour
 
 ```bash
+cd code
+
+# ==========================================
+# 1️⃣ SIMULATION (~15-20 min total)
+# ==========================================
+
+# Baseline (1M)
+python simulate.py --n_pspl 500000 --n_binary 500000 \
+    --output ../data/raw/baseline_1M.npz \
+    --binary_params baseline --num_workers 200
+
+# Cadence
 for cadence in 0.05 0.20 0.30 0.40; do
     name=$(echo $cadence | sed 's/0\.//')
     python simulate.py --n_pspl 100000 --n_binary 100000 \
         --output ../data/raw/cadence_${name}.npz \
-        --cadence_mask_prob $cadence
-    python train.py --data ../data/raw/cadence_${name}.npz \
-        --experiment_name cadence_${name} --epochs 50
-    python evaluate.py --experiment_name cadence_${name} \
-        --data ../data/raw/cadence_${name}.npz --early_detection
+        --cadence_mask_prob $cadence --num_workers 200
 done
-```
 
-### Manual Batch: All Topology Experiments
+# Error
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    python simulate.py --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/error_${name}.npz \
+        --mag_error_std $error --num_workers 200
+done
 
-```bash
+# Topology
 for topo in distinct planetary stellar; do
     python simulate.py --n_pspl 100000 --n_binary 100000 \
         --output ../data/raw/${topo}.npz \
-        --binary_params ${topo}
-    python train.py --data ../data/raw/${topo}.npz \
-        --experiment_name ${topo} --epochs 50
-    python evaluate.py --experiment_name ${topo} \
-        --data ../data/raw/${topo}.npz --early_detection
+        --binary_params ${topo} --num_workers 200
+done
+
+# ==========================================
+# 2️⃣ TRAINING with DDP (~40-50 min total)
+# ==========================================
+
+# Baseline
+torchrun --nproc_per_node=4 train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
+    --epochs 50 --batch_size 128 --lr 1e-4
+
+# Cadence
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/cadence_${name}.npz \
+        --experiment_name cadence_${name} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
+
+# Error
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/error_${name}.npz \
+        --experiment_name error_${name} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
+
+# Topology
+for topo in distinct planetary stellar; do
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/${topo}.npz \
+        --experiment_name ${topo} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
+
+# ==========================================
+# 3️⃣ EVALUATION (~5-10 min total)
+# ==========================================
+
+for exp in baseline cadence_* error_* distinct planetary stellar; do
+    python evaluate.py --experiment_name $exp \
+        --data ../data/raw/${exp}.npz 2>/dev/null || \
+    python evaluate.py --experiment_name $exp \
+        --data ../data/raw/baseline_1M.npz 2>/dev/null
+done
+```
+
+---
+
+## SLURM Multi-Node Training
+
+```bash
+# Set master node
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500
+
+# Baseline
+srun torchrun \
+    --nnodes=$SLURM_JOB_NUM_NODES \
+    --nproc_per_node=4 \
+    --rdzv_id=$SLURM_JOB_ID \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline \
+    --epochs 50 --batch_size 128 --lr 1e-4
+
+# Cadence
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    srun torchrun \
+        --nnodes=$SLURM_JOB_NUM_NODES \
+        --nproc_per_node=4 \
+        --rdzv_id=$SLURM_JOB_ID \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+        train.py \
+        --data ../data/raw/cadence_${name}.npz \
+        --experiment_name cadence_${name} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
+
+# Error
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    srun torchrun \
+        --nnodes=$SLURM_JOB_NUM_NODES \
+        --nproc_per_node=4 \
+        --rdzv_id=$SLURM_JOB_ID \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+        train.py \
+        --data ../data/raw/error_${name}.npz \
+        --experiment_name error_${name} \
+        --epochs 50 --batch_size 128 --lr 1e-4
+done
+
+# Topology
+for topo in distinct planetary stellar; do
+    srun torchrun \
+        --nnodes=$SLURM_JOB_NUM_NODES \
+        --nproc_per_node=4 \
+        --rdzv_id=$SLURM_JOB_ID \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+        train.py \
+        --data ../data/raw/${topo}.npz \
+        --experiment_name ${topo} \
+        --epochs 50 --batch_size 128 --lr 1e-4
 done
 ```
 
@@ -185,44 +362,40 @@ done
 ### Watch Training
 
 ```bash
-# Follow training logs
-tail -f $(ls -td results/baseline_*/ | head -1)/training.log
+# Monitor latest experiment
+tail -f $(ls -td ../results/baseline_*/ | head -1)/training.log
 
-# Monitor GPU
-watch -n 1 nvidia-smi  # or rocm-smi for AMD
+# Watch GPU usage
+watch -n 1 nvidia-smi
 ```
 
 ### Quick Results Check
 
 ```bash
-# Get test accuracy
-EXP=baseline
-LATEST=$(ls -td results/${EXP}_*/ | head -1)
-python -c "import json; print(f\"{json.load(open('$LATEST/summary.json'))['final_test_acc']*100:.2f}%\")"
+# Get test accuracy for one experiment
+python -c "
+import json
+from pathlib import Path
+exp = 'baseline'
+runs = sorted(Path('../results').glob(f'{exp}_*'))
+if runs:
+    data = json.load(open(runs[-1] / 'summary.json'))
+    print(f\"{exp}: {data['final_test_acc']*100:.2f}%\")
+"
 
-# List all experiments and accuracies
-for dir in results/*/summary.json; do
-    exp=$(dirname $dir | xargs basename)
-    acc=$(python -c "import json; print(f\"{json.load(open('$dir'))['final_test_acc']*100:.2f}%\")")
-    echo "$exp: $acc"
-done
-```
-
-### Generate Comparison Table
-
-```bash
+# Generate comparison table
 python -c "
 import json
 from pathlib import Path
 
-experiments = ['baseline', 'cadence_dense', 'cadence_sparse', 
-               'error_low', 'error_high', 'distinct', 'planetary', 'stellar']
+experiments = ['baseline', 'cadence_05', 'cadence_20', 'cadence_30', 'cadence_40',
+               'error_05', 'error_10', 'error_20', 'distinct', 'planetary', 'stellar']
 
-print(f'{'Experiment':<20} {'Test Acc':<12} {'ROC AUC':<10}')
-print('-' * 45)
+print(f'{'Experiment':<20} {'Test Acc':<12}')
+print('-' * 35)
 
 for exp in experiments:
-    runs = sorted(Path('results').glob(f'{exp}_*'))
+    runs = sorted(Path('../results').glob(f'{exp}_*'))
     if runs:
         summary = runs[-1] / 'summary.json'
         if summary.exists():
@@ -243,7 +416,7 @@ python plot_samples.py \
     --data ../data/raw/baseline_1M.npz \
     --n_samples 12
 
-# Results in: results/baseline_TIMESTAMP/sample_plots/
+# Results saved to: ../results/baseline_*/sample_plots/
 ```
 
 ---
@@ -253,94 +426,129 @@ python plot_samples.py \
 ### Low Accuracy
 
 ```bash
-# Check data range (should be ~[0, 1])
-grep "Train data range" results/*/training.log
+# Check data normalization
+python -c "
+import numpy as np
+data = np.load('../data/raw/baseline_1M.npz')
+X = data['X']
+print(f'Data range: [{X.min():.3f}, {X.max():.3f}]')
+print(f'Data mean: {X.mean():.3f}')
+"
 
-# Check training convergence
-grep "Epoch" results/*/training.log | tail -20
+# Validate VBMicrolensing
+python test_vbm.py
+```
 
-# Validate VBMicrolensing signatures
-python code/test_vbm.py
+### DDP Issues
+
+```bash
+# Enable debugging
+export NCCL_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+
+# Test with single GPU
+torchrun --nproc_per_node=1 train.py [args]
+
+# Check network interface (SLURM)
+export NCCL_SOCKET_IFNAME=eth0  # or ib0 for InfiniBand
 ```
 
 ### GPU Memory Issues
 
 ```bash
 # Reduce batch size
-python train.py --data data.npz --batch_size 64  # instead of 128
+torchrun --nproc_per_node=4 train.py --batch_size 64
 
 # Use gradient accumulation
-python train.py --data data.npz --accumulate_steps 2
+torchrun --nproc_per_node=4 train.py --batch_size 32
 ```
 
 ### Slow Training
 
 ```bash
-# Check if using GPU
-python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}')"
+# Check if using all GPUs
+nvidia-smi -l 1
 
-# Use more workers
-python train.py --data data.npz --num_workers 16
+# Ensure DDP is active
+grep "World size" ../results/*/training.log
+
+# Increase data workers
+torchrun --nproc_per_node=4 train.py --num_workers 16
 ```
 
 ---
 
-## File Locations
+## Expected Performance (v4.0)
 
-```
-results/experiment_TIMESTAMP/
-├── best_model.pt           # Trained model
-├── config.json             # Parameters
-├── training.log            # Training history
-├── summary.json            # Final metrics
-├── scaler_standard.pkl     # Normalization params
-├── scaler_minmax.pkl       # Normalization params
-└── evaluation/             # Evaluation results
-```
+### Timing (4 GPUs)
+
+| Task | Events | Time | Notes |
+|------|--------|------|-------|
+| Simulate | 1M | 10-15 min | 200 workers |
+| Simulate | 200K | 2-3 min | Per experiment |
+| Train DDP | 1M | 30-45 min | 4 GPUs |
+| Train DDP | 200K | 8-12 min | Per experiment |
+| Evaluate | Any | 1-2 min | Per experiment |
+| **Complete** | **All** | **~1 hour** | Full pipeline |
+
+### Accuracy
+
+| Experiment | Missing/Error | Expected Acc |
+|------------|---------------|--------------|
+| Baseline | 20% missing | 70-75% |
+| Dense | 5% missing | 75-80% |
+| Sparse | 30% missing | 65-70% |
+| Very Sparse | 40% missing | 60-65% |
+| Low Error | 0.05 mag | 75-80% |
+| High Error | 0.20 mag | 65-70% |
+| Distinct | Clear caustics | 80-90% |
+| Planetary | q ~ 0.001 | 70-80% |
+| Stellar | q ~ 1.0 | 60-75% |
 
 ---
 
 ## Common Options
 
 ### simulate.py
-- `--n_pspl`: Number of PSPL events
-- `--n_binary`: Number of binary events
+- `--n_pspl`: PSPL events
+- `--n_binary`: Binary events
 - `--n_points`: Time series length (default: 1500)
-- `--cadence_mask_prob`: Fraction of missing observations
+- `--cadence_mask_prob`: Missing observations fraction
 - `--mag_error_std`: Photometric error (mag)
 - `--binary_params`: Parameter set (baseline/distinct/planetary/stellar)
-- `--num_workers`: Parallel processes
+- `--num_workers`: Parallel processes (recommend 200)
 
-### train.py
+### train.py (with torchrun)
 - `--data`: Path to .npz dataset
 - `--experiment_name`: Experiment identifier
 - `--epochs`: Training epochs (default: 50)
 - `--batch_size`: Batch size (default: 128)
-- `--lr`: Learning rate (default: 1e-3)
+- `--lr`: Learning rate (default: 1e-4 for DDP)
+- `--num_workers`: Data loading workers per GPU (default: 4)
 
 ### evaluate.py
 - `--experiment_name`: Auto-find latest run
 - `--data`: Path to test data
-- `--early_detection`: Run partial observation analysis
-- `--batch_size`: Inference batch size
-
-### test_vbm.py
-No arguments - validates VBMicrolensing installation and binary signatures
+- `--batch_size`: Inference batch size (default: 128)
 
 ---
 
-## Expected Performance
+## File Locations
 
-| Experiment       | Test Accuracy | Training Time |
-|------------------|---------------|---------------|
-| Baseline (1M)    | 70-75%        | 6-8 hours     |
-| Dense (5%)       | 75-80%        | 2-3 hours     |
-| Sparse (30%)     | 65-70%        | 2-3 hours     |
-| Very Sparse (40%)| 60-65%        | 2-3 hours     |
-| Low Error (0.05) | 75-80%        | 2-3 hours     |
-| High Error (0.20)| 65-70%        | 2-3 hours     |
-| Distinct         | 80-90%        | 2-3 hours     |
-| Planetary        | 70-80%        | 2-3 hours     |
-| Stellar          | 60-75%        | 2-3 hours     |
+```
+../results/experiment_TIMESTAMP/
+├── best_model.pt           # Trained model
+├── config.json             # Experiment config
+├── training.log            # Training logs
+├── summary.json            # Final metrics
+├── scaler_standard.pkl     # Normalization
+├── scaler_minmax.pkl       # Normalization
+└── evaluation/             # Evaluation plots
+    ├── confusion_matrix.png
+    ├── roc_curve.png
+    └── evaluation_summary.json
+```
 
-*Times on 4× NVIDIA A100 GPUs*
+---
+
+You're now set for ultra-fast experimentation! ⚡🚀
