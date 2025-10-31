@@ -28,12 +28,13 @@ from pathlib import Path
 import config as CFG
 from model import TimeDistributedCNN
 from utils import load_npz_dataset
+from utils import preprocess_data
 
 
 class NumpyDataset(Dataset):
     def __init__(self, X, y):
-        # X = X.copy()
-        # X[X == CFG.PAD_VALUE] = 0.0
+        X = X.copy()
+        X[X == CFG.PAD_VALUE] = 0.0
         self.X = torch.from_numpy(X).float().unsqueeze(1)
         self.y = torch.from_numpy(y).long()
     
@@ -277,7 +278,8 @@ def main():
     X_test, y_test = X[n_train+n_val:], y[n_train+n_val:]
 
     logger.info(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test: {len(X_test):,}")
-    
+    # After splitting data
+    X_train_scaled, X_val_scaled, X_test_scaled, _, _ = preprocess_data(X_train, X_val, X_test)
     # Check class balance
     train_balance = (np.sum(y_train==0), np.sum(y_train==1))
     val_balance = (np.sum(y_val==0), np.sum(y_val==1))

@@ -13,7 +13,24 @@ import torch
 import config as CFG
 
 
+
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+def preprocess_data(X_train, X_val, X_test):
+    """Two-stage normalization like original TensorFlow code"""
+    # Stage 1: StandardScaler
+    scaler_standard = StandardScaler()
+    X_train_norm = scaler_standard.fit_transform(X_train)
+    X_val_norm = scaler_standard.transform(X_val)
+    X_test_norm = scaler_standard.transform(X_test)
+    
+    # Stage 2: MinMaxScaler
+    scaler_minmax = MinMaxScaler()
+    X_train_scaled = scaler_minmax.fit_transform(X_train_norm)
+    X_val_scaled = scaler_minmax.transform(X_val_norm)
+    X_test_scaled = scaler_minmax.transform(X_test_norm)
+    
+    return X_train_scaled, X_val_scaled, X_test_scaled, scaler_standard, scaler_minmax
 
 def load_npz_dataset(path, apply_perm=False, normalize=True):
     """Load dataset with proper normalization"""

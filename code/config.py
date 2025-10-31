@@ -206,7 +206,7 @@ MASK_POOL_SIZE = 256
 # CNN ARCHITECTURE PARAMETERS
 # ============================================================================
 
-SEQUENCE_LENGTH = 1500  # Must match N_POINTS
+SEQUENCE_LENGTH = 100  
 NUM_CHANNELS = 1
 
 # Architecture details (for TimeDistributedCNN)
