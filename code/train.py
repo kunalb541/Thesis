@@ -1,473 +1,550 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-train_distributed.py - Multi-node multi-GPU training with DistributedDataParallel
-
-Usage:
-  Single node (8 GPUs):
-    torchrun --nproc_per_node=8 train_distributed.py --data data.npz
-  
-  Multi-node (2 nodes × 8 GPUs = 16 GPUs):
-    # Node 0:
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
-             --master_addr=node01 --master_port=29500 train_distributed.py --data data.npz
-    
-    # Node 1:
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
-             --master_addr=node01 --master_port=29500 train_distributed.py --data data.npz
-
-Author: Kunal Bhatia
-Date: October 2025
-"""
+# train.py
+# Multi-node / multi-GPU friendly training script with clean logging,
+# single-rank artifact saving, consistent two-stage normalization,
+# and graceful DDP shutdown to prevent TCPStore "Broken pipe" warnings.
 
 import argparse
-import os
-import random
-import time
-from pathlib import Path
 import json
+import os
+import pickle
+import random
+import socket
+import sys
+import time
+from datetime import datetime
+from glob import glob
+from pathlib import Path
+from typing import Dict, Tuple, Optional, List
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import torch.distributed as dist
+import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
-from torch.cuda.amp import autocast, GradScaler
-from tqdm import tqdm
-
-# Add parent directory to path for imports
-import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from code.model import TimeDistributedCNN
-from code.utils import load_npz_dataset, two_stage_normalize, save_scalers
-import code.config as CFG
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 
-def setup_distributed():
-    """
-    Initialize distributed training
-    
-    Environment variables set by torchrun:
-    - RANK: Global rank of this process
-    - LOCAL_RANK: Rank within this node
-    - WORLD_SIZE: Total number of processes
-    - MASTER_ADDR: Address of rank 0
-    - MASTER_PORT: Port for communication
-    """
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
+# -----------------------------
+# Utilities
+# -----------------------------
+def is_dist() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_rank() -> int:
+    return dist.get_rank() if is_dist() else 0
+
+
+def get_world_size() -> int:
+    return dist.get_world_size() if is_dist() else 1
+
+
+def setup_ddp(backend: Optional[str] = None):
+    """Initialize torch.distributed from torchrun environment variables."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        if backend is None:
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+        torch.distributed.barrier()
+        return rank, world_size, local_rank
     else:
-        print("Not using distributed mode")
-        return -1, 0, 1
-    
-    torch.cuda.set_device(local_rank)
-    
-    # Initialize process group
-    dist.init_process_group(
-        backend='nccl',  # Use NCCL for GPU
-        init_method='env://',
-    )
-    
-    # Synchronize
-    dist.barrier()
-    
-    return rank, local_rank, world_size
+        # Single-process (no DDP)
+        return 0, 1, 0
 
 
-def cleanup_distributed():
-    """Clean up distributed training"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
+def set_seeds(seed: int, rank: int):
+    seed = seed + rank  # make rank-unique but deterministic
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-def set_seed(seed: int, rank: int):
-    """Set seed for reproducibility (different per rank)"""
-    random.seed(seed + rank)
-    np.random.seed(seed + rank)
-    torch.manual_seed(seed + rank)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed + rank)
+def reduce_tensor(t: torch.Tensor, op=dist.ReduceOp.SUM) -> torch.Tensor:
+    """Sum-reduce tensor across processes. No-op in single-process."""
+    if is_dist():
+        dist.all_reduce(t, op=op)
+    return t
 
 
-class NumpyDataset(Dataset):
-    def __init__(self, X, y):
-        X = X.copy()
-        X[X == CFG.PAD_VALUE] = 0.0
-        self.X = torch.from_numpy(X).float().unsqueeze(1)
-        self.y = torch.from_numpy(y).long()
-    
+def now_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def make_experiment_dir(base: str, exp_name: str) -> str:
+    ts = now_stamp()
+    exp_dir = os.path.join("..", "results", f"{exp_name}_{ts}")
+    Path(exp_dir).mkdir(parents=True, exist_ok=True)
+    return exp_dir
+
+
+def rank0_print(*args, **kwargs):
+    if get_rank() == 0:
+        print(*args, **kwargs)
+        sys.stdout.flush()
+
+
+# -----------------------------
+# Data
+# -----------------------------
+class TimeSeriesDataset(Dataset):
+    def __init__(self, X: np.ndarray, y: np.ndarray):
+        # X expected shape: (N, 1, T); y: (N,)
+        self.X = torch.from_numpy(X.astype(np.float32))
+        self.y = torch.from_numpy(y.astype(np.int64))
+
     def __len__(self):
         return self.X.shape[0]
-    
+
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
 
-def accuracy(logits, y):
-    preds = logits.argmax(dim=1)
-    return (preds == y).float().mean().item()
+def load_npz_files(pattern: str) -> Dict[str, np.ndarray]:
+    """
+    Load one or many .npz files (supports glob patterns).
+    Expected keys (flexible):
+      - Prefer 'X' and 'y'
+      - Alternatively 'magnifications' (X) and 'labels' (y)
+    Concatenates across files if multiple given.
+    """
+    files = sorted(glob(pattern)) if any(ch in pattern for ch in "*?[]") else [pattern]
+    if len(files) == 0:
+        raise FileNotFoundError(f"No files matched data path: {pattern}")
 
+    X_list, y_list = [], []
+    for f in files:
+        with np.load(f, allow_pickle=True) as data:
+            if "X" in data and "y" in data:
+                X_list.append(data["X"])
+                y_list.append(data["y"])
+            elif "magnifications" in data and "labels" in data:
+                X_list.append(data["magnifications"])
+                y_list.append(data["labels"])
+            else:
+                raise KeyError(
+                    f"{f} does not contain expected keys. "
+                    f"Expected ('X', 'y') or ('magnifications', 'labels'). "
+                    f"Found keys: {list(data.keys())}"
+                )
 
-def train_one_epoch(model, loader, optimizer, device, rank, grad_clip=None, scaler=None):
-    """Training loop for one epoch"""
-    model.train()
-    total_loss, total_acc, n = 0.0, 0.0, 0
-    crit = nn.CrossEntropyLoss()
-    
-    # Only show progress bar on rank 0
-    if rank == 0:
-        pbar = tqdm(loader, desc="Training", leave=False)
-    else:
-        pbar = loader
-    
-    for xb, yb in pbar:
-        xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
-        
-        if scaler is not None:
-            with autocast():
-                outputs = model(xb)  # [B, L, 2]
-                
-                # Per-timestep loss
-                B, L, C = outputs.shape
-                yb_repeated = yb.unsqueeze(1).expand(B, L)
-                outputs_flat = outputs.reshape(B * L, C)
-                yb_flat = yb_repeated.reshape(B * L)
-                loss = crit(outputs_flat, yb_flat)
-                
-                logits = outputs.mean(dim=1)
-            
-            scaler.scale(loss).backward()
-            if grad_clip:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
+    X = np.concatenate(X_list, axis=0)
+    y = np.concatenate(y_list, axis=0)
+
+    # Ensure X has shape (N, 1, T)
+    if X.ndim == 2:
+        X = X[:, None, :]  # add channel dim
+    elif X.ndim == 3 and X.shape[1] != 1:
+        # If shape is (N, T, C), move to (N, C, T) or force single-channel if ambiguous
+        if X.shape[-1] == 1:
+            X = np.transpose(X, (0, 2, 1))
         else:
-            outputs = model(xb)
-            
-            B, L, C = outputs.shape
-            yb_repeated = yb.unsqueeze(1).expand(B, L)
-            outputs_flat = outputs.reshape(B * L, C)
-            yb_flat = yb_repeated.reshape(B * L)
-            loss = crit(outputs_flat, yb_flat)
-            
-            logits = outputs.mean(dim=1)
-            
-            loss.backward()
-            if grad_clip:
-                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-        
-        bs = xb.size(0)
-        total_loss += loss.item() * bs
-        total_acc += accuracy(logits.detach(), yb) * bs
-        n += bs
-        
-        if rank == 0 and hasattr(pbar, 'set_postfix'):
-            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{accuracy(logits.detach(), yb):.3f}'})
-    
-    return total_loss / n, total_acc / n
+            # Fall back: treat last dimension as time and add a singleton channel
+            X = X[..., 0]  # take first channel
+            X = X[:, None, :]
+
+    y = y.reshape(-1)
+    return {"X": X, "y": y}
+
+
+def fit_two_stage_scalers_rank0(X_train: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    Fit StandardScaler then MinMaxScaler on train data ONLY (on rank 0).
+    Returns a dict of parameters to broadcast & reconstruct scalers in all ranks.
+    """
+    # Fit per-timepoint across the time axis jointly (flatten N and C dims)
+    N, C, T = X_train.shape
+    flat = X_train.reshape(N, C * T)
+
+    std = StandardScaler(with_mean=True, with_std=True)
+    flat_std = std.fit_transform(flat)
+
+    mm = MinMaxScaler(feature_range=(0.0, 1.0))
+    mm.fit(flat_std)
+
+    params = {
+        "std_mean": std.mean_.astype(np.float64),
+        "std_scale": std.scale_.astype(np.float64),
+        "mm_min": mm.min_.astype(np.float64),
+        "mm_scale": mm.scale_.astype(np.float64),
+        "shape": (C, T),
+    }
+    return params
+
+
+def apply_two_stage_scalers(params: Dict[str, np.ndarray], X: np.ndarray) -> np.ndarray:
+    """Apply StandardScaler then MinMaxScaler using provided params."""
+    N, C, T = X.shape
+    assert (C, T) == tuple(params["shape"]), "Scaler params shape mismatch."
+    flat = X.reshape(N, C * T)
+
+    flat = (flat - params["std_mean"]) / (params["std_scale"] + 1e-12)
+    flat = flat * params["mm_scale"] + params["mm_min"]
+    return flat.reshape(N, C, T)
+
+
+def save_scalers_rank0(params: Dict[str, np.ndarray], out_dir: str):
+    """Reconstruct sklearn scalers and persist to disk on rank 0 only."""
+    if get_rank() != 0:
+        return
+    # Recreate sklearn objects from params (for reproducible inference)
+    std = StandardScaler(with_mean=True, with_std=True)
+    mm = MinMaxScaler(feature_range=(0.0, 1.0))
+    # Minimal objects: just attach learned stats
+    std.mean_ = params["std_mean"].copy()
+    std.scale_ = params["std_scale"].copy()
+
+    # For MinMaxScaler, scikit stores min_ and scale_. Data min/max not needed for transform
+    mm.min_ = params["mm_min"].copy()
+    mm.scale_ = params["mm_scale"].copy()
+    mm.data_min_ = None
+    mm.data_max_ = None
+    mm.data_range_ = None
+    mm.n_samples_seen_ = None
+    mm.feature_range = (0.0, 1.0)
+
+    with open(os.path.join(out_dir, "scaler_standard.pkl"), "wb") as f:
+        pickle.dump(std, f)
+    with open(os.path.join(out_dir, "scaler_minmax.pkl"), "wb") as f:
+        pickle.dump(mm, f)
+
+
+def broadcast_object_from_rank0(obj):
+    """
+    Broadcast a Python object from rank 0 to all other ranks.
+    Handy for experiment_dir and scaler params.
+    """
+    world_size = get_world_size()
+    if world_size == 1:
+        return obj
+    if get_rank() == 0:
+        payload = bytearray(pickle.dumps(obj))  # FIX: Convert to mutable bytearray!
+        sz = torch.tensor([len(payload)], dtype=torch.long, device="cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        payload = None
+        sz = torch.tensor([0], dtype=torch.long, device="cuda" if torch.cuda.is_available() else "cpu")
+
+    dist.broadcast(sz, src=0)
+    if get_rank() != 0:
+        payload = bytearray(sz.item())
+    tensor = torch.frombuffer(payload, dtype=torch.uint8)
+    if torch.cuda.is_available():
+        tensor = tensor.to("cuda")
+    dist.broadcast(tensor, src=0)
+    if torch.cuda.is_available():
+        tensor = tensor.cpu()
+    return pickle.loads(bytes(tensor.tolist()))
+
+
+# -----------------------------
+# Model
+# -----------------------------
+class TDConvClassifier(nn.Module):
+    """
+    Compact 1D CNN for binary classification.
+    Matches the README spirit: stacked Conv1D, BN, ReLU, Dropout,
+    then aggregate (mean + max) over time and classify.
+    """
+    def __init__(self, in_ch: int = 1, n_classes: int = 2, dropout: float = 0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(in_ch, 128, kernel_size=9, padding=4),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+
+            nn.Conv1d(128, 64, kernel_size=7, padding=3),
+            nn.BatchNorm1d(64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+
+            nn.Conv1d(64, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(32 * 2, 64),  # concat(mean, max)
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(64, n_classes),
+        )
+
+    def forward(self, x):  # x: (B, C=1, T)
+        h = self.net(x)
+        mean_pool = torch.mean(h, dim=-1)
+        max_pool, _ = torch.max(h, dim=-1)
+        z = torch.cat([mean_pool, max_pool], dim=1)
+        return self.classifier(z)
+
+
+# -----------------------------
+# Train / Eval
+# -----------------------------
+def step(model, batch, device, criterion, scaler, optimizer=None):
+    x, y = batch
+    x = x.to(device, non_blocking=True)
+    y = y.to(device, non_blocking=True)
+
+    is_train = optimizer is not None
+    if is_train:
+        optimizer.zero_grad(set_to_none=True)
+
+    use_amp = device.type == "cuda"
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        logits = model(x)
+        loss = criterion(logits, y)
+    pred = logits.argmax(dim=1)
+    correct = (pred == y).sum()
+
+    if is_train:
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+    return loss.detach(), correct.detach(), y.numel()
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, rank):
-    """Evaluation loop"""
+def evaluate(model, loader, device, criterion):
     model.eval()
-    total_loss, total_acc, n = 0.0, 0.0, 0
-    crit = nn.CrossEntropyLoss()
-    
-    if rank == 0:
-        pbar = tqdm(loader, desc="Validating", leave=False)
-    else:
-        pbar = loader
-    
-    for xb, yb in pbar:
-        xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
-        
-        outputs = model(xb)
-        
-        B, L, C = outputs.shape
-        yb_repeated = yb.unsqueeze(1).expand(B, L)
-        outputs_flat = outputs.reshape(B * L, C)
-        yb_flat = yb_repeated.reshape(B * L)
-        loss = crit(outputs_flat, yb_flat)
-        
-        logits = outputs.mean(dim=1)
-        
-        bs = xb.size(0)
-        total_loss += loss.item() * bs
-        total_acc += accuracy(logits, yb) * bs
-        n += bs
-    
-    return total_loss / n, total_acc / n
+    loss_sum = torch.tensor(0.0, device=device)
+    correct_sum = torch.tensor(0.0, device=device)
+    count_sum = torch.tensor(0.0, device=device)
+
+    for batch in loader:
+        x, y = batch
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        logits = model(x)
+        loss = criterion(logits, y)
+        pred = logits.argmax(dim=1)
+        correct = (pred == y).sum()
+
+        loss_sum += loss * y.numel()
+        correct_sum += correct
+        count_sum += y.numel()
+
+    # Reduce across ranks
+    reduce_tensor(loss_sum)
+    reduce_tensor(correct_sum)
+    reduce_tensor(count_sum)
+
+    loss_avg = (loss_sum / count_sum).item() if count_sum.item() > 0 else 0.0
+    acc = (correct_sum / count_sum).item() if count_sum.item() > 0 else 0.0
+    return loss_avg, acc
 
 
-def reduce_metrics(loss, acc, world_size):
-    """Average metrics across all processes"""
-    metrics = torch.tensor([loss, acc], device='cuda')
-    dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-    metrics /= world_size
-    return metrics[0].item(), metrics[1].item()
-
-
+# -----------------------------
+# Main
+# -----------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--experiment_name", type=str, default="baseline_distributed")
-    parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size PER GPU")
-    parser.add_argument("--epochs", type=int, default=CFG.EPOCHS)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", type=float, default=CFG.WEIGHT_DECAY)
-    parser.add_argument("--seed", type=int, default=CFG.RANDOM_SEED)
+    parser.add_argument("--data", type=str, required=True, help="Path or glob to .npz dataset(s)")
+    parser.add_argument("--experiment_name", type=str, required=True)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--val_split", type=float, default=0.15)
+    parser.add_argument("--test_split", type=float, default=0.15)
     args = parser.parse_args()
-    
-    # Setup distributed
-    rank, local_rank, world_size = setup_distributed()
-    
-    # Set device
-    device = torch.device(f'cuda:{local_rank}')
-    
-    # Set seed (different per rank for data augmentation diversity)
-    set_seed(args.seed, rank)
-    
-    # Create output directory (only rank 0)
-    if rank == 0 or rank == -1:
-        from datetime import datetime
-        if args.output_dir is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = Path(CFG.RESULTS_DIR) / f"{args.experiment_name}_{timestamp}"
-        else:
-            output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        best_model_path = output_dir / "best_model.pt"
-        config_path = output_dir / "config.json"
-        log_path = output_dir / "training.log"
-        
-        print("="*80)
-        print("🚀 DISTRIBUTED TRAINING")
-        print("="*80)
-        print(f"\nWorld size: {world_size} processes")
-        print(f"GPUs per node: {torch.cuda.device_count()}")
-        print(f"Total GPUs: {world_size}")
-        print(f"Batch size per GPU: {args.batch_size}")
-        print(f"Effective batch size: {args.batch_size * world_size}")
-        print(f"\n📁 Output: {output_dir}")
-    
-    # Synchronize
-    if dist.is_initialized():
-        dist.barrier()
-    
-    # Load data (all ranks load independently)
+
+    rank, world_size, local_rank = setup_ddp()
+    device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+    set_seeds(args.seed, rank)
+
+    # Load data (each rank loads the same; deterministic split ensures consistency)
     if rank == 0:
-        print(f"\nLoading dataset: {args.data}")
-    
-    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
-    L = X.shape[1]
-    
-    if rank == 0:
-        print(f"Loaded X: {X.shape}, y: {y.shape}")
-    
-    # Split data
-    n_total = len(X)
-    n_train = int(n_total * CFG.TRAIN_SPLIT)
-    n_val = int(n_total * CFG.VAL_SPLIT)
-    
-    X_train, y_train = X[:n_train], y[:n_train]
-    X_val, y_val = X[n_train:n_train+n_val], y[n_train:n_train+n_val]
-    X_test, y_test = X[n_train+n_val:], y[n_train+n_val:]
-    
-    if rank == 0:
-        print(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test: {len(X_test):,}")
-    
-    # Normalize (all ranks do this identically)
-    if rank == 0:
-        print("Applying two-stage normalization...")
-    
-    X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = two_stage_normalize(
-        X_train, X_val, X_test, pad_value=CFG.PAD_VALUE
+        rank0_print("=" * 76)
+        rank0_print("Host:", socket.gethostname())
+        rank0_print(f"World size: {world_size} | Rank: {rank} | Local rank: {local_rank}")
+        rank0_print(f"Data pattern: {args.data}")
+        rank0_print("=" * 76)
+    data = load_npz_files(args.data)
+    X, y = data["X"], data["y"]
+    n_classes = int(np.max(y) + 1)
+
+    # Deterministic split
+    test_size = args.test_split
+    val_size = args.val_split / (1.0 - test_size)
+    X_trainval, X_test, y_trainval, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=args.seed, stratify=y
     )
-    
-    # Save scalers (only rank 0)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_trainval, y_trainval, test_size=val_size, random_state=args.seed, stratify=y_trainval
+    )
+
+    # -----------------------------
+    # Two-stage normalization (fit on rank 0) and broadcast params
+    # -----------------------------
     if rank == 0:
-        save_scalers(scaler_std, scaler_mm, output_dir)
-    
-    # Create datasets
-    train_ds = NumpyDataset(X_train_scaled, y_train)
-    val_ds = NumpyDataset(X_val_scaled, y_val)
-    test_ds = NumpyDataset(X_test_scaled, y_test)
-    
-    # Create distributed samplers
-    train_sampler = DistributedSampler(
-        train_ds, 
-        num_replicas=world_size if world_size > 1 else 1,
-        rank=rank if rank >= 0 else 0,
-        shuffle=True,
-        seed=args.seed
-    )
-    
-    val_sampler = DistributedSampler(
-        val_ds,
-        num_replicas=world_size if world_size > 1 else 1,
-        rank=rank if rank >= 0 else 0,
-        shuffle=False
-    )
-    
-    # Create dataloaders (no shuffle - sampler handles it)
-    num_workers = min(8, os.cpu_count() // max(1, world_size))
-    
+        scaler_params = fit_two_stage_scalers_rank0(X_train)
+    else:
+        scaler_params = None
+    scaler_params = broadcast_object_from_rank0(scaler_params)
+
+    X_train = apply_two_stage_scalers(scaler_params, X_train)
+    X_val = apply_two_stage_scalers(scaler_params, X_val)
+    X_test = apply_two_stage_scalers(scaler_params, X_test)
+
+    # -----------------------------
+    # Datasets & Loaders with DistributedSampler
+    # -----------------------------
+    train_ds = TimeSeriesDataset(X_train, y_train)
+    val_ds = TimeSeriesDataset(X_val, y_val)
+    test_ds = TimeSeriesDataset(X_test, y_test)
+
+    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
+    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
+    test_sampler = DistributedSampler(test_ds, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
+
     train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        train_ds, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        sampler=train_sampler, num_workers=args.num_workers, pin_memory=True, drop_last=False
     )
-    
     val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        sampler=val_sampler,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        val_ds, batch_size=args.batch_size, shuffle=False,
+        sampler=val_sampler, num_workers=args.num_workers, pin_memory=True, drop_last=False
     )
-    
     test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=num_workers // 2,
-        pin_memory=True
+        test_ds, batch_size=args.batch_size, shuffle=False,
+        sampler=test_sampler, num_workers=args.num_workers, pin_memory=True, drop_last=False
     )
-    
-    # Create model
-    if rank == 0:
-        print("\nBuilding model...")
-    
-    model = TimeDistributedCNN(sequence_length=L, num_channels=1, num_classes=2)
-    model = model.to(device)
-    
-    # Wrap with DDP
+
+    # -----------------------------
+    # Model / Optimizer
+    # -----------------------------
+    model = TDConvClassifier(in_ch=X.shape[1], n_classes=n_classes, dropout=0.3).to(device)
     if world_size > 1:
-        model = DDP(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            find_unused_parameters=False
-        )
-    
-    n_params = sum(p.numel() for p in model.parameters())
+        model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None, find_unused_parameters=False)
+
+    criterion = nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+
+    # -----------------------------
+    # Experiment directory (created by rank 0 and broadcast to others)
+    # -----------------------------
     if rank == 0:
-        print(f"Parameters: {n_params:,}")
-    
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", patience=CFG.LR_PATIENCE, factor=CFG.LR_FACTOR
-    )
-    
-    # Mixed precision
-    use_amp = torch.cuda.is_available()
-    scaler = GradScaler() if use_amp else None
-    
+        exp_dir = make_experiment_dir("..", args.experiment_name)
+    else:
+        exp_dir = None
+    exp_dir = broadcast_object_from_rank0(exp_dir)
+
     if rank == 0:
-        print(f"Mixed precision: {use_amp}")
-        print(f"\nStarting training for {args.epochs} epochs...")
-    
+        (Path(exp_dir) / "evaluation").mkdir(parents=True, exist_ok=True)
+        # Save config immediately (single-rank)
+        with open(os.path.join(exp_dir, "config.json"), "w") as f:
+            json.dump(vars(args), f, indent=2)
+        # Persist scalers (rank 0 only)
+        save_scalers_rank0(scaler_params, exp_dir)
+
+    # -----------------------------
     # Training loop
+    # -----------------------------
     best_val_acc = -1.0
-    
+    best_epoch = -1
+    start_time = time.time()
+
     for epoch in range(1, args.epochs + 1):
-        epoch_start = time.time()
-        
-        # Set epoch for sampler (important for shuffling)
-        train_sampler.set_epoch(epoch)
-        
-        # Train
-        tr_loss, tr_acc = train_one_epoch(
-            model, train_loader, optimizer, device, rank,
-            grad_clip=CFG.GRAD_CLIP, scaler=scaler
-        )
-        
-        # Evaluate
-        val_loss, val_acc = evaluate(model, val_loader, device, rank)
-        
-        # Reduce metrics across all processes
         if world_size > 1:
-            tr_loss, tr_acc = reduce_metrics(tr_loss, tr_acc, world_size)
-            val_loss, val_acc = reduce_metrics(val_loss, val_acc, world_size)
-        
-        epoch_time = time.time() - epoch_start
-        
-        # Step scheduler
-        if scheduler is not None:
-            scheduler.step(val_acc)
-        
-        # Print and save (only rank 0)
-        if rank == 0:
-            print(
-                f"Epoch {epoch:03d} | "
-                f"train loss {tr_loss:.4f} acc {tr_acc:.4f} | "
-                f"val loss {val_loss:.4f} acc {val_acc:.4f} | "
-                f"time {epoch_time:.1f}s"
+            train_sampler.set_epoch(epoch)
+        model.train()
+
+        loss_sum = torch.tensor(0.0, device=device)
+        correct_sum = torch.tensor(0.0, device=device)
+        count_sum = torch.tensor(0.0, device=device)
+
+        for batch in train_loader:
+            loss, correct, count = step(model, batch, device, criterion, scaler, optimizer)
+            loss_sum += loss * count
+            correct_sum += correct
+            count_sum += torch.tensor(count, device=device)
+
+        # Reduce across ranks
+        reduce_tensor(loss_sum)
+        reduce_tensor(correct_sum)
+        reduce_tensor(count_sum)
+
+        train_loss = (loss_sum / count_sum).item() if count_sum.item() > 0 else 0.0
+        train_acc = (correct_sum / count_sum).item() if count_sum.item() > 0 else 0.0
+
+        val_loss, val_acc = evaluate(model, val_loader, device, criterion)
+
+        if get_rank() == 0:
+            epoch_time = time.time() - start_time
+            rank0_print(
+                f"Epoch {epoch:03d} | train loss {train_loss:.4f} acc {train_acc:.4f} | "
+                f"val loss {val_loss:.4f} acc {val_acc:.4f} | time {epoch_time:.1f}s"
             )
-            
+
+            # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                model_to_save = model.module if hasattr(model, 'module') else model
-                torch.save({
-                    "model_state_dict": model_to_save.state_dict(),
-                    "epoch": epoch,
-                    "val_acc": val_acc,
-                }, best_model_path)
-                print(f"  ↳ saved best model (val_acc={val_acc:.4f})")
-        
-        # Synchronize
-        if dist.is_initialized():
+                best_epoch = epoch
+                torch.save(
+                    (model.module if isinstance(model, DDP) else model).state_dict(),
+                    os.path.join(exp_dir, "best_model.pt"),
+                )
+
+        if is_dist():
             dist.barrier()
-    
-    # Final evaluation (only rank 0)
+
+    # -----------------------------
+    # Final evaluation on test set
+    # -----------------------------
+    # Load best weights on all ranks for consistent evaluation
     if rank == 0:
-        print("\n" + "="*80)
-        print("FINAL EVALUATION")
-        print("="*80)
-        
-        ckpt = torch.load(best_model_path, map_location=device, weights_only=False)
-        model_to_load = model.module if hasattr(model, 'module') else model
-        model_to_load.load_state_dict(ckpt["model_state_dict"])
-        
-        test_loss, test_acc = evaluate(model, test_loader, device, rank)
-        
-        print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
-        print(f"Best  | val acc {best_val_acc:.4f} (epoch {ckpt['epoch']})")
-        
+        best_path = os.path.join(exp_dir, "best_model.pt")
+        state_dict = torch.load(best_path, map_location="cpu")
+    else:
+        state_dict = None
+    # Broadcast state_dict to all ranks
+    state_dict = broadcast_object_from_rank0(state_dict)
+    (model.module if isinstance(model, DDP) else model).load_state_dict(state_dict)
+
+    test_loss, test_acc = evaluate(model, test_loader, device, criterion)
+
+    # Log summary (rank 0 only)
+    if rank == 0:
         summary = {
-            "final_test_acc": float(test_acc),
             "final_test_loss": float(test_loss),
+            "final_test_acc": float(test_acc),
             "best_val_acc": float(best_val_acc),
-            "best_epoch": int(ckpt['epoch']),
-            "total_epochs": args.epochs,
-            "world_size": world_size,
-            "effective_batch_size": args.batch_size * world_size,
+            "best_epoch": int(best_epoch),
+            "results_dir": exp_dir,
         }
-        
-        with open(output_dir / "summary.json", 'w') as f:
+        with open(os.path.join(exp_dir, "summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
-        
-        print(f"\n✓ Training complete! Results saved to: {output_dir}")
-    
-    # Cleanup
-    cleanup_distributed()
+
+        rank0_print("\n" + "=" * 80)
+        rank0_print("FINAL EVALUATION")
+        rank0_print("=" * 80)
+        rank0_print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
+        rank0_print(f"Best  | val acc {best_val_acc:.4f} (epoch {best_epoch})\n")
+        rank0_print(f"✓ Training complete! Results saved to: {exp_dir}")
+
+    # -----------------------------
+    # Graceful DDP shutdown
+    # -----------------------------
+    # Fix for TCPStore "Broken pipe"/rendezvous shutdown warnings:
+    # 1) Ensure all ranks reach the barrier after logging/saving
+    # 2) Destroy the process group cleanly
+    if is_dist():
+        # Give rank 0 a moment to finish file I/O
+        time.sleep(1.0)
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
