@@ -261,9 +261,9 @@ def main():
         for i in range(num_gpus):
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
     
-    # Load data
+        # Load data (RAW - no normalization yet to avoid data leakage)
     logger.info(f"Loading dataset: {args.data}")
-    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True,normalize=True)
+    X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
     L = X.shape[1]
     logger.info(f"Loaded X: {X.shape}, y: {y.shape}")
 
@@ -271,18 +271,20 @@ def main():
     n_total = len(X)
     n_train = int(n_total * CFG.TRAIN_SPLIT)
     n_val = int(n_total * CFG.VAL_SPLIT)
-    
+
     X_train, y_train = X[:n_train], y[:n_train]
     X_val, y_val = X[n_train:n_train+n_val], y[n_train:n_train+n_val]
     X_test, y_test = X[n_train+n_val:], y[n_train+n_val:]
 
     logger.info(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test: {len(X_test):,}")
-    # In main(), after splitting data:
-    logger.info("Applying two-stage normalization...")
+
+    # Apply two-stage normalization (fit on train ONLY, transform all)
+    logger.info("Applying two-stage normalization (FIT ON TRAIN ONLY - no data leakage)...")
     X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = two_stage_normalize(
         X_train, X_val, X_test, pad_value=CFG.PAD_VALUE
     )
     save_scalers(scaler_std, scaler_mm, output_dir)
+    logger.info(f"✓ Scalers saved to {output_dir}/")
     # Check class balance
     train_balance = (np.sum(y_train==0), np.sum(y_train==1))
     val_balance = (np.sum(y_val==0), np.sum(y_val==1))
