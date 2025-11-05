@@ -26,7 +26,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # Import TimeDistributed models
-from model_timedistributed import TimeDistributedCNNSimple, TimeDistributedCNN
+from model import TimeDistributedCNNSimple, TimeDistributedCNN
 
 
 # Copy all utility functions from train_fixed.py
