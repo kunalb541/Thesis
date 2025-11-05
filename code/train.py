@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Transformer-Based Microlensing Classifier with DDP (Fully Debugged)
-
-This script trains a Transformer model to classify microlensing light curves
-(PSPL vs Binary) using PyTorch DistributedDataParallel for multi-GPU/multi-node setups.
+Transformer-Based Microlensing Classifier with DDP (Fixed v5.3)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.2 (Fully Debugged, No Placeholders)
+Version: 5.3 (Fixed DDP, scaler saving, checkpoints)
 """
 
 import os
@@ -25,13 +22,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-# -------------------------------------------------------------------------
-# MODEL AND UTILITIES IMPORT
-# -------------------------------------------------------------------------
 from model import TransformerClassifier, count_parameters
-from utils import load_npz_dataset
+from utils import load_npz_dataset, two_stage_normalize
 
 
 # -------------------------------------------------------------------------
@@ -93,54 +86,6 @@ class MicrolensingDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
-
-
-# -------------------------------------------------------------------------
-# NORMALIZATION
-# -------------------------------------------------------------------------
-
-def normalize_data(X_train, X_val, X_test, pad_value=-1.0):
-    """Standard + MinMax normalization (ignores padded values)."""
-    N_train, C, T = X_train.shape
-    N_val, N_test = X_val.shape[0], X_test.shape[0]
-    F = C * T
-
-    X_train_flat = X_train.reshape(N_train, F)
-    X_val_flat = X_val.reshape(N_val, F)
-    X_test_flat = X_test.reshape(N_test, F)
-
-    pad_train = (X_train_flat == pad_value)
-    pad_val = (X_val_flat == pad_value)
-    pad_test = (X_test_flat == pad_value)
-
-    means = np.zeros(F, dtype=np.float32)
-    for j in range(F):
-        valid = X_train_flat[:, j] != pad_value
-        means[j] = X_train_flat[valid, j].mean() if valid.any() else 0.0
-
-    X_train_filled = np.where(pad_train, means, X_train_flat)
-    X_val_filled = np.where(pad_val, means, X_val_flat)
-    X_test_filled = np.where(pad_test, means, X_test_flat)
-
-    scaler_std = StandardScaler()
-    X_train_std = scaler_std.fit_transform(X_train_filled)
-    X_val_std = scaler_std.transform(X_val_filled)
-    X_test_std = scaler_std.transform(X_test_filled)
-
-    scaler_mm = MinMaxScaler((0, 1))
-    X_train_norm = scaler_mm.fit_transform(X_train_std)
-    X_val_norm = scaler_mm.transform(X_val_std)
-    X_test_norm = scaler_mm.transform(X_test_std)
-
-    X_train_norm[pad_train] = pad_value
-    X_val_norm[pad_val] = pad_value
-    X_test_norm[pad_test] = pad_value
-
-    X_train_norm = X_train_norm.reshape(N_train, C, T)
-    X_val_norm = X_val_norm.reshape(N_val, C, T)
-    X_test_norm = X_test_norm.reshape(N_test, C, T)
-
-    return X_train_norm, X_val_norm, X_test_norm, scaler_std, scaler_mm
 
 
 # -------------------------------------------------------------------------
@@ -235,13 +180,31 @@ def main():
     log_main(f"[Rank {rank}] Initialized DDP (world_size={world_size}, device={device})", rank)
 
     # ------------------------ Load Data ------------------------
+    log_main("Loading dataset...", rank)
     X, y, _, meta = load_npz_dataset(args.data, apply_perm=True)
     pad_value = meta.get("PAD_VALUE", -1.0)
 
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.4, stratify=y, random_state=args.seed)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=args.seed)
+    # Ensure 3D
+    if X.ndim == 2:
+        X = X[:, None, :]
 
-    X_train, X_val, X_test, scaler_std, scaler_mm = normalize_data(X_train, X_val, X_test, pad_value)
+    log_main(f"Data shape: {X.shape}, Labels: {y.shape}", rank)
+
+    # Split
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.4, stratify=y, random_state=args.seed
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=args.seed
+    )
+
+    log_main(f"Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}", rank)
+
+    # Normalize
+    log_main("Normalizing data...", rank)
+    X_train, X_val, X_test, scaler_std, scaler_mm = two_stage_normalize(
+        X_train, X_val, X_test, pad_value
+    )
 
     train_ds = MicrolensingDataset(X_train, y_train)
     val_ds = MicrolensingDataset(X_val, y_val)
@@ -251,14 +214,21 @@ def main():
     val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if is_ddp else None
     test_sampler = DistributedSampler(test_ds, num_replicas=world_size, rank=rank, shuffle=False) if is_ddp else None
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler,
-                              shuffle=(train_sampler is None), num_workers=args.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size * 2, sampler=val_sampler,
-                            shuffle=False, num_workers=args.num_workers, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size * 2, sampler=test_sampler,
-                             shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, sampler=train_sampler,
+        shuffle=(train_sampler is None), num_workers=args.num_workers, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=args.batch_size * 2, sampler=val_sampler,
+        shuffle=False, num_workers=args.num_workers, pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=args.batch_size * 2, sampler=test_sampler,
+        shuffle=False, num_workers=args.num_workers, pin_memory=True
+    )
 
     # ------------------------ Model Setup ------------------------
+    log_main("Building model...", rank)
     model = TransformerClassifier(
         in_channels=X_train.shape[1],
         n_classes=2,
@@ -276,6 +246,8 @@ def main():
     else:
         model_base = model
 
+    log_main(f"Model parameters: {count_parameters(model_base):,}", rank)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
 
@@ -285,73 +257,123 @@ def main():
         exp_dir = Path(f"../results/{args.experiment_name}_{timestamp}")
         exp_dir.mkdir(parents=True, exist_ok=True)
 
-        config = vars(args)
+        config = vars(args).copy()
         config.update({
             "n_parameters": count_parameters(model_base),
             "world_size": world_size,
-            "data_file": args.data
+            "data_file": args.data,
+            "timestamp": timestamp
         })
         with open(exp_dir / "config.json", "w") as f:
             json.dump(config, f, indent=2)
+
+        # Save scalers
         with open(exp_dir / "scaler_standard.pkl", "wb") as f:
             pickle.dump(scaler_std, f)
         with open(exp_dir / "scaler_minmax.pkl", "wb") as f:
             pickle.dump(scaler_mm, f)
+
+        log_main(f"Experiment directory: {exp_dir}", rank)
     else:
-        dist.barrier()
+        if is_ddp:
+            dist.barrier()
         exp_dir = sorted(Path("../results").glob(f"{args.experiment_name}_*"))[-1]
 
-    # ------------------------ Training Loop ------------------------
-    best_val_acc, patience = 0.0, 0
-
-    for epoch in range(args.epochs):
-        train_loss_local, train_correct_local, train_total_local = train_epoch(model, train_loader, criterion, optimizer, device, is_ddp, epoch)
-        val_loss_local, val_correct_local, val_total_local = evaluate(model, val_loader, criterion, device)
-
-        train_loss, train_acc = aggregate_metrics(train_loss_local, train_correct_local, train_total_local, world_size, device)
-        val_loss, val_acc = aggregate_metrics(val_loss_local, val_correct_local, val_total_local, world_size, device)
-
-        if is_main:
-            print(f"Epoch {epoch+1}/{args.epochs} | Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                patience = 0
-                torch.save(model_base.state_dict(), exp_dir / "best_model.pt")
-            else:
-                patience += 1
-
-        stop_signal = torch.tensor(int(patience >= args.patience), device=device)
-        if is_ddp:
-            dist.broadcast(stop_signal, src=0)
-        if stop_signal.item() == 1:
-            break
-
-    # ------------------------ Evaluation ------------------------
-    if is_main:
-        model_base.load_state_dict(torch.load(exp_dir / "best_model.pt", map_location=device))
-        print(f"\nLoaded best model from {exp_dir}")
+    # Sync
     if is_ddp:
         dist.barrier()
 
-    test_loss_local, test_correct_local, test_total_local = evaluate(model, test_loader, criterion, device)
-    test_loss, test_acc = aggregate_metrics(test_loss_local, test_correct_local, test_total_local, world_size, device)
+    # ------------------------ Training Loop ------------------------
+    log_main("\nStarting training...", rank)
+    best_val_acc, patience_counter = 0.0, 0
+
+    for epoch in range(args.epochs):
+        train_loss_local, train_correct_local, train_total_local = train_epoch(
+            model, train_loader, criterion, optimizer, device, is_ddp, epoch
+        )
+        val_loss_local, val_correct_local, val_total_local = evaluate(
+            model, val_loader, criterion, device
+        )
+
+        train_loss, train_acc = aggregate_metrics(
+            train_loss_local, train_correct_local, train_total_local, world_size, device
+        )
+        val_loss, val_acc = aggregate_metrics(
+            val_loss_local, val_correct_local, val_total_local, world_size, device
+        )
+
+        if is_main:
+            print(f"Epoch {epoch+1:3d}/{args.epochs} | "
+                  f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+                  f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+
+            # Save best model
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                
+                # Save checkpoint
+                checkpoint = {
+                    'model_state_dict': model_base.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'val_acc': val_acc,
+                    'config': config
+                }
+                torch.save(checkpoint, exp_dir / "best_model.pt")
+            else:
+                patience_counter += 1
+
+        # Broadcast early stopping signal
+        stop_signal = torch.tensor(int(patience_counter >= args.patience), device=device)
+        if is_ddp:
+            dist.broadcast(stop_signal, src=0)
+
+        if stop_signal.item() == 1:
+            log_main(f"\nEarly stopping at epoch {epoch+1}", rank)
+            break
+
+    # ------------------------ Evaluation ------------------------
+    log_main("\nEvaluating on test set...", rank)
+    
+    if is_main:
+        checkpoint = torch.load(exp_dir / "best_model.pt", map_location=device)
+        model_base.load_state_dict(checkpoint['model_state_dict'])
+        log_main(f"Loaded best model from epoch {checkpoint['epoch']+1}", rank)
+
+    if is_ddp:
+        dist.barrier()
+
+    test_loss_local, test_correct_local, test_total_local = evaluate(
+        model, test_loader, criterion, device
+    )
+    test_loss, test_acc = aggregate_metrics(
+        test_loss_local, test_correct_local, test_total_local, world_size, device
+    )
 
     if is_main:
-        print(f"\nFinal Test Accuracy: {test_acc:.4f}")
+        log_main(f"\n{'='*60}", rank)
+        log_main(f"FINAL RESULTS", rank)
+        log_main(f"{'='*60}", rank)
+        log_main(f"Best Val Accuracy:  {best_val_acc:.4f} ({best_val_acc*100:.2f}%)", rank)
+        log_main(f"Test Accuracy:      {test_acc:.4f} ({test_acc*100:.2f}%)", rank)
+        log_main(f"Test Loss:          {test_loss:.4f}", rank)
+        log_main(f"{'='*60}", rank)
+
+        # Save results
+        results = {
+            "best_val_acc": float(best_val_acc),
+            "test_acc": float(test_acc),
+            "test_loss": float(test_loss),
+            "epochs_trained": epoch + 1
+        }
         with open(exp_dir / "results.json", "w") as f:
-            json.dump({
-                "best_val_acc": float(best_val_acc),
-                "test_acc": float(test_acc),
-                "test_loss": float(test_loss),
-                "epochs_trained": epoch + 1
-            }, f, indent=2)
+            json.dump(results, f, indent=2)
+
+        log_main(f"\nResults saved to: {exp_dir}", rank)
 
     cleanup_ddp()
 
-
-# -------------------------------------------------------------------------
-# ENTRY POINT
-# -------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()

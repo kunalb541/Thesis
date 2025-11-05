@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-Complete Evaluation Script with Notebook-Style Visualizations
-
-Generates all plots from original notebook:
-1. Three-panel sample predictions (Original, Model Input View, Probabilities)
-2. Confusion matrix
-3. Decision time distribution
-4. Accuracy vs decision time
-5. ROC Curve
+Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.3)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.2 - Debugged and verified imports & plotting logic
+Version: 5.3 - Fixed scaler loading and normalization consistency
 """
 
 import torch
@@ -28,7 +21,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from model import TransformerClassifier
-from utils import load_npz_dataset, apply_scalers_to_data, load_scalers
+from utils import load_npz_dataset, load_scalers, apply_scalers_to_data
 
 
 # ============================================================
@@ -58,7 +51,7 @@ def get_latest_experiment(experiment_name, results_dir='../results'):
     matching = sorted(results_path.glob(f"{experiment_name}_*"))
     if not matching:
         raise ValueError(f"No experiments found matching: {experiment_name} in {results_path.resolve()}")
-    print(f"Found {len(matching)} matching experiments.")
+    print(f"Found {len(matching)} matching experiments, using latest: {matching[-1].name}")
     return matching[-1]
 
 
@@ -90,7 +83,7 @@ def get_decision_times(model, X, device, confidence_threshold=0.8, batch_size=12
 
     for i in tqdm(range(0, N, batch_size), desc="Analyzing decision times"):
         X_batch = torch.from_numpy(X[i:i+batch_size]).float().to(device)
-        logits_seq, _ = model(X_batch, return_sequence=True)  # [B, T_down, 2]
+        logits_seq, _ = model(X_batch, return_sequence=True)
         probs_seq = torch.softmax(logits_seq, dim=-1).cpu().numpy()
 
         for sample_probs in probs_seq:
@@ -151,8 +144,7 @@ def plot_three_panel_sample(
     if decision_made:
         probs_clamped[decision_time_idx-1:] = probs_seq[decision_time_idx-1]
 
-    # Map decision step to timestamp
-    downsample_factor = model.downsample_factor
+    downsample_factor = model.module.downsample_factor if hasattr(model, 'module') else model.downsample_factor
     decision_orig_idx = min(decision_time_idx * downsample_factor, T_orig - 1)
     decision_timestamp = timestamps[decision_orig_idx]
 
@@ -167,7 +159,8 @@ def plot_three_panel_sample(
     non_pad = orig_data != pad_value
     ax1.scatter(timestamps[non_pad], orig_data[non_pad], color='darkcyan', s=30, alpha=0.7)
     ax1.axvline(x=decision_timestamp, color='red', linestyle='--', lw=2)
-    ax1.set_title(f"1. Original Data | True: {true_label_str} | Pred: {pred_label_str}", fontsize=12, fontweight='bold')
+    ax1.set_title(f"1. Original Data | True: {true_label_str} | Pred: {pred_label_str}", 
+                  fontsize=12, fontweight='bold')
     ax1.set_xlabel("Time")
     ax1.grid(True, alpha=0.3)
 
@@ -175,7 +168,8 @@ def plot_three_panel_sample(
     ax2 = axes[1]
     model_input = X_normalized[0, 0, :]
     non_pad_input = model_input != pad_value
-    ax2.scatter(np.arange(T_orig)[non_pad_input], model_input[non_pad_input], color='darkcyan', s=30, alpha=0.7)
+    ax2.scatter(np.arange(T_orig)[non_pad_input], model_input[non_pad_input], 
+                color='darkcyan', s=30, alpha=0.7)
     ax2.axvline(x=decision_orig_idx, color='red', linestyle='--', lw=2)
     ax2.set_title("2. Model Input View (Normalized)", fontsize=12, fontweight='bold')
     ax2.grid(True, alpha=0.3)
@@ -187,7 +181,8 @@ def plot_three_panel_sample(
     ax3.axvline(x=decision_time_idx, color='red', linestyle='--', lw=2)
     ax3.set_ylim([-0.05, 1.05])
     ax3.legend()
-    ax3.set_title("3. Class Probabilities Over Time (Clamped after decision)", fontsize=12, fontweight='bold')
+    ax3.set_title("3. Class Probabilities Over Time (Clamped after decision)", 
+                  fontsize=12, fontweight='bold')
     ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -262,7 +257,7 @@ def plot_roc_curve(y_true, y_probs, output_path):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Transformer model with notebook-style visualizations")
+    parser = argparse.ArgumentParser(description="Evaluate Transformer model")
     parser.add_argument("--experiment_name", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--n_samples", type=int, default=20)
@@ -282,7 +277,7 @@ def main():
     with open(exp_dir / "config.json") as f:
         config = json.load(f)
 
-    print("Loading model...")
+    print("\nLoading model...")
     model = TransformerClassifier(
         in_channels=1,
         n_classes=2,
@@ -296,7 +291,7 @@ def main():
 
     checkpoint = torch.load(exp_dir / "best_model.pt", map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    print("✓ Model weights loaded successfully.")
+    print("✓ Model loaded successfully")
     model.eval()
 
     print("Loading scalers...")
@@ -305,10 +300,11 @@ def main():
     print(f"Loading data: {args.data}")
     X_raw, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
     pad_value = meta.get("PAD_VALUE", -1.0)
+    
     if X_raw.ndim == 2:
         X_raw = X_raw[:, None, :]
 
-    print("Splitting into test set...")
+    print("Splitting into test set (using same split as training)...")
     X_train, X_temp, y_train, y_temp = train_test_split(
         X_raw, y, test_size=0.4, random_state=config.get("seed", 42), stratify=y
     )
@@ -318,12 +314,14 @@ def main():
     print(f"Test shape: {X_test.shape}")
 
     X_test_original = X_test.copy()
+    
+    print("Applying normalization...")
     X_test_normalized = apply_scalers_to_data(X_test, scaler_std, scaler_mm, pad_value=pad_value)
 
     test_dataset = MicrolensingDataset(X_test_normalized, y_test)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-    print("Generating predictions...")
+    print("\nGenerating predictions...")
     y_pred, y_probs, y_true = make_predictions(model, test_loader, device)
 
     print("\nClassification Report:")
@@ -333,31 +331,37 @@ def main():
     eval_dir = exp_dir / "evaluation"
     eval_dir.mkdir(exist_ok=True)
 
-    print("Plotting confusion matrix...")
+    print("\nPlotting confusion matrix...")
     plot_confusion_matrix(y_true, y_pred, eval_dir / "confusion_matrix.png")
 
     print("Plotting ROC curve...")
     roc_auc = plot_roc_curve(y_true, y_probs, eval_dir / "roc_curve.png")
 
     print("Analyzing decision times...")
-    decision_times, dec_preds = get_decision_times(model, X_test_normalized, device,
-                                                   args.confidence_threshold, args.batch_size)
+    decision_times, dec_preds = get_decision_times(
+        model, X_test_normalized, device, args.confidence_threshold, args.batch_size
+    )
 
-    T_down = X_test_normalized.shape[2] // model.downsample_factor
+    downsample_factor = model.module.downsample_factor if hasattr(model, 'module') else model.downsample_factor
+    T_down = X_test_normalized.shape[2] // downsample_factor
     plot_decision_time_distribution(decision_times, T_down, eval_dir / "decision_time_distribution.png")
 
     print("Plotting accuracy vs decision time...")
     thresholds = np.arange(0.5, 1.0, 0.05)
     accuracies, avg_times = [], []
     for thresh in tqdm(thresholds, desc="Threshold sweep"):
-        dec_times, dec_preds = get_decision_times(model, X_test_normalized, device, thresh, args.batch_size)
+        dec_times, dec_preds = get_decision_times(
+            model, X_test_normalized, device, thresh, args.batch_size
+        )
         accuracies.append(np.mean(dec_preds == y_true))
         avg_times.append(dec_times.mean())
 
-    plot_accuracy_vs_decision_time(thresholds, np.array(accuracies), np.array(avg_times),
-                                   eval_dir / "accuracy_vs_decision_time.png")
+    plot_accuracy_vs_decision_time(
+        thresholds, np.array(accuracies), np.array(avg_times),
+        eval_dir / "accuracy_vs_decision_time.png"
+    )
 
-    print(f"Generating {args.n_samples} sample visualizations...")
+    print(f"\nGenerating {args.n_samples} sample visualizations...")
     sample_dir = eval_dir / "samples"
     sample_dir.mkdir(exist_ok=True)
 
@@ -375,6 +379,7 @@ def main():
         "roc_auc": float(roc_auc),
         "confidence_threshold": args.confidence_threshold,
         "decision_time_mean": float(np.mean(decision_times)),
+        "decision_time_median": float(np.median(decision_times)),
         "decision_time_std": float(np.std(decision_times)),
         "classification_report": report
     }
@@ -384,6 +389,10 @@ def main():
 
     print("\n✓ Evaluation complete.")
     print(f"All plots and results saved to: {eval_dir}")
+    print("\nSummary:")
+    print(f"  Accuracy: {summary['accuracy']:.4f} ({summary['accuracy']*100:.2f}%)")
+    print(f"  ROC AUC: {summary['roc_auc']:.4f}")
+    print(f"  Mean decision time: {summary['decision_time_mean']:.1f} steps")
 
 
 if __name__ == "__main__":
