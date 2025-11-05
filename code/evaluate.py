@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py - Model Evaluation (v5.0 - TimeDistributed Compatible)
+evaluate.py - Model Evaluation (v5.2 - Early Detection)
 
 FIXED:
-- Removed hard-coded TDConvClassifier
-- Imports models from model.py
-- Reads config.json to load the correct model (Simple or LSTM)
-- Calls model(x, return_sequence=False) for final prediction
+- Reshapes data to [N, 1, T] after loading.
+- Uses 3D-aware apply_scalers_to_data.
+- Loads TimeDistributedCNN (LSTM) model by default.
+- ADDS efficient `run_early_detection_analysis` that uses
+  return_sequence=True ONCE to evaluate all checkpoints.
 
 Author: Kunal Bhatia
-Version: 5.0
+Version: 5.2
 Date: November 2025
 """
 
@@ -29,15 +30,16 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import (confusion_matrix, classification_report, 
                              roc_curve, auc, precision_recall_curve, 
-                             accuracy_score, precision_score, recall_score, f1_score)
+                             accuracy_score, precision_score, recall_score, f1_score,
+                             roc_auc_score)
 import sys
 import os
 
 # Suppress specific warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-# Import model architectures (matches train.py)
-from model import TimeDistributedCNNSimple, TimeDistributedCNN
+# --- FIX: Import the one true model ---
+from model import TimeDistributedCNN
 
 # Import utilities
 sys.path.insert(0, str(Path(__file__).parent))
@@ -62,9 +64,11 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
     return matching_dirs[0]
 
 
-def evaluate_model(model, X, device, batch_size=128, quiet=False):
+def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
     """
     Evaluate model and return predictions and confidences
+    based on the FINAL timestep (return_sequence=False).
+    X_3d is shape [N, C, T]
     """
     model.eval()
     
@@ -72,44 +76,104 @@ def evaluate_model(model, X, device, batch_size=128, quiet=False):
     confidences = []
     all_probs = []
     
-    n_samples = len(X)
-    num_batches = (n_samples + batch_size - 1) // batch_size
+    n_samples = len(X_3d)
     
     if not quiet:
-        print(f"\nEvaluating {n_samples} samples...")
+        print(f"\nEvaluating {n_samples} samples (final step)...")
     
     with torch.no_grad():
         for i in range(0, n_samples, batch_size):
+            batch_start = i
             batch_end = min(i + batch_size, n_samples)
-            X_batch = X[i:batch_end]
+            X_batch = X_3d[batch_start:batch_end]
             
-            # Input shape [B, T] -> [B, 1, T]
-            X_tensor = torch.from_numpy(X_batch).float().unsqueeze(1).to(device)
+            # Input shape [B, C, T]
+            X_tensor = torch.from_numpy(X_batch).float().to(device)
             
-            # --- FIX: Call model with return_sequence=False ---
-            outputs = model(X_tensor, return_sequence=False)
+            # --- Call model with return_sequence=False ---
+            outputs = model(X_tensor, return_sequence=False) # [B, n_classes]
             probs = torch.softmax(outputs, dim=1)
             
             probs_np = probs.cpu().numpy()
+            preds_np = np.argmax(probs_np, axis=1)
+            confs_np = np.max(probs_np, axis=1)
             
-            for j in range(len(probs_np)):
-                pred_class = np.argmax(probs_np[j])
-                max_conf = np.max(probs_np[j])
-                
-                predictions.append(pred_class)
-                confidences.append(max_conf)
-                all_probs.append(probs_np[j])
+            predictions.extend(preds_np)
+            confidences.extend(confs_np)
+            all_probs.extend(probs_np)
             
             if not quiet and (i // batch_size) % 10 == 0:
-                progress = min(100, int((i / n_samples) * 100))
-                print(f"  Progress: {progress}%", end='\r')
+                print(f"  Progress: {int((i / n_samples) * 100)}%", end='\r')
     
     if not quiet:
-        print(f"  Progress: 100%")
+        print(f"  Progress: 100%     ")
     
     return (np.array(predictions), 
             np.array(confidences), 
             np.array(all_probs))
+
+
+# --- START: Efficient Early Detection Function ---
+@torch.no_grad()
+def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size=128):
+    """
+    Evaluates model accuracy at different observation checkpoints.
+    Uses return_sequence=True ONCE.
+    X_3d is shape [N, C, T]
+    """
+    model.eval()
+    n_samples, C, T = X_3d.shape
+    
+    print("\n" + "=" * 80)
+    print("EARLY DETECTION ANALYSIS (Efficient)")
+    print("=" * 80)
+    
+    # Store results: {checkpoint_str: accuracy}
+    results = {}
+    
+    # Get all sequence predictions in batches
+    # all_logits_seq shape: [N, T, n_classes]
+    all_logits_seq = torch.empty((n_samples, T, 2), dtype=torch.float32, device='cpu')
+
+    print(f"Running model (return_sequence=True) on {n_samples} samples...")
+    for i in range(0, n_samples, batch_size):
+        batch_start = i
+        batch_end = min(i + batch_size, n_samples)
+        X_batch = X_3d[batch_start:batch_end]
+        X_tensor = torch.from_numpy(X_batch).float().to(device)
+        
+        # Get FULL sequence predictions
+        logits_seq_batch = model(X_tensor, return_sequence=True) # [B, T, n_classes]
+        all_logits_seq[batch_start:batch_end] = logits_seq_batch.cpu()
+
+    # Now, check accuracy at each checkpoint
+    print(f"Calculating accuracy at checkpoints...")
+    y_tensor = torch.from_numpy(y).long() # [N]
+    
+    for chk in checkpoints:
+        if chk <= 0 or chk > 1.0:
+            continue
+            
+        # Get timestep index
+        t_idx = int(T * chk) - 1
+        if t_idx < 0: t_idx = 0 # for very small chk
+        
+        # Get all predictions at this specific timestep
+        # logits_at_t shape: [N, n_classes]
+        logits_at_t = all_logits_seq[:, t_idx, :]
+        
+        preds_at_t = torch.argmax(logits_at_t, dim=1) # [N]
+        
+        acc = accuracy_score(y_tensor.numpy(), preds_at_t.numpy())
+        
+        chk_str = f"{chk*100:.0f}%"
+        results[chk_str] = acc
+        
+        print(f"  Accuracy at {chk_str:>4} ({t_idx+1}/{T} steps): {acc:.4f}")
+
+    print("=" * 80)
+    return results
+# --- END: Efficient Early Detection Function ---
 
 
 def plot_results(output_dir, cm, y_true, probs, quiet=False):
@@ -127,7 +191,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
                 cbar_kws={'label': 'Count'})
     plt.xlabel('Predicted', fontsize=12)
     plt.ylabel('True', fontsize=12)
-    plt.title('Confusion Matrix', fontsize=14, fontweight='bold')
+    plt.title('Confusion Matrix (Final Step)', fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(output_dir / 'confusion_matrix.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -149,7 +213,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
         plt.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Random Classifier')
         plt.xlabel('False Positive Rate', fontsize=12)
         plt.ylabel('True Positive Rate', fontsize=12)
-        plt.title('ROC Curve', fontsize=14, fontweight='bold')
+        plt.title('ROC Curve (Final Step)', fontsize=14, fontweight='bold')
         plt.legend(fontsize=11, loc='lower right')
         plt.grid(alpha=0.3)
         plt.tight_layout()
@@ -161,7 +225,6 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
         
         # 3. Precision-Recall Curve
         precision, recall, _ = precision_recall_curve(y_true, y_prob_binary)
-        # Note: Using trapz(recall, precision) is more standard for PR-AUC
         pr_auc = auc(recall, precision) 
         
         plt.figure(figsize=(8, 6))
@@ -169,7 +232,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
                 label=f'PR Curve (AUC = {pr_auc:.3f})', color='darkgreen')
         plt.xlabel('Recall', fontsize=12)
         plt.ylabel('Precision', fontsize=12)
-        plt.title('Precision-Recall Curve', fontsize=14, fontweight='bold')
+        plt.title('Precision-Recall Curve (Final Step)', fontsize=14, fontweight='bold')
         plt.legend(fontsize=11, loc='lower left')
         plt.grid(alpha=0.3)
         plt.tight_layout()
@@ -181,7 +244,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate model (v5.0 - TimeDistributed Compatible)')
+    parser = argparse.ArgumentParser(description='Evaluate model (v5.2 - Early Detection)')
     parser.add_argument("--model", type=str, default=None, 
                        help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, 
@@ -194,21 +257,19 @@ def main():
                        help='Batch size for inference')
     parser.add_argument("--quiet", action='store_true', 
                        help='Suppress progress messages')
+    # --- New flag for early detection ---
+    parser.add_argument("--early_detection", action='store_true',
+                       help='Run early detection analysis')
+    
     args = parser.parse_args()
     
-    # Auto-detect model and output_dir if not provided
+    # Auto-detect model and output_dir
     if args.model is None or args.output_dir is None:
         if args.experiment_name is None:
-            raise ValueError(
-                "Must provide either --model and --output_dir, "
-                "OR --experiment_name for auto-detection"
-            )
-        
+            raise ValueError("Must provide --model/--output_dir OR --experiment_name")
         results_dir = find_latest_results_dir(args.experiment_name)
-        
         if not args.quiet:
             print(f"✓ Auto-detected: {results_dir}")
-        
         if args.model is None:
             args.model = str(results_dir / "best_model.pt")
         if args.output_dir is None:
@@ -221,7 +282,7 @@ def main():
     
     if not args.quiet:
         print("=" * 80)
-        print("MODEL EVALUATION (v5.0 - TimeDistributed Compatible)")
+        print("MODEL EVALUATION (v5.2 - Early Detection)")
         print("=" * 80)
         print(f"\nModel: {args.model}")
         print(f"Data: {args.data}")
@@ -237,122 +298,94 @@ def main():
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, 
                                               normalize=False)
     
-    if not args.quiet:
-        print(f"\n✓ Loaded {len(X)} samples")
-        print(f"  Shape: {X.shape}")
-        print(f"  Classes: {np.unique(y, return_counts=True)}")
-    
+    # --- START FIX: Reshape X to 3D [N, 1, T] ---
+    if X.ndim == 2:
+        X = X[:, None, :] # [N, T] -> [N, 1, T]
+        if not args.quiet:
+            print(f"✓ Reshaped X to 3D: {X.shape}")
+    # --- END FIX ---
+
     # Load scalers
     try:
         scaler_std, scaler_mm = load_scalers(results_dir)
         if not args.quiet:
             print(f"✓ Loaded scalers from {results_dir}")
     except Exception as e:
-        print(f"⚠ Warning: Could not load scalers: {e}")
-        print("  Using data as-is (may affect accuracy)")
+        print(f"⚠ Warning: Could not load scalers: {e}. Using data as-is.")
         scaler_std = scaler_mm = None
     
     # Apply scalers if available
     if scaler_std is not None and scaler_mm is not None:
-        # apply_scalers_to_data expects (N, F) where F=T
+        # --- FIX: apply_scalers_to_data now expects 3D data ---
         X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
         if not args.quiet:
             print("✓ Applied normalization")
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
     if not args.quiet:
         print(f"\nDevice: {device}")
     
-    # --- FIX: Load model based on config.json ---
+    # --- START FIX: Load TimeDistributedCNN (LSTM) model directly ---
     config_path = results_dir / "config.json"
-    model_type = 'TimeDistributed_Simple'
     config = {}
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)
-            model_type = config.get('model_type', 'TimeDistributed_Simple')
     
-    if model_type == 'TimeDistributed_LSTM':
-        if not args.quiet:
-            print("Loading TimeDistributedCNN (LSTM)...")
-        window_size = config.get('window_size', 50)
-        model = TimeDistributedCNN(
-            in_channels=1, 
-            n_classes=2, 
-            window_size=window_size,
-            use_lstm=True,
-            dropout=0.3 
-        )
-    else:
-        if not args.quiet:
-            print("Loading TimeDistributedCNNSimple...")
-        model = TimeDistributedCNNSimple(
-            in_channels=1, 
-            n_classes=2, 
-            dropout=0.3
-        )
-    # --- End Fix ---
+    if not args.quiet:
+        print("Loading TimeDistributedCNN (LSTM)...")
+    window_size = config.get('window_size', 50)
+    model = TimeDistributedCNN(
+        in_channels=1, 
+        n_classes=2, 
+        window_size=window_size,
+        use_lstm=True,
+        dropout=0.3 
+    )
+    model_type = "TimeDistributed_LSTM"
+    # --- END FIX ---
 
     try:
         ckpt = torch.load(args.model, map_location=device, weights_only=False)
-        # Handle checkpoints saved from DDP
         state_dict = ckpt.get('model_state_dict', ckpt)
-        
         if list(state_dict.keys())[0].startswith('module.'):
             state_dict = {k.replace('module.', ''): v 
                          for k, v in state_dict.items()}
-        
         model.load_state_dict(state_dict)
         model = model.to(device)
-        
         if not args.quiet:
             print(f"✓ Model loaded ({model_type})")
-    
     except Exception as e:
         print(f"❌ Error loading model state_dict: {e}")
-        print("   This often happens if the model architecture in model.py")
-        print("   does not match the saved checkpoint.")
         sys.exit(1)
     
     # Replace PAD_VALUE with 0.0 for CNN
     X_processed = X.copy()
     X_processed[X_processed == CFG.PAD_VALUE] = 0.0
     
-    # Evaluate
+    # Evaluate (Final Step)
     if not args.quiet:
         print("\n" + "=" * 80)
-        print("INFERENCE")
+        print("INFERENCE (Final Timestep)")
         print("=" * 80)
     
-    preds, confs, probs = evaluate_model(model, X_processed, device, 
-                                        batch_size=args.batch_size,
-                                        quiet=args.quiet)
+    preds, confs, probs = evaluate_model_final_step(model, X_processed, device, 
+                                                    batch_size=args.batch_size,
+                                                    quiet=args.quiet)
     
-    # Compute metrics
+    # Compute metrics for final step
     acc = accuracy_score(y, preds)
     precision = precision_score(y, preds, average='weighted', zero_division=0)
     recall = recall_score(y, preds, average='weighted', zero_division=0)
     f1 = f1_score(y, preds, average='weighted', zero_division=0)
-    
-    # Confusion matrix
     cm = confusion_matrix(y, preds)
+    roc_auc = roc_auc_score(y, probs[:, 1]) if len(np.unique(y)) > 1 else None
     
-    # ROC AUC
-    if len(np.unique(y)) > 1:
-        from sklearn.metrics import roc_auc_score
-        try:
-            roc_auc = roc_auc_score(y, probs[:, 1])
-        except:
-            roc_auc = None
-    else:
-        roc_auc = None
-    
-    # Print results
+    # Print results (final step)
     if not args.quiet:
         print("\n" + "=" * 80)
-        print("RESULTS")
+        print("RESULTS (Final Timestep)")
         print("=" * 80)
     
     print(f"\n{'Metric':<20} {'Value':<10}")
@@ -374,19 +407,29 @@ def main():
                                    target_names=['PSPL', 'Binary'],
                                    digits=4))
     
-    # Generate plots
+    # Generate plots (final step)
     plot_results(output_dir, cm, y, probs, quiet=args.quiet)
+    
+    # --- START: Run Early Detection Analysis ---
+    early_detection_results = None
+    if args.early_detection:
+        checkpoints = [0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0]
+        early_detection_results = run_early_detection_analysis(
+            model, X_processed, y, device, checkpoints, args.batch_size
+        )
+    # --- END: Run Early Detection Analysis ---
     
     # Save results
     results_summary = {
-        'accuracy': float(acc),
-        'precision': float(precision),
-        'recall': float(recall),
-        'f1_score': float(f1),
-        'roc_auc': float(roc_auc) if roc_auc is not None else None,
-        'avg_confidence': float(confs.mean()),
-        'min_confidence': float(confs.min()),
-        'max_confidence': float(confs.max()),
+        'final_step_metrics': {
+            'accuracy': float(acc),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1_score': float(f1),
+            'roc_auc': float(roc_auc) if roc_auc is not None else None,
+            'avg_confidence': float(confs.mean()),
+        },
+        'early_detection_accuracy': early_detection_results,
         'confusion_matrix': cm.tolist(),
         'metadata': meta,
         'data_path': str(args.data),
@@ -412,23 +455,7 @@ def main():
         print("EVALUATION COMPLETE")
         print("=" * 80)
     
-    if acc > 0.70:
-        status = "✅ Excellent"
-    elif acc > 0.65:
-        status = "✓ Good"
-    elif acc > 0.55:
-        status = "⚠ Moderate"
-    else:
-        status = "❌ Low"
-    
-    print(f"\n{status} performance: Accuracy = {acc:.4f}")
-    
-    if not args.quiet:
-        print(f"\nKey outputs:")
-        print(f"  - Confusion matrix: {output_dir}/confusion_matrix.png")
-        print(f"  - ROC curve: {output_dir}/roc_curve.png")
-        print(f"  - PR curve: {output_dir}/pr_curve.png")
-        print(f"  - Summary: {output_dir}/evaluation_summary.json")
+    print(f"\nFinal Step Accuracy = {acc:.4f}")
 
 
 if __name__ == "__main__":

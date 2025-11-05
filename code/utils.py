@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Utility functions for data loading and preprocessing - FIXED VERSION
+Utility functions for data loading and preprocessing - FIXED VERSION (v5.2)
 
 Author: Kunal Bhatia
-Date: October 2025
-Version: 3.2 - Fixed normalization bugs and pad handling
+Date: November 2025
+Version: 5.2 - Fixed normalization functions to handle 3D [N, C, T] data.
 """
 
 import json
@@ -19,6 +19,7 @@ import config as CFG
 def _feature_means_ignore_pad(X: np.ndarray, pad_value: float) -> np.ndarray:
     """
     Compute per-feature means ignoring pad_value.
+    Assumes X is 2D [N, F].
     If a feature is fully padded, its mean is set to 0.0.
     """
     if X.ndim != 2:
@@ -37,13 +38,13 @@ def _feature_means_ignore_pad(X: np.ndarray, pad_value: float) -> np.ndarray:
 
 def two_stage_normalize(X_train, X_val, X_test, pad_value=-1.0):
     """
-    Two-stage normalization (StandardScaler then MinMaxScaler).
-    Fits on TRAIN ONLY (after filling pads with per-feature train means),
-    applies to train/val/test, and restores pad_value positions.
+    Two-stage normalization (StandardScaler then MinMaxScaler) for 3D data.
+    Works on [N, C, T] data by flattening to [N, C*T].
+    Fits on TRAIN ONLY.
 
     Parameters
     ----------
-    X_train, X_val, X_test : np.ndarray, shape (N, F)
+    X_train, X_val, X_test : np.ndarray, shape (N, C, T)
         Raw data arrays possibly containing pad_value.
     pad_value : float
         Sentinel for padded cells.
@@ -52,39 +53,39 @@ def two_stage_normalize(X_train, X_val, X_test, pad_value=-1.0):
     -------
     X_train_scaled, X_val_scaled, X_test_scaled, scaler_standard, scaler_minmax
     """
-    # Ensure arrays are float32 and contiguous
-    X_train = np.asarray(X_train, dtype=np.float32, order="C")
-    X_val   = np.asarray(X_val,   dtype=np.float32, order="C")
-    X_test  = np.asarray(X_test,  dtype=np.float32, order="C")
+    # Get original shapes
+    if X_train.ndim != 3 or X_val.ndim != 3 or X_test.ndim != 3:
+        raise ValueError(f"All inputs must be 3D [N, C, T] arrays.")
+    
+    N_train, C, T = X_train.shape
+    N_val = X_val.shape[0]
+    N_test = X_test.shape[0]
+    F = C * T # Total features
+    
+    print(f"Normalizing 3D data by flattening [N, {C}, {T}] -> [N, {F}]")
 
-    # Basic checks
-    if X_train.ndim != 2 or X_val.ndim != 2 or X_test.ndim != 2:
-        raise ValueError("All inputs must be 2D arrays.")
-    F = X_train.shape[1]
-    if X_val.shape[1] != F or X_test.shape[1] != F:
-        raise ValueError("Feature dimension mismatch across splits.")
+    # Flatten to [N, F]
+    X_train_flat = X_train.reshape(N_train, F).astype(np.float32)
+    X_val_flat = X_val.reshape(N_val, F).astype(np.float32)
+    X_test_flat = X_test.reshape(N_test, F).astype(np.float32)
 
     # Remember pad masks
-    train_mask_pad = (X_train == pad_value)
-    val_mask_pad   = (X_val   == pad_value)
-    test_mask_pad  = (X_test  == pad_value)
+    train_mask_pad = (X_train_flat == pad_value)
+    val_mask_pad   = (X_val_flat   == pad_value)
+    test_mask_pad  = (X_test_flat  == pad_value)
 
     # Compute per-feature means on TRAIN ignoring pads
-    means_train = _feature_means_ignore_pad(X_train, pad_value)   # shape (F,)
-    means_train_row_train = np.broadcast_to(means_train, X_train.shape)
-    means_train_row_val   = np.broadcast_to(means_train, X_val.shape)
-    means_train_row_test  = np.broadcast_to(means_train, X_test.shape)
+    means_train = _feature_means_ignore_pad(X_train_flat, pad_value) # [F,]
+    
+    # Fill pads with train feature means
+    X_train_filled = np.where(train_mask_pad, means_train, X_train_flat)
+    X_val_filled   = np.where(val_mask_pad,   means_train, X_val_flat)
+    X_test_filled  = np.where(test_mask_pad,  means_train, X_test_flat)
 
-    # Fill pads with train feature means so transforms are well-defined
-    X_train_filled = np.where(train_mask_pad, means_train_row_train, X_train)
-    X_val_filled   = np.where(val_mask_pad,   means_train_row_val,   X_val)
-    X_test_filled  = np.where(test_mask_pad,  means_train_row_test,  X_test)
-
-    # Stage 1: StandardScaler (fit on TRAIN ONLY, full (N, F) matrix)
-    # Note: We include filled values (equal to means), which do not bias means and only mildly affect variance.
+    # Stage 1: StandardScaler (fit on TRAIN ONLY)
     print("Applying StandardScaler (fit on train only, per-feature)...")
     scaler_standard = StandardScaler(copy=True, with_mean=True, with_std=True)
-    scaler_standard.fit(X_train_filled)  # learns per-feature mean_ and scale_
+    scaler_standard.fit(X_train_filled)  # learns [F,] mean_ and scale_
 
     X_train_std = scaler_standard.transform(X_train_filled)
     X_val_std   = scaler_standard.transform(X_val_filled)
@@ -95,35 +96,37 @@ def two_stage_normalize(X_train, X_val, X_test, pad_value=-1.0):
     scaler_minmax = MinMaxScaler(copy=True, feature_range=(0.0, 1.0))
     scaler_minmax.fit(X_train_std)
 
-    X_train_scaled = scaler_minmax.transform(X_train_std)
-    X_val_scaled   = scaler_minmax.transform(X_val_std)
-    X_test_scaled  = scaler_minmax.transform(X_test_std)
+    X_train_scaled_flat = scaler_minmax.transform(X_train_std)
+    X_val_scaled_flat   = scaler_minmax.transform(X_val_std)
+    X_test_scaled_flat  = scaler_minmax.transform(X_test_std)
 
     # Restore pad_value at original pad positions
-    X_train_scaled[train_mask_pad] = pad_value
-    X_val_scaled[val_mask_pad]     = pad_value
-    X_test_scaled[test_mask_pad]   = pad_value
+    X_train_scaled_flat[train_mask_pad] = pad_value
+    X_val_scaled_flat[val_mask_pad]     = pad_value
+    X_test_scaled_flat[test_mask_pad]   = pad_value
+    
+    # Reshape back to [N, C, T]
+    X_train_scaled = X_train_scaled_flat.reshape(N_train, C, T)
+    X_val_scaled = X_val_scaled_flat.reshape(N_val, C, T)
+    X_test_scaled = X_test_scaled_flat.reshape(N_test, C, T)
 
-    # Print ranges of non-padded values
-    train_nonpad = X_train_scaled[~train_mask_pad]
-    val_nonpad   = X_val_scaled[~val_mask_pad]
-    test_nonpad  = X_test_scaled[~test_mask_pad]
+    # Print ranges
+    train_nonpad = X_train_scaled_flat[~train_mask_pad]
     if train_nonpad.size:
-        print(f"Final ranges (non-padded values):")
-        print(f"  Train: [{train_nonpad.min():.3f}, {train_nonpad.max():.3f}]")
-        print(f"  Val:   [{val_nonpad.min():.3f}, {val_nonpad.max():.3f}]")
-        print(f"  Test:  [{test_nonpad.min():.3f}, {test_nonpad.max():.3f}]")
+        print(f"Final ranges (non-padded): [{train_nonpad.min():.3f}, {train_nonpad.max():.3f}]")
 
-    return X_train_scaled.astype(np.float32, copy=False), \
-           X_val_scaled.astype(np.float32, copy=False), \
-           X_test_scaled.astype(np.float32, copy=False), \
+    return X_train_scaled, X_val_scaled, X_test_scaled, \
            scaler_standard, scaler_minmax
 
 
 def save_scalers(scaler_standard, scaler_minmax, output_dir):
-    """Save scalers for later use during evaluation"""
+    """
+    Save scalers for later use during evaluation.
+    This is now just a wrapper for the DDP-safe function in train.py
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    
     with open(output_dir / "scaler_standard.pkl", 'wb') as f:
         pickle.dump(scaler_standard, f)
     with open(output_dir / "scaler_minmax.pkl", 'wb') as f:
@@ -134,10 +137,6 @@ def save_scalers(scaler_standard, scaler_minmax, output_dir):
 def load_scalers(model_dir):
     """
     Load saved scalers from training directory
-
-    Returns
-    -------
-    scaler_standard, scaler_minmax
     """
     model_dir = Path(model_dir)
     scaler_std_path = model_dir / "scaler_standard.pkl"
@@ -156,50 +155,59 @@ def load_scalers(model_dir):
 
 def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
     """
-    Apply pre-fitted scalers to new data (for evaluation).
-    Transforms the full (N, F) matrix, filling pads with train means implied
-    by the fitted StandardScaler (its mean_), then restores pad_value.
+    Apply pre-fitted scalers to new 3D data [N, C, T].
+    Flattens to [N, C*T], applies 1D scalers, and reshapes back.
 
     Parameters
     ----------
-    X : np.ndarray, shape (N, F)
-    scaler_standard : StandardScaler (already fitted on train)
-    scaler_minmax   : MinMaxScaler  (already fitted on train)
+    X : np.ndarray, shape (N, C, T)
+    scaler_standard : StandardScaler (already fitted on train, 1D)
+    scaler_minmax   : MinMaxScaler  (already fitted on train, 1D)
     pad_value       : float
 
     Returns
     -------
-    X_scaled : np.ndarray, shape (N, F)
+    X_scaled : np.ndarray, shape (N, C, T)
     """
     if X is None:
         raise ValueError("X is None.")
-    if X.ndim != 2:
-        raise ValueError(f"Expected 2D array, got {X.shape}")
+    if X.ndim != 3:
+        raise ValueError(f"Expected 3D array [N, C, T], got {X.shape}")
 
     X = np.asarray(X, dtype=np.float32, order="C")
-    N, F = X.shape
+    N, C, T = X.shape
+    F_flat = C * T
+    
+    # --- FIX: Check scaler features against flattened features ---
     if getattr(scaler_standard, "mean_", None) is None:
         raise ValueError("Standard scaler is not fitted (mean_ missing).")
-    if scaler_standard.mean_.shape[0] != F:
+    F_scaler = scaler_standard.mean_.shape[0]
+    if F_scaler != F_flat:
         raise ValueError(
-            f"Feature mismatch: scaler has {scaler_standard.mean_.shape[0]} features, X has {F}."
+            f"Feature mismatch: scaler has {F_scaler} features, "
+            f"X has [N, {C}, {T}] = {F_flat} features."
         )
 
-    pad_mask = (X == pad_value)
+    # Flatten to [N, F]
+    X_flat = X.reshape(N, F_flat)
+    pad_mask = (X_flat == pad_value)
 
     # Fill pads with per-feature train means (from fitted scaler)
-    means_row = np.broadcast_to(scaler_standard.mean_.astype(X.dtype), X.shape)
-    X_filled = np.where(pad_mask, means_row, X)
+    means_row = np.broadcast_to(scaler_standard.mean_.astype(X.dtype), X_flat.shape)
+    X_filled = np.where(pad_mask, means_row, X_flat)
 
     # Apply transforms
     X_std    = scaler_standard.transform(X_filled)
-    X_scaled = scaler_minmax.transform(X_std)
+    X_scaled_flat = scaler_minmax.transform(X_std)
 
     # Restore pads
-    X_scaled[pad_mask] = pad_value
+    X_scaled_flat[pad_mask] = pad_value
+
+    # Reshape back to [N, C, T]
+    X_scaled = X_scaled_flat.reshape(N, C, T)
 
     # Report range on non-padded entries
-    nonpad = X_scaled[~pad_mask]
+    nonpad = X_scaled_flat[~pad_mask]
     if nonpad.size:
         print(f"✓ Applied scalers. Data range (non-padded): [{nonpad.min():.3f}, {nonpad.max():.3f}]")
 
@@ -209,22 +217,10 @@ def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
 def load_npz_dataset(path, apply_perm=False, normalize=False):
     """
     Load dataset from .npz file
-
-    Args:
-        path: Path to .npz file
-        apply_perm: Whether to apply saved permutation (shuffling)
-        normalize: If True, applies normalization (NOT RECOMMENDED - use for evaluation only with caution)
-
-    Returns:
-        X, y, timestamps, meta
-
-    WARNING: Setting normalize=True will fit scalers on THIS data, which causes
-    data leakage if used on train/val/test before splitting. For training, always
-    use normalize=False and apply two_stage_normalize() after splitting.
     """
     data = np.load(path, allow_pickle=False)
 
-    X = data['X']
+    X = data['X'] # [N, T]
     y = data['y']
     timestamps = data['timestamps']
 
@@ -236,28 +232,15 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
         X = X[perm]
         y = y[perm]
 
-    # Handle label encoding
     if y.dtype.kind in ('U', 'S', 'O'):
         y = np.array([0 if 'PSPL' in str(v).upper() else 1 for v in y], dtype=np.uint8)
     else:
         y = y.astype(np.uint8)
-
-    # WARNING: Only use normalize=True for quick tests or when you know what you're doing
+    
     if normalize:
-        print("⚠️  WARNING: Normalizing during load. This should NOT be used for training!")
-        print("   For training: Load raw data, split, then normalize with two_stage_normalize()")
-
-        # Replace pad with 0 to avoid NaNs, then fit scalers on-the-fly
-        X_tmp = X.copy().astype(np.float32)
-        X_tmp[X_tmp == -1.0] = 0.0
-
-        scaler_standard = StandardScaler()
-        X_tmp = scaler_standard.fit_transform(X_tmp)
-
-        scaler_minmax = MinMaxScaler()
-        X_tmp = scaler_minmax.fit_transform(X_tmp)
-
-        X = X_tmp
+        raise ValueError("normalize=True is deprecated. "
+                         "Load raw data, reshape to 3D, split, "
+                         "then use normalization functions.")
 
     return X, y, timestamps, meta
 
@@ -265,10 +248,6 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
 def check_gpu():
     """
     Check GPU availability and print info
-
-    Returns:
-        device: torch.device
-        num_gpus: int
     """
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
@@ -295,20 +274,20 @@ if __name__ == "__main__":
     print("="*60)
 
     print("\n" + "="*60)
-    print("Testing Scaler Functions:")
+    print("Testing Scaler Functions (3D):")
     print("="*60)
 
-    # Create dummy data
+    # --- FIX: Test with 3D data [N, C, T] ---
     np.random.seed(42)
-    N_train, N_val, N_test, F = 1000, 200, 200, 100
-    X_train = np.random.randn(N_train, F).astype(np.float32)
-    X_val   = np.random.randn(N_val,   F).astype(np.float32)
-    X_test  = np.random.randn(N_test,  F).astype(np.float32)
+    N_train, N_val, N_test, C, T = 1000, 200, 200, 1, 1500
+    X_train = np.random.randn(N_train, C, T).astype(np.float32)
+    X_val   = np.random.randn(N_val,   C, T).astype(np.float32)
+    X_test  = np.random.randn(N_test,  C, T).astype(np.float32)
 
     # Add some padding (-1) to the last 10 features
-    X_train[:, -10:] = -1.0
-    X_val[:,   -10:] = -1.0
-    X_test[:,  -10:] = -1.0
+    X_train[:, :, -10:] = -1.0
+    X_val[:,   :, -10:] = -1.0
+    X_test[:,  :, -10:] = -1.0
 
     print(f"Train shape: {X_train.shape}")
     print(f"Val shape:   {X_val.shape}")
@@ -318,18 +297,20 @@ if __name__ == "__main__":
     X_train_scaled, X_val_scaled, X_test_scaled, scaler_std, scaler_mm = two_stage_normalize(
         X_train, X_val, X_test, pad_value=-1.0
     )
+    
+    print(f"Scaled Train shape: {X_train_scaled.shape}")
 
-    # Apply scalers again to (a copy of) train to verify idempotency on non-padded cells
+    # Apply scalers again
     X_train_check = apply_scalers_to_data(X_train.copy(), scaler_std, scaler_mm, pad_value=-1.0)
 
     # Basic assertions
     assert X_train_scaled.shape == X_train.shape
     assert X_val_scaled.shape   == X_val.shape
     assert X_test_scaled.shape  == X_test.shape
-    # Pads preserved
-    assert np.all(X_train_scaled[:, -10:] == -1.0)
-    assert np.all(X_val_scaled[:,   -10:] == -1.0)
-    assert np.all(X_test_scaled[:,  -10:] == -1.0)
+    assert np.all(X_train_scaled[:, :, -10:] == -1.0)
+    assert np.all(X_val_scaled[:,   :, -10:] == -1.0)
+    assert np.all(X_test_scaled[:,  :, -10:] == -1.0)
+    assert np.allclose(X_train_scaled, X_train_check)
 
-    print("\n✓ Normalization test passed!")
+    print("\n✓ 3D Normalization test passed!")
     print("="*60)

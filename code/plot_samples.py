@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-plot_samples.py - Visualize sample light curves with model predictions
+plot_samples.py - Visualize sample light curves (v5.2)
 
-FIXED (v5.0): 
-- Removed hard-coded TDConvClassifier
-- Imports models from model.py
-- Reads config.json to load the correct model (Simple or LSTM)
+FIXED (v5.2): 
+- Loads TimeDistributedCNN (LSTM) model by default
+- Reshapes data to [N, 1, T] after loading
 - Calls model(x, return_sequence=False) for final prediction
 
 Author: Kunal Bhatia
-Version: 5.0
+Version: 5.2
 """
 
 import numpy as np
@@ -25,8 +24,8 @@ from pathlib import Path
 from tqdm import tqdm
 import json
 
-# Import model architectures (matches train.py)
-from model import TimeDistributedCNNSimple, TimeDistributedCNN
+# --- FIX: Import the one true model ---
+from model import TimeDistributedCNN
 
 from utils import load_npz_dataset, load_scalers, apply_scalers_to_data
 import config as CFG
@@ -47,8 +46,8 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
 
 def plot_sample_predictions(
     model,
-    X_original,
-    X_normalized,
+    X_original_2d, # Original [N, T] data
+    X_normalized_3d, # Normalized [N, 1, T] data
     y,
     timestamps,
     device,
@@ -62,31 +61,31 @@ def plot_sample_predictions(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Process normalized data for model
-    X_processed = X_normalized.copy()
+    X_processed = X_normalized_3d.copy()
     X_processed[X_processed == pad_value] = 0.0
     
     # Get predictions for all selected samples
-    X_subset = X_processed[sample_indices]
+    X_subset = X_processed[sample_indices] # [n_samples, C, T]
     
-    # Input shape [N_samples, T] -> [N_samples, 1, T]
-    X_tensor = torch.from_numpy(X_subset).float().unsqueeze(1).to(device)
+    # Input shape [N_samples, C, T]
+    X_tensor = torch.from_numpy(X_subset).float().to(device)
     
     with torch.no_grad():
-        # --- FIX: Call model with return_sequence=False ---
+        # --- Call model with return_sequence=False ---
         outputs = model(X_tensor, return_sequence=False)  # [N_samples, 2]
         probs = torch.softmax(outputs, dim=1).cpu().numpy()  # [N_samples, 2]
     
-    L = X_original.shape[1]
+    L = X_original_2d.shape[1]
     
     for idx, sample_idx in enumerate(tqdm(sample_indices, desc="Generating plots")):
         true_label = y[sample_idx]
         true_label_str = "PSPL" if true_label == 0 else "Binary"
         
-        # Original unscaled data
-        original_data = X_original[sample_idx]
+        # Original unscaled 2D data
+        original_data_2d = X_original_2d[sample_idx]
         
-        # CNN normalized view
-        cnn_data = X_processed[sample_idx]
+        # CNN normalized view (from 3D data, squeezed)
+        cnn_data = X_processed[sample_idx].squeeze() # [T]
         
         # Model probabilities (from pre-computed batch)
         sample_probs = probs[idx]  # [2]
@@ -105,11 +104,11 @@ def plot_sample_predictions(
         # --- Panel 1: Original UNSCALED Data ---
         ax1 = axes[0]
         
-        non_pad_mask = (original_data != pad_value)
+        non_pad_mask = (original_data_2d != pad_value)
         if np.any(non_pad_mask):
             ax1.scatter(
                 timestamps[non_pad_mask],
-                original_data[non_pad_mask],
+                original_data_2d[non_pad_mask],
                 color='darkcyan',
                 alpha=0.7,
                 s=30,
@@ -126,7 +125,7 @@ def plot_sample_predictions(
         ax2 = axes[1]
         
         cnn_timesteps = np.arange(1, L + 1)
-        non_pad_mask_cnn = (cnn_data != 0.0)
+        non_pad_mask_cnn = (cnn_data != 0.0) # 0.0 is the normalized pad value
         
         if np.any(non_pad_mask_cnn):
             ax2.scatter(
@@ -139,10 +138,6 @@ def plot_sample_predictions(
             )
         
         # Add prediction info
-        colors = ['blue', 'red']
-        labels = ['PSPL', 'Binary']
-        
-        # Show class probabilities as text
         prob_text = f"P(PSPL) = {sample_probs[0]:.3f}\nP(Binary) = {sample_probs[1]:.3f}"
         ax2.text(0.98, 0.98, prob_text, transform=ax2.transAxes,
                 verticalalignment='top', horizontalalignment='right',
@@ -166,7 +161,7 @@ def plot_sample_predictions(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Plot sample predictions (v5.0 - TimeDistributed Compatible)')
+    parser = argparse.ArgumentParser(description='Plot sample predictions (v5.2)')
     parser.add_argument('--model', type=str, default=None, help='Path to trained model')
     parser.add_argument('--data', required=True, help='Path to dataset')
     parser.add_argument('--output_dir', type=str, default=None, help='Output directory')
@@ -196,53 +191,55 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("SAMPLE PREDICTIONS VISUALIZATION (TimeDistributed Compatible)")
+    print("SAMPLE PREDICTIONS VISUALIZATION (v5.2)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
     
-    # Load RAW data
+    # Load RAW data (X_original is 2D [N, T])
     print("\nLoading data...")
-    # Load data, X shape is (N, T)
     X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
     L = X_original.shape[1]
     
+    # --- START FIX: Reshape X to 3D [N, 1, T] for normalization ---
+    if X_original.ndim == 2:
+        X_3d = X_original[:, None, :] # [N, 1, T]
+        print(f"✓ Reshaped X to 3D: {X_3d.shape}")
+    else:
+        X_3d = X_original
+    # --- END FIX ---
+    
     # Load scalers and apply
-    scaler_std, scaler_mm = load_scalers(results_dir)
-    # apply_scalers_to_data expects (N, F) where F=T
-    X_normalized = apply_scalers_to_data(X_original, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+    try:
+        scaler_std, scaler_mm = load_scalers(results_dir)
+        # --- FIX: apply_scalers_to_data now expects 3D data ---
+        X_normalized_3d = apply_scalers_to_data(X_3d, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+    except Exception as e:
+        print(f"⚠ Warning: Could not load or apply scalers: {e}. Using raw data.")
+        X_normalized_3d = X_3d # Fallback
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    # --- FIX: Load model based on config.json ---
+    # --- START FIX: Load TimeDistributedCNN (LSTM) model directly ---
     config_path = results_dir / "config.json"
-    model_type = 'TimeDistributed_Simple'
     config = {}
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)
-            model_type = config.get('model_type', 'TimeDistributed_Simple')
 
-    if model_type == 'TimeDistributed_LSTM':
-        print("Loading TimeDistributedCNN (LSTM)...")
-        window_size = config.get('window_size', 50)
-        model = TimeDistributedCNN(
-            in_channels=1, 
-            n_classes=2, 
-            window_size=window_size,
-            use_lstm=True,
-            dropout=0.3 
-        )
-    else:
-        print("Loading TimeDistributedCNNSimple...")
-        model = TimeDistributedCNNSimple(
-            in_channels=1, 
-            n_classes=2, 
-            dropout=0.3
-        )
-    # --- End Fix ---
+    print("Loading TimeDistributedCNN (LSTM)...")
+    window_size = config.get('window_size', 50)
+    model = TimeDistributedCNN(
+        in_channels=1, 
+        n_classes=2, 
+        window_size=window_size,
+        use_lstm=True,
+        dropout=0.3 
+    )
+    model_type = "TimeDistributed_LSTM"
+    # --- END FIX ---
     
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)
@@ -261,8 +258,8 @@ def main():
     # Generate plots
     plot_sample_predictions(
         model,
-        X_original,
-        X_normalized,
+        X_original,      # Pass 2D original for plotting
+        X_normalized_3d, # Pass 3D normalized for model
         y,
         timestamps,
         device,
@@ -274,8 +271,6 @@ def main():
     print("\n" + "="*80)
     print("VISUALIZATION COMPLETE")
     print("="*80)
-    print(f"\nGenerated files:")
-    print(f"  - {args.n_samples} sample plots: {output_dir}/sample_*.png")
 
 
 if __name__ == "__main__":

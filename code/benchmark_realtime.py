@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-benchmark_realtime.py - Real-time inference performance benchmarking
+benchmark_realtime.py - Real-time inference performance benchmarking (v5.2)
 
-FIXED (v5.0): 
-- Removed hard-coded TDConvClassifier
-- Imports models from model.py
-- Reads config.json to load the correct model (Simple or LSTM)
+FIXED (v5.2): 
+- Loads TimeDistributedCNN (LSTM) model by default
+- Reshapes data to [N, 1, T] after loading
 - Calls model(x, return_sequence=False) for final prediction
 
 Author: Kunal Bhatia
-Version: 5.0
+Version: 5.2
 Date: November 2025
 """
 
@@ -23,8 +22,8 @@ import json
 import time
 from tqdm import tqdm
 
-# Import model architectures (matches train.py)
-from model import TimeDistributedCNNSimple, TimeDistributedCNN
+# --- FIX: Import the one true model ---
+from model import TimeDistributedCNN
 
 from utils import load_npz_dataset, load_scalers, apply_scalers_to_data
 import config as CFG
@@ -43,26 +42,26 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
     return matching_dirs[0]
 
 
-def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=100):
-    """Benchmark inference performance"""
+def benchmark_inference(model, X_3d, device, batch_size=128, n_warmup=10, n_runs=100):
+    """Benchmark inference performance. X_3d is shape [N, C, T]"""
     model.eval()
     
     # Prepare data
-    X_processed = X.copy()
+    X_processed = X_3d.copy()
     X_processed[X_processed == CFG.PAD_VALUE] = 0.0
     
     # Create random batches
-    n_samples = len(X)
+    n_samples = len(X_processed)
     indices = np.random.choice(n_samples, size=n_runs * batch_size, replace=True)
     
     # Warmup
     print(f"\nWarming up ({n_warmup} iterations)...")
     for i in range(n_warmup):
         idx = np.random.choice(n_samples, size=batch_size, replace=False)
-        # Input shape [B, T] -> [B, 1, T]
-        X_batch = torch.from_numpy(X_processed[idx]).float().unsqueeze(1).to(device)
+        # Input shape [B, C, T]
+        X_batch = torch.from_numpy(X_processed[idx]).float().to(device)
         with torch.no_grad():
-            # --- FIX: Call model with return_sequence=False ---
+            # --- Call model with return_sequence=False ---
             _ = model(X_batch, return_sequence=False)
     
     if torch.cuda.is_available():
@@ -74,8 +73,8 @@ def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=10
     
     for i in tqdm(range(n_runs), desc="Benchmarking"):
         idx = indices[i*batch_size:(i+1)*batch_size]
-        # Input shape [B, T] -> [B, 1, T]
-        X_batch = torch.from_numpy(X_processed[idx]).float().unsqueeze(1).to(device)
+        # Input shape [B, C, T]
+        X_batch = torch.from_numpy(X_processed[idx]).float().to(device)
         
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -83,7 +82,7 @@ def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=10
         start = time.perf_counter()
         
         with torch.no_grad():
-            # --- FIX: Call model with return_sequence=False ---
+            # --- Call model with return_sequence=False ---
             _ = model(X_batch, return_sequence=False)
         
         if torch.cuda.is_available():
@@ -121,8 +120,8 @@ def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=10
     return results
 
 
-def measure_memory(model, X, device, batch_size=128):
-    """Measure GPU memory usage"""
+def measure_memory(model, X_3d, device, batch_size=128):
+    """Measure GPU memory usage. X_3d is shape [N, C, T]"""
     if not torch.cuda.is_available():
         return {
             'device': 'CPU',
@@ -131,7 +130,7 @@ def measure_memory(model, X, device, batch_size=128):
     
     model.eval()
     
-    X_processed = X.copy()
+    X_processed = X_3d.copy()
     X_processed[X_processed == CFG.PAD_VALUE] = 0.0
     
     torch.cuda.reset_peak_memory_stats(device)
@@ -139,12 +138,12 @@ def measure_memory(model, X, device, batch_size=128):
     
     baseline_memory = torch.cuda.memory_allocated(device)
     
-    idx = np.random.choice(len(X), size=batch_size, replace=False)
-    # Input shape [B, T] -> [B, 1, T]
-    X_batch = torch.from_numpy(X_processed[idx]).float().unsqueeze(1).to(device)
+    idx = np.random.choice(len(X_processed), size=batch_size, replace=False)
+    # Input shape [B, C, T]
+    X_batch = torch.from_numpy(X_processed[idx]).float().to(device)
     
     with torch.no_grad():
-        # --- FIX: Call model with return_sequence=False ---
+        # --- Call model with return_sequence=False ---
         _ = model(X_batch, return_sequence=False)
     
     torch.cuda.synchronize()
@@ -187,7 +186,7 @@ def print_results_table(results):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Benchmark real-time inference (v5.0 - TimeDistributed Compatible)')
+    parser = argparse.ArgumentParser(description='Benchmark real-time inference (v5.2)')
     parser.add_argument("--model", type=str, default=None, help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, help='Path to test data')
     parser.add_argument("--output_dir", type=str, default=None, help='Output directory')
@@ -215,7 +214,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("REAL-TIME INFERENCE BENCHMARK (TimeDistributed Compatible)")
+    print("REAL-TIME INFERENCE BENCHMARK (v5.2)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
@@ -229,41 +228,41 @@ def main():
         indices = np.random.choice(len(X), args.n_samples, replace=False)
         X = X[indices]
     
-    scaler_std, scaler_mm = load_scalers(results_dir)
-    # apply_scalers_to_data expects (N, F) where F=T
-    X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+    # --- START FIX: Reshape X to 3D [N, 1, T] ---
+    if X.ndim == 2:
+        X = X[:, None, :] # [N, T] -> [N, 1, T]
+        print(f"✓ Reshaped X to 3D: {X.shape}")
+    # --- END FIX ---
+    
+    try:
+        scaler_std, scaler_mm = load_scalers(results_dir)
+        # --- FIX: apply_scalers_to_data now expects 3D data ---
+        X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+    except Exception as e:
+        print(f"⚠ Warning: Could not load or apply scalers: {e}. Using raw data.")
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    # --- FIX: Load model based on config.json ---
+    # --- START FIX: Load TimeDistributedCNN (LSTM) model directly ---
     config_path = results_dir / "config.json"
-    model_type = 'TimeDistributed_Simple'
     config = {}
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)
-            model_type = config.get('model_type', 'TimeDistributed_Simple')
 
-    if model_type == 'TimeDistributed_LSTM':
-        print("Loading TimeDistributedCNN (LSTM)...")
-        window_size = config.get('window_size', 50)
-        model = TimeDistributedCNN(
-            in_channels=1, 
-            n_classes=2, 
-            window_size=window_size,
-            use_lstm=True,
-            dropout=0.3 
-        )
-    else:
-        print("Loading TimeDistributedCNNSimple...")
-        model = TimeDistributedCNNSimple(
-            in_channels=1, 
-            n_classes=2, 
-            dropout=0.3
-        )
-    # --- End Fix ---
+    print("Loading TimeDistributedCNN (LSTM)...")
+    window_size = config.get('window_size', 50)
+    model = TimeDistributedCNN(
+        in_channels=1, 
+        n_classes=2, 
+        window_size=window_size,
+        use_lstm=True,
+        dropout=0.3 
+    )
+    model_type = "TimeDistributed_LSTM"
+    # --- END FIX ---
     
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)
@@ -275,7 +274,7 @@ def main():
     model = model.to(device)
     print(f"✓ Model loaded ({model_type})")
     
-    # Benchmark
+    # Benchmark (passing 3D data)
     results = benchmark_inference(model, X, device, batch_size=args.batch_size, n_runs=args.n_runs)
     print_results_table(results)
     
@@ -315,13 +314,6 @@ def main():
     print(f"   Latency per event: {latency_per_event:.3f} ms")
     print(f"   Throughput: {throughput:.0f} events/sec")
     
-    lsst_alerts_per_night = 10000
-    time_to_process = (lsst_alerts_per_night / throughput) / 60
-    print(f"\n📊 LSST Context:")
-    print(f"   Alerts/night: {lsst_alerts_per_night:,}")
-    print(f"   Time to process: {time_to_process:.1f} minutes")
-    print(f"   ✅ Real-time capable!" if time_to_process < 60 else "   ⚠️  May need optimization")
-
 
 if __name__ == "__main__":
     main()
