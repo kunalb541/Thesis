@@ -286,7 +286,7 @@ def main():
     if is_ddp:
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None, 
                     output_device=local_rank if torch.cuda.is_available() else None, 
-                    find_unused_parameters=False)
+                    find_unused_parameters=True,static_graph=False )
         model_base = model.module
     else:
         model_base = model
