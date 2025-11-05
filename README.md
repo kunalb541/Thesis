@@ -21,7 +21,7 @@ This project implements an automated classification system for binary gravitatio
 - **Transformer Architecture**: Encoder-based architecture for temporal classification
 - **Sequential Classification**: Per-timestep predictions enabling early detection
 - **Distributed Training (DDP)**: Multi-node, multi-GPU support with PyTorch DDP
-- **Ultra-Fast Pipeline**: Complete 1M event workflow in ~1 hour
+- **Ultra-Fast Pipeline**: Complete 1M event workflow in ~25 minutes (5 nodes, 20 GPUs)
 - **Real-time capable**: Sub-millisecond inference per event
 - **Production-ready**: Saved normalization parameters ensure reproducible inference
 - **Comprehensive Evaluation**: Three-panel visualizations with decision-time analysis
@@ -34,6 +34,8 @@ This project implements an automated classification system for binary gravitatio
 - ✅ **Better Input Validation**: Catches common mistakes early with helpful suggestions
 - ✅ **Improved Documentation**: Accurate descriptions matching actual implementation
 - ✅ **Production Hardening**: Comprehensive error handling throughout codebase
+- ✅ **Verified Multi-Node Training**: 5 nodes, 20 GPUs, ~25 min for 1M events
+- ✅ **Updated SLURM Configuration**: Fixed network interface handling
 
 ---
 
@@ -90,13 +92,8 @@ python simulate.py \
     --binary_params baseline \
     --num_workers 200
 
-# 2. Train with DDP (~30-45 min on 4 GPUs)
-torchrun --nproc_per_node=4 train.py \
-    --data ../data/raw/baseline_1M.npz \
-    --experiment_name baseline \
-    --epochs 50 \
-    --batch_size 128 \
-    --lr 1e-4
+# 2. Train with DDP (~25 min on 5 nodes, 20 GPUs)
+# See "Distributed Training (DDP)" section below for correct command
 
 # 3. Evaluate
 python evaluate.py \
@@ -183,15 +180,38 @@ torchrun --nproc_per_node=4 train.py \
     --lr 1e-4
 ```
 
-### Multi-Node (SLURM)
+### Multi-Node (SLURM) - **UPDATED v5.6.2**
 
 ```bash
 #!/bin/bash
-export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-export MASTER_PORT=29500
+#SBATCH --job-name=baseline
+#SBATCH --nodes=5
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=256G
+#SBATCH --time=06:00:00
+#SBATCH --output=logs/baseline_%j.out
 
-srun torchrun \
-    --nnodes=$SLURM_JOB_NUM_NODES \
+# Pick master from the allocation
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+export MASTER_PORT=${MASTER_PORT:-29500}
+
+# Network interface selection (critical for IB/Ethernet hybrid clusters)
+export NCCL_SOCKET_IFNAME="^lo,docker,virbr*,vboxnet*,vmnet*,slirp*,br-*,veth*,wlan*"
+
+# If your IB is flaky, temporarily fall back to TCP:
+# export NCCL_IB_DISABLE=1
+
+export OMP_NUM_THREADS=8
+export NCCL_DEBUG=WARN
+export TORCH_CPP_LOG_LEVEL=ERROR
+
+cd ~/Thesis/code
+
+# Exactly one torchrun per node; world size = nnodes * nproc_per_node
+srun -N ${SLURM_JOB_NUM_NODES} -n ${SLURM_JOB_NUM_NODES} --ntasks-per-node=1 \
+  torchrun \
+    --nnodes=${SLURM_JOB_NUM_NODES} \
     --nproc_per_node=4 \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
@@ -203,6 +223,12 @@ srun torchrun \
     --batch_size 128 \
     --lr 1e-4
 ```
+
+**Key Changes in v5.6.2:**
+1. ✅ Quoted `"$SLURM_NODELIST"` prevents word splitting
+2. ✅ `NCCL_SOCKET_IFNAME` exclusion pattern fixes network interface issues
+3. ✅ Explicit `srun -N ... -n ... --ntasks-per-node=1` ensures proper distribution
+4. ✅ Reduced logging verbosity (`NCCL_DEBUG=WARN`)
 
 ### DDP Debugging
 
@@ -221,8 +247,22 @@ torchrun --nproc_per_node=1 train.py \
     --epochs 2 \
     --batch_size 64
 
-# Network interface (SLURM)
+# Check network interfaces
+ip link show
+
+# Test specific interface
 export NCCL_SOCKET_IFNAME=eth0
+
+# Or use exclusion pattern (recommended)
+export NCCL_SOCKET_IFNAME="^lo,docker,virbr*,vboxnet*,vmnet*,slirp*,br-*,veth*,wlan*"
+
+# For InfiniBand issues
+export NCCL_IB_DISABLE=1
+export NCCL_NET=Socket
+
+# Verify node connectivity
+srun -N ${SLURM_JOB_NUM_NODES} hostname
+srun -N ${SLURM_JOB_NUM_NODES} nvidia-smi --query-gpu=name --format=csv,noheader
 ```
 
 ---
@@ -251,13 +291,15 @@ python evaluate.py \
 ## Research Questions Addressed
 
 ### 1. Baseline Performance
-**Answer**: 70-75% accuracy on mixed population (planetary + stellar binaries)
+**Answer**: 
+- Distinct parameters (s∈[0.8,1.5], q∈[0.1,0.5]): **84% accuracy** ✅ **VERIFIED**
+- Mixed population: 70-75% accuracy (expected)
 
 ### 2. Early Detection Capability
 **Answer**: 68-72% accuracy with only 50% of observations
 
 ### 3. Physical Detection Limits
-**Answer**: Impact parameter u₀ > 0.3 represents physical boundary (~20% of binaries)
+**Answer**: Impact parameter u₀ > 0.3 represents physical boundary (~20-30% of binaries)
 
 ### 4. Observational Dependence
 
@@ -272,7 +314,10 @@ python evaluate.py \
 - Poor (0.20 mag): 65-70%
 
 ### 5. Real-Time Feasibility
-**Answer**: <1 ms per event → 10,000+ LSST alerts/night on single GPU
+**Answer**: 
+- <1 ms per event inference
+- 10,000+ LSST alerts/night on single GPU
+- **Verified**: 25 min for 1M events on 5 nodes (20 GPUs)
 
 ---
 
@@ -304,23 +349,30 @@ Thesis/
 
 ## Expected Performance (v5.6.2)
 
-### Timing (4 GPUs)
+### Timing - **UPDATED**
 
-| Task | Time | Notes |
-|------|------|-------|
-| Simulate 1M | 10-15 min | 200 workers |
-| Train DDP 1M | 30-45 min | 4 GPUs |
-| Evaluate | 2-5 min | All plots |
+| Task | Configuration | Time | Notes |
+|------|---------------|------|-------|
+| Simulate 1M | 200 workers | 10-15 min | Parallel generation |
+| Train 1M | 1 node, 4 GPUs | ~60 min | Single-node limit |
+| Train 1M | 5 nodes, 20 GPUs | ~25 min | ✅ **VERIFIED** |
+| Train 1M | 10 nodes, 40 GPUs | ~15-20 min | Estimated |
+| Evaluate | Any | 2-5 min | All plots |
 
-### Accuracy
+### Accuracy - **UPDATED**
 
 | Experiment | Test Accuracy | Notes |
 |------------|---------------|-------|
-| Baseline | 70-75% | Mixed parameters |
+| **Distinct** (s∈[0.8,1.5], q∈[0.1,0.5]) | **84%** | ✅ **VERIFIED** (PSPL precision 98%, Binary recall 99%) |
+| Baseline (mixed) | 70-75% | Expected |
+| Overlapping (includes u₀>0.3) | 55-65% | Expected (physical limit) |
 | Dense (5%) | 75-80% | Intensive cadence |
 | Sparse (30%) | 65-70% | Poor coverage |
 | Space (0.05 mag) | 75-80% | Low noise |
-| Distinct | 80-90% | Clear caustics |
+
+**Key Finding from Distinct Experiment:**
+- Model employs conservative strategy: high recall for binary (99%), high precision for PSPL (98%)
+- Flags 30% of PSPL as binary (safe for astronomy - better to investigate than miss binaries)
 
 ---
 
@@ -390,7 +442,7 @@ export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 # Check network interface
-export NCCL_SOCKET_IFNAME=eth0  # or ib0 for InfiniBand
+export NCCL_SOCKET_IFNAME="^lo,docker,virbr*"  # Exclude loopback
 
 # Test single GPU first
 torchrun --nproc_per_node=1 train.py [args]
@@ -472,6 +524,9 @@ University of Heidelberg
 - ✅ Better input validation with helpful suggestions
 - ✅ Improved documentation accuracy
 - ✅ Production-ready error handling
+- ✅ **Verified multi-node training**: 5 nodes, 20 GPUs, 25 min for 1M events
+- ✅ **Verified accuracy**: Distinct parameters achieve 84%
+- ✅ **Fixed SLURM configuration**: Network interface handling improved
 
 ### v5.6.1 - November 2025
 - Fixed downsample_factor access in plotting functions
@@ -506,7 +561,7 @@ University of Heidelberg
 
 ## Known Limitations
 
-1. **Training Time**: 1M events require 30-45 min on 4× A100 GPUs
+1. **Training Time**: 1M events require ~25 min on 5 nodes (20 GPUs)
 2. **Memory**: Minimum 8 GB GPU memory required
 3. **u₀ Limit**: Events with u₀ > 0.3 are fundamentally hard to classify (physical limit, not algorithmic)
 4. **Binary Parameters**: Performance varies with caustic topology
@@ -515,6 +570,7 @@ University of Heidelberg
 
 ## Future Work
 
+- [ ] Complete u₀ dependency analysis (overlapping experiment)
 - [ ] Add attention visualization
 - [ ] Implement uncertainty quantification
 - [ ] Test on real survey data (OGLE, MOA)

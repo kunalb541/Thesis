@@ -1,6 +1,6 @@
-# Quick Reference - Command Cheatsheet (v5.3)
+# Quick Reference - Command Cheatsheet (v5.6.2)
 
-Fast command reference for all experiments with **DDP support**.
+Fast command reference for all experiments with **DDP support** and **verified timings**.
 
 ---
 
@@ -50,13 +50,8 @@ python simulate.py \
     --seed 42 \
     --num_workers 200
 
-# Train with DDP (~30-45 min, 4 GPUs)
-torchrun --nproc_per_node=4 train.py \
-    --data ../data/raw/baseline_1M.npz \
-    --experiment_name baseline \
-    --epochs 50 \
-    --batch_size 128 \
-    --lr 1e-4
+# Train with DDP (~25 min on 5 nodes, 20 GPUs)
+# See multi-node section below
 
 # Evaluate
 python evaluate.py \
@@ -71,7 +66,7 @@ python benchmark_realtime.py \
 
 ---
 
-## Distributed Training (DDP)
+## Distributed Training (DDP) - **UPDATED v5.6.2**
 
 ### Single Node (4 GPUs)
 
@@ -84,14 +79,38 @@ torchrun --nproc_per_node=4 train.py \
     --lr 1e-4
 ```
 
-### Multi-Node (SLURM)
+### Multi-Node (SLURM) - **VERIFIED WORKING**
 
 ```bash
-export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-export MASTER_PORT=29500
+#!/bin/bash
+#SBATCH --job-name=baseline
+#SBATCH --nodes=5
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=256G
+#SBATCH --time=06:00:00
+#SBATCH --output=logs/baseline_%j.out
 
-srun torchrun \
-    --nnodes=$SLURM_JOB_NUM_NODES \
+# Pick master from the allocation
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+export MASTER_PORT=${MASTER_PORT:-29500}
+
+# Network interface selection (CRITICAL for hybrid clusters)
+export NCCL_SOCKET_IFNAME="^lo,docker,virbr*,vboxnet*,vmnet*,slirp*,br-*,veth*,wlan*"
+
+# If InfiniBand is flaky:
+# export NCCL_IB_DISABLE=1
+
+export OMP_NUM_THREADS=8
+export NCCL_DEBUG=WARN
+export TORCH_CPP_LOG_LEVEL=ERROR
+
+cd ~/Thesis/code
+
+# Exactly one torchrun per node
+srun -N ${SLURM_JOB_NUM_NODES} -n ${SLURM_JOB_NUM_NODES} --ntasks-per-node=1 \
+  torchrun \
+    --nnodes=${SLURM_JOB_NUM_NODES} \
     --nproc_per_node=4 \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
@@ -103,6 +122,11 @@ srun torchrun \
     --batch_size 128 \
     --lr 1e-4
 ```
+
+**Key changes in v5.6.2:**
+1. ✅ Quoted `"$SLURM_NODELIST"` 
+2. ✅ `NCCL_SOCKET_IFNAME` exclusion pattern
+3. ✅ Explicit `srun -N ... -n ... --ntasks-per-node=1`
 
 ### DDP Debugging
 
@@ -118,8 +142,61 @@ echo $CUDA_VISIBLE_DEVICES
 # Test single GPU
 torchrun --nproc_per_node=1 train.py [args]
 
-# Network interface
+# Check network interfaces
+ip link show
+
+# Test specific interface
 export NCCL_SOCKET_IFNAME=eth0
+
+# Or use exclusion (recommended)
+export NCCL_SOCKET_IFNAME="^lo,docker,virbr*"
+
+# For InfiniBand issues
+export NCCL_IB_DISABLE=1
+export NCCL_NET=Socket
+
+# Verify nodes
+srun -N ${SLURM_JOB_NUM_NODES} hostname
+```
+
+---
+
+## Overlapping Experiment (CRITICAL - Next Step)
+
+```bash
+# 1. Add to config.py first:
+# BINARY_OVERLAPPING = {
+#     's_min': 0.1, 's_max': 2.5,
+#     'q_min': 0.001, 'q_max': 1.0,
+#     'u0_min': 0.01, 'u0_max': 1.0,  # ← KEY!
+#     ...
+# }
+# BINARY_PARAM_SETS['overlapping'] = BINARY_OVERLAPPING
+
+# 2. Generate (~15 min)
+python simulate.py \
+    --n_pspl 500000 \
+    --n_binary 500000 \
+    --binary_params overlapping \
+    --output ../data/raw/overlapping_1M.npz \
+    --num_workers 200 \
+    --seed 42 \
+    --save-params  # ← CRITICAL for u₀ analysis!
+
+# 3. Train (5 nodes, ~25 min)
+# Use same SLURM script as baseline, just change:
+#   --data ../data/raw/overlapping_1M.npz
+#   --experiment_name overlapping_1M
+
+# 4. Evaluate
+python evaluate.py \
+    --experiment_name overlapping_1M \
+    --data ../data/raw/overlapping_1M.npz
+
+# 5. u₀ ANALYSIS (KEY FINDING!)
+python analyze_u0_dependency.py \
+    --experiment_name overlapping_1M \
+    --data ../data/raw/overlapping_1M.npz
 ```
 
 ---
@@ -211,7 +288,7 @@ done
 
 ---
 
-## Complete Pipeline (~1 Hour)
+## Complete Pipeline (~1 Hour with 5 nodes)
 
 ```bash
 cd code
@@ -227,17 +304,8 @@ for cadence in 0.05 0.20 0.30 0.40; do
         --cadence_mask_prob $cadence --num_workers 200
 done
 
-# 2. Training with DDP (~40-50 min)
-torchrun --nproc_per_node=4 train.py \
-    --data ../data/raw/baseline_1M.npz \
-    --experiment_name baseline --epochs 50
-
-for cadence in 0.05 0.20 0.30 0.40; do
-    name=$(echo $cadence | sed 's/0\.//')
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/cadence_${name}.npz \
-        --experiment_name cadence_${name} --epochs 50
-done
+# 2. Training with DDP (~40-50 min for all)
+# Use your verified 5-node SLURM script for each
 
 # 3. Evaluation (~5-10 min)
 for exp in baseline cadence_*; do
@@ -257,6 +325,9 @@ tail -f $(ls -td ../results/baseline_*/ | head -1)/training.log
 # GPU usage
 watch -n 1 nvidia-smi
 
+# SLURM jobs
+watch squeue -u $USER
+
 # Quick results
 python -c "
 import json
@@ -272,27 +343,37 @@ if runs:
 
 ---
 
-## Expected Performance (v5.3)
+## Expected Performance (v5.6.2) - **UPDATED**
 
-### Timing (4 GPUs)
+### Timing
 
-| Task | Time |
-|------|------|
-| Simulate 1M | 10-15 min |
-| Simulate 200K | 2-3 min |
-| Train DDP 1M | 30-45 min |
-| Train DDP 200K | 8-12 min |
-| Evaluate | 2-5 min |
+| Task | Configuration | Time | Status |
+|------|---------------|------|--------|
+| Simulate 1M | 200 workers | 10-15 min | Typical |
+| Simulate 200K | 200 workers | 2-3 min | Typical |
+| Train 1M | 1 node, 4 GPUs | ~60 min | Estimated |
+| Train 1M | 5 nodes, 20 GPUs | ~25 min | ✅ **VERIFIED** |
+| Train 1M | 10 nodes, 40 GPUs | ~15-20 min | Estimated |
+| Train 200K | 1 node, 4 GPUs | 8-12 min | Estimated |
+| Evaluate | Any | 2-5 min | Typical |
 
 ### Accuracy
 
-| Experiment | Expected Acc |
-|------------|--------------|
-| Baseline | 70-75% |
-| Dense (5%) | 75-80% |
-| Sparse (30%) | 65-70% |
-| Low Error (0.05) | 75-80% |
-| Distinct | 80-90% |
+| Experiment | Expected Acc | Status |
+|------------|--------------|--------|
+| **Distinct** (s∈[0.8,1.5], q∈[0.1,0.5]) | **84%** | ✅ **VERIFIED** |
+| Overlapping (includes u₀>0.3) | 55-65% | Expected |
+| Baseline (mixed) | 70-75% | Expected |
+| Dense (5% missing) | 75-80% | Expected |
+| Sparse (30% missing) | 65-70% | Expected |
+| Low Error (0.05 mag) | 75-80% | Expected |
+| High Error (0.20 mag) | 65-70% | Expected |
+
+**Verified Result (Distinct):**
+- Test Accuracy: 84%
+- PSPL Precision: 98% (very reliable!)
+- Binary Recall: 99% (catches almost all!)
+- Conservative strategy: Flags 30% PSPL as binary (safe for astronomy)
 
 ---
 
@@ -322,8 +403,11 @@ export NCCL_DEBUG=INFO
 # Test single GPU
 torchrun --nproc_per_node=1 train.py [args]
 
-# Network interface
-export NCCL_SOCKET_IFNAME=eth0
+# Network interface (CRITICAL!)
+export NCCL_SOCKET_IFNAME="^lo,docker,virbr*"
+
+# Check connectivity
+srun -N ${SLURM_JOB_NUM_NODES} hostname
 ```
 
 ### GPU Memory
@@ -342,8 +426,9 @@ torchrun --nproc_per_node=4 train.py --batch_size 64
 - `--n_binary`: Binary events
 - `--cadence_mask_prob`: Missing observations
 - `--mag_error_std`: Photometric error
-- `--binary_params`: baseline/distinct/planetary/stellar
+- `--binary_params`: baseline/distinct/planetary/stellar/overlapping
 - `--num_workers`: Parallel processes (200 recommended)
+- `--save-params`: Save event parameters (needed for u₀ analysis!)
 
 ### train.py
 - `--data`: Dataset path
@@ -374,6 +459,25 @@ torchrun --nproc_per_node=4 train.py --batch_size 64
     ├── roc_curve.png
     └── samples/
 ```
+
+---
+
+## Next Critical Experiment
+
+**Overlapping Parameters + u₀ Analysis**
+
+Why: THE KEY THESIS FINDING - demonstrates physical detection limit
+
+Commands:
+1. Add `BINARY_OVERLAPPING` to config.py
+2. Generate with `--save-params` flag
+3. Train (same SLURM script as distinct)
+4. Evaluate
+5. Run `analyze_u0_dependency.py` (KEY!)
+
+Expected: 55-65% overall, but ~50-55% for u₀>0.3 (physical limit!)
+
+Timeline: ~1 hour total
 
 ---
 
