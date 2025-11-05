@@ -7,9 +7,10 @@ FIXED (v5.3):
 - Loads TimeDistributedCNN (LSTM) model by default
 - Loads 3D data [N, 1, T] directly via new utils
 - Removed redundant reshaping code
+- v6.0 FIX: Updated model loading to match simplified CausalCNN
 
 Author: Kunal Bhatia
-Version: 5.3
+Version: 6.0
 Date: November 2025
 """
 
@@ -43,15 +44,21 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
 
 
 def benchmark_inference(model, X_3d, device, batch_size=128, n_warmup=10, n_runs=100):
-    """Benchmark inference performance. X_3d is shape [N, C, T]"""
+    """
+    Benchmark inference performance. X_3d is shape [N, C, T]
+    --- NOTE: X_3d is passed with -1.0 pads, model handles them ---
+    """
     model.eval()
     
-    # Prepare data
-    X_processed = X_3d.copy()
-    X_processed[X_processed == CFG.PAD_VALUE] = 0.0
+    # --- START: PADDING FIX ---
+    # We NO LONGER replace PAD_VALUE with 0.0
+    # We pass the raw X_3d (with -1.0 pads) to the model
+    # X_processed = X_3d.copy()
+    # X_processed[X_processed == CFG.PAD_VALUE] = 0.0 # <-- REMOVED
+    n_samples = len(X_3d)
+    # --- END: PADDING FIX ---
     
     # Create random batches
-    n_samples = len(X_processed)
     indices = np.random.choice(n_samples, size=n_runs * batch_size, replace=True)
     
     # Warmup
@@ -59,9 +66,10 @@ def benchmark_inference(model, X_3d, device, batch_size=128, n_warmup=10, n_runs
     for i in range(n_warmup):
         idx = np.random.choice(n_samples, size=batch_size, replace=False)
         # Input shape [B, C, T]
-        X_batch = torch.from_numpy(X_processed[idx]).float().to(device)
+        X_batch = torch.from_numpy(X_3d[idx]).float().to(device) # Use X_3d
         with torch.no_grad():
             # --- Call model with return_sequence=False ---
+            # --- NOTE: Model now returns (logits, None) ---
             _ = model(X_batch, return_sequence=False)
     
     if torch.cuda.is_available():
@@ -74,7 +82,7 @@ def benchmark_inference(model, X_3d, device, batch_size=128, n_warmup=10, n_runs
     for i in tqdm(range(n_runs), desc="Benchmarking"):
         idx = indices[i*batch_size:(i+1)*batch_size]
         # Input shape [B, C, T]
-        X_batch = torch.from_numpy(X_processed[idx]).float().to(device)
+        X_batch = torch.from_numpy(X_3d[idx]).float().to(device) # Use X_3d
         
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -121,7 +129,10 @@ def benchmark_inference(model, X_3d, device, batch_size=128, n_warmup=10, n_runs
 
 
 def measure_memory(model, X_3d, device, batch_size=128):
-    """Measure GPU memory usage. X_3d is shape [N, C, T]"""
+    """
+    Measure GPU memory usage. X_3d is shape [N, C, T]
+    --- NOTE: X_3d is passed with -1.0 pads, model handles them ---
+    """
     if not torch.cuda.is_available():
         return {
             'device': 'CPU',
@@ -130,17 +141,19 @@ def measure_memory(model, X_3d, device, batch_size=128):
     
     model.eval()
     
-    X_processed = X_3d.copy()
-    X_processed[X_processed == CFG.PAD_VALUE] = 0.0
+    # --- START: PADDING FIX ---
+    # X_processed = X_3d.copy()
+    # X_processed[X_processed == CFG.PAD_VALUE] = 0.0 # <-- REMOVED
+    # --- END: PADDING FIX ---
     
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.empty_cache()
     
     baseline_memory = torch.cuda.memory_allocated(device)
     
-    idx = np.random.choice(len(X_processed), size=batch_size, replace=False)
+    idx = np.random.choice(len(X_3d), size=batch_size, replace=False) # Use X_3d
     # Input shape [B, C, T]
-    X_batch = torch.from_numpy(X_processed[idx]).float().to(device)
+    X_batch = torch.from_numpy(X_3d[idx]).float().to(device) # Use X_3d
     
     with torch.no_grad():
         # --- Call model with return_sequence=False ---
@@ -214,7 +227,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("REAL-TIME INFERENCE BENCHMARK (v5.3)")
+    print("REAL-TIME INFERENCE BENCHMARK (v6.0 - Simplified Causal CNN)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
@@ -250,17 +263,17 @@ def main():
         with open(config_path) as f:
             config = json.load(f)
 
-    print("Loading TimeDistributedCNN (LSTM)...")
-    window_size = config.get('window_size', 50)
+    # --- START: MODEL INSTANTIATION FIX ---
+    print("Loading TimeDistributedCNN (Simplified Causal CNN)...")
     model = TimeDistributedCNN(
         in_channels=1, 
         n_classes=2, 
-        window_size=window_size,
-        use_lstm=True,
-        dropout=0.3 
+        # window_size=window_size, # REMOVED
+        # use_lstm=True,           # REMOVED
+        dropout=config.get('dropout', 0.3) # Get dropout from config
     )
-    model_type = "TimeDistributed_LSTM"
-    # --- END ---
+    model_type = "TimeDistributed_CausalCNN_Simplified"
+    # --- END: MODEL INSTANTIATION FIX ---
     
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)

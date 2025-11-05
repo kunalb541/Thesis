@@ -7,9 +7,10 @@ FIXED (v5.3):
 - Loads TimeDistributedCNN (LSTM) model by default
 - Loads 3D data [N, 1, T] directly via new utils
 - Squeezes 3D raw data to 2D for plotting
+- v6.0 FIX: Updated model loading to match simplified CausalCNN
 
 Author: Kunal Bhatia
-Version: 5.3
+Version: 6.0
 """
 
 import numpy as np
@@ -60,18 +61,21 @@ def plot_sample_predictions(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Process normalized data for model
-    X_processed = X_normalized_3d.copy()
-    X_processed[X_processed == pad_value] = 0.0
+    # --- START: PADDING FIX ---
+    # We NO LONGER replace PAD_VALUE with 0.0
+    # X_processed = X_normalized_3d.copy()
+    # X_processed[X_processed == pad_value] = 0.0 # <-- REMOVED
     
     # Get predictions for all selected samples
-    X_subset = X_processed[sample_indices] # [n_samples, C, T]
+    X_subset = X_normalized_3d[sample_indices] # [n_samples, C, T]
+    # --- END: PADDING FIX ---
     
     # Input shape [N_samples, C, T]
     X_tensor = torch.from_numpy(X_subset).float().to(device)
     
     with torch.no_grad():
         # --- Call model with return_sequence=False ---
+        # --- NOTE: Model now returns (logits, None) ---
         outputs, _ = model(X_tensor, return_sequence=False)  # [N_samples, 2]
         probs = torch.softmax(outputs, dim=1).cpu().numpy()  # [N_samples, 2]
     
@@ -85,7 +89,10 @@ def plot_sample_predictions(
         original_data_2d = X_original_2d[sample_idx]
         
         # CNN normalized view (from 3D data, squeezed)
-        cnn_data = X_processed[sample_idx].squeeze() # [T]
+        # --- START: PADDING FIX ---
+        # cnn_data = X_processed[sample_idx].squeeze() # [T] # <-- OLD
+        cnn_data = X_normalized_3d[sample_idx].squeeze() # [T] # <-- NEW
+        # --- END: PADDING FIX ---
         
         # Model probabilities (from pre-computed batch)
         sample_probs = probs[idx]  # [2]
@@ -125,7 +132,10 @@ def plot_sample_predictions(
         ax2 = axes[1]
         
         cnn_timesteps = np.arange(1, L + 1)
-        non_pad_mask_cnn = (cnn_data != 0.0) # 0.0 is the normalized pad value
+        # --- START: PADDING FIX ---
+        # non_pad_mask_cnn = (cnn_data != 0.0) # 0.0 is the normalized pad value # <-- OLD
+        non_pad_mask_cnn = (cnn_data != pad_value) # <-- NEW
+        # --- END: PADDING FIX ---
         
         if np.any(non_pad_mask_cnn):
             ax2.scatter(
@@ -134,7 +144,7 @@ def plot_sample_predictions(
                 color='darkcyan',
                 alpha=0.7,
                 s=30,
-                label='CNN Input (normalized [0,1])'
+                label='CNN Input (normalized [0,1], pads=-1.0)'
             )
         
         # Add prediction info
@@ -146,7 +156,7 @@ def plot_sample_predictions(
         
         ax2.set_title(f"2. CNN Input View (Normalized)\n{title_text}", fontsize=12, fontweight='bold')
         ax2.set_xlabel(f'Sequential Timestep (1 to {L})', fontsize=11)
-        ax2.set_ylabel('Normalized Flux [0,1]', fontsize=11)
+        ax2.set_ylabel('Normalized Flux [0,1] (Pads=-1.0)', fontsize=11)
         ax2.legend(loc='upper left')
         ax2.grid(True, alpha=0.3)
         
@@ -191,7 +201,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("SAMPLE PREDICTIONS VISUALIZATION (v5.3)")
+    print("SAMPLE PREDICTIONS VISUALIZATION (v6.0 - Simplified Causal CNN)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
@@ -225,17 +235,17 @@ def main():
         with open(config_path) as f:
             config = json.load(f)
 
-    print("Loading TimeDistributedCNN (LSTM)...")
-    window_size = config.get('window_size', 50)
+    # --- START: MODEL INSTANTIATION FIX ---
+    print("Loading TimeDistributedCNN (Simplified Causal CNN)...")
     model = TimeDistributedCNN(
         in_channels=1, 
         n_classes=2, 
-        window_size=window_size,
-        use_lstm=True,
-        dropout=0.3 
+        # window_size=window_size, # REMOVED
+        # use_lstm=True,           # REMOVED
+        dropout=config.get('dropout', 0.3) # Get dropout from config
     )
-    model_type = "TimeDistributed_LSTM"
-    # --- END ---
+    model_type = "TimeDistributed_CausalCNN_Simplified"
+    # --- END: MODEL INSTANTIATION FIX ---
     
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)

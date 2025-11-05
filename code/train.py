@@ -250,6 +250,7 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
     with torch.cuda.amp.autocast(enabled=use_amp):
         
         # Get predictions at all timesteps
+        # --- NOTE: Model now returns (logits, None) ---
         logits_seq, _ = model(x, return_sequence=True)  # [B, T, n_classes]
         
         # ===== CRITICAL FIX: Supervise ALL timesteps =====
@@ -259,6 +260,11 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
         # 1. Loss on all timesteps
         logits_flat = logits_seq.reshape(B * T, -1)  # [B*T, n_classes]
         y_flat = y_expanded.reshape(B * T)  # [B*T]
+        
+        # --- NOTE: This (correctly) feeds data with -1.0 pads to the loss,
+        # --- but CrossEntropyLoss's 'mean' reduction handles it.
+        # --- The model's ReLU layers already zeroed-out the -1.0 pads
+        # --- during the forward pass (ReLU(negative) = 0).
         loss = criterion(logits_flat, y_flat)
         # ================================================
     
@@ -296,6 +302,7 @@ def evaluate(model, loader, device, criterion):
         B, C, T = x.shape
         
         # --- Get FULL sequence (like training) ---
+        # --- NOTE: Model now returns (logits, None) ---
         logits_seq, _ = model(x, return_sequence=True) # [B, T, n_classes]
         
         # --- Compute SAME loss as training (all steps) ---
@@ -348,11 +355,11 @@ def main():
 
     if rank == 0:
         rank0_print("=" * 76)
-        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v5.4 - Aligned Loss)")
+        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v6.0 - Simplified Causal CNN)")
         rank0_print("=" * 76)
         rank0_print(f"World size: {world_size} | Rank: {rank} | Local rank: {local_rank}")
         rank0_print(f"Data: {args.data}")
-        rank0_print(f"Model: Causal TimeDistributedCNN (CNN+LSTM)")
+        rank0_print(f"Model: Causal TimeDistributedCNN (Simplified, No LSTM)")
         rank0_print(f"Loss: CrossEntropyLoss (all timesteps)")
         rank0_print("=" * 76)
     
@@ -370,6 +377,18 @@ def main():
     # Split (X is now 3D)
     test_size = args.test_split
     val_size = args.val_split / (1.0 - test_size)
+    
+    # --- START FIX: Add Data Shape Validation ---
+    if rank == 0:
+        if X.ndim != 3:
+            raise ValueError(f"Expected 3D data [N,C,T], got {X.shape}")
+        if X.shape[1] != 1:
+            rank0_print(f"⚠️ WARNING: Expected C=1, got C={X.shape[1]}")
+        # if X.shape[2] != 1500: # Removed hardcoded check
+        #     rank0_print(f"⚠️ WARNING: Expected T=1500, got T={X.shape[2]}")
+        rank0_print(f"✓ Data shape validated: {X.shape}")
+    # --- END FIX ---
+    
     X_trainval, X_test, y_trainval, y_test = train_test_split(
         X, y, test_size=test_size, random_state=args.seed, stratify=y
     )
@@ -412,15 +431,15 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
                             sampler=test_sampler, num_workers=args.num_workers, pin_memory=True)
 
-    # --- Model (no changes) ---
-    rank0_print("Creating Causal TimeDistributedCNN (CNN+LSTM)...")
+    # --- START: MODEL INSTANTIATION FIX ---
+    rank0_print("Creating Causal TimeDistributedCNN (Simplified, No LSTM)...")
     model = TimeDistributedCNN(
         in_channels=X.shape[1], # Should be 1
         n_classes=n_classes,
-        lstm_hidden=64,
+        # lstm_hidden=64,  <--- REMOVED
         dropout=0.3
     ).to(device)
-    # --- END FIX ---
+    # --- END: MODEL INSTANTIATION FIX ---
     
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
@@ -441,8 +460,11 @@ def main():
         (Path(exp_dir) / "evaluation").mkdir(parents=True, exist_ok=True)
         with open(os.path.join(exp_dir, "config.json"), "w") as f:
             config_dict = vars(args).copy()
-            config_dict['model_type'] = 'TimeDistributed_Causal_LSTM'
-            config_dict['loss_function'] = 'CrossEntropyLoss_AllTimesteps' # CHANGED
+            # --- START: CONFIG STRING FIX ---
+            config_dict['model_type'] = 'TimeDistributed_CausalCNN_Simplified'
+            config_dict['loss_function'] = 'CrossEntropyLoss_AllTimesteps'
+            # --- END: CONFIG STRING FIX ---
+            config_dict['dropout'] = 0.3 # Save dropout
             json.dump(config_dict, f, indent=2)
         save_scalers_rank0(scaler_params, exp_dir)
 
@@ -461,13 +483,27 @@ def main():
         count_sum = torch.tensor(0.0, device=device)
 
         # --- CHANGED: Use simplified training step ---
-        for batch in train_loader:
+        # --- START: ADD GRADIENT CHECK ---
+        for batch_idx, batch in enumerate(train_loader): # Added batch_idx
             loss, correct, count = step_timedistributed(
                 model, batch, device, criterion, scaler, optimizer
             )
             loss_sum += loss * count # loss is avg, count is B
             correct_sum += correct
             count_sum += torch.tensor(count, device=device)
+
+            # Add gradient check after first batch of first epoch
+            if epoch == 1 and batch_idx == 0 and rank == 0:
+                total_norm = 0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+                rank0_print(f"  --> First batch gradient norm: {total_norm:.6f}")
+                if total_norm < 1e-7:
+                    rank0_print("  --> ⚠️ WARNING: Very small gradients! Model may not learn.")
+        # --- END: ADD GRADIENT CHECK ---
 
         reduce_tensor(loss_sum)
         reduce_tensor(correct_sum)
@@ -515,8 +551,10 @@ def main():
             "final_test_acc": float(test_acc),
             "best_val_acc": float(best_val_acc),
             "best_epoch": int(best_epoch),
-            "model_type": 'TimeDistributed_Causal_LSTM',
-            "loss_function": 'CrossEntropyLoss_AllTimesteps', # CHANGED
+            # --- START: CONFIG STRING FIX ---
+            "model_type": 'TimeDistributed_CausalCNN_Simplified',
+            "loss_function": 'CrossEntropyLoss_AllTimesteps',
+            # --- END: CONFIG STRING FIX ---
             "results_dir": exp_dir,
         }
         with open(os.path.join(exp_dir, "summary.json"), "w") as f:

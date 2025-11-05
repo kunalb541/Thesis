@@ -8,9 +8,10 @@ FIXED:
 - No longer needs to reshape data.
 - REPLACED `run_early_detection_analysis` with a memory-efficient
   and truly causal version that uses sequence truncation.
+- v6.0 FIX: Updated model loading to match simplified CausalCNN
 
 Author: Kunal Bhatia
-Version: 5.3
+Version: 6.0
 Date: November 2025
 """
 
@@ -68,6 +69,8 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
     Evaluate model and return predictions and confidences
     based on the FINAL timestep (return_sequence=False).
     X_3d is shape [N, C, T]
+    
+    --- NOTE: X_3d is passed with -1.0 pads, model handles them ---
     """
     model.eval()
     
@@ -90,6 +93,7 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
             X_tensor = torch.from_numpy(X_batch).float().to(device)
             
             # --- Call model with return_sequence=False ---
+            # --- NOTE: Model now returns (logits, None) ---
             outputs, _ = model(X_tensor, return_sequence=False) # [B, n_classes]
             probs = torch.softmax(outputs, dim=1)
             
@@ -120,6 +124,8 @@ def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size
     using sequence truncation. This is memory-efficient and
     guarantees causal evaluation.
     X_3d is shape [N, C, T]
+    
+    --- NOTE: X_3d is passed with -1.0 pads, model handles them ---
     """
     model.eval()
     N, C, T = X_3d.shape
@@ -150,6 +156,7 @@ def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size
             X_tensor = torch.from_numpy(X_batch).float().to(device)
             
             # Get FINAL prediction on the TRUNCATED sequence
+            # --- NOTE: Model now returns (logits, None) ---
             logits, _ = model(X_tensor, return_sequence=False)  # [B, n_classes]
             preds = torch.argmax(logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
@@ -273,7 +280,7 @@ def main():
     
     if not args.quiet:
         print("=" * 80)
-        print("MODEL EVALUATION (v5.3 - Causal Early Detection)")
+        print("MODEL EVALUATION (v6.0 - Causal Simplified CNN)")
         print("=" * 80)
         print(f"\nModel: {args.model}")
         print(f"Data: {args.data}")
@@ -321,18 +328,18 @@ def main():
         with open(config_path) as f:
             config = json.load(f)
     
+    # --- START: MODEL INSTANTIATION FIX ---
     if not args.quiet:
-        print("Loading TimeDistributedCNN (LSTM)...")
-    window_size = config.get('window_size', 50)
+        print("Loading TimeDistributedCNN (Simplified Causal CNN)...")
     model = TimeDistributedCNN(
         in_channels=1, 
         n_classes=2, 
-        window_size=window_size,
-        use_lstm=True,
-        dropout=0.3 
+        # window_size=window_size, # REMOVED
+        # use_lstm=True,           # REMOVED
+        dropout=config.get('dropout', 0.3) # Get dropout from config
     )
-    model_type = "TimeDistributed_LSTM"
-    # --- END ---
+    model_type = "TimeDistributed_CausalCNN_Simplified"
+    # --- END: MODEL INSTANTIATION FIX ---
 
     try:
         ckpt = torch.load(args.model, map_location=device, weights_only=False)
@@ -348,9 +355,14 @@ def main():
         print(f"❌ Error loading model state_dict: {e}")
         sys.exit(1)
     
-    # Replace PAD_VALUE with 0.0 for CNN
-    X_processed = X.copy()
-    X_processed[X_processed == CFG.PAD_VALUE] = 0.0
+    # --- START: PADDING FIX ---
+    # We NO LONGER replace PAD_VALUE with 0.0
+    # The model is trained on -1.0 pads and will be evaluated on -1.0 pads
+    # X_processed = X.copy()
+    # X_processed[X_processed == CFG.PAD_VALUE] = 0.0 # <-- REMOVED
+    
+    # We pass X directly to the evaluation functions
+    # --- END: PADDING FIX ---
     
     # Evaluate (Final Step)
     if not args.quiet:
@@ -358,7 +370,7 @@ def main():
         print("INFERENCE (Final Timestep)")
         print("=" * 80)
     
-    preds, confs, probs = evaluate_model_final_step(model, X_processed, device, 
+    preds, confs, probs = evaluate_model_final_step(model, X, device, # Pass X
                                                     batch_size=args.batch_size,
                                                     quiet=args.quiet)
     
@@ -403,7 +415,7 @@ def main():
     if args.early_detection:
         checkpoints = [0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0]
         early_detection_results = run_early_detection_analysis(
-            model, X_processed, y, device, checkpoints, args.batch_size
+            model, X, y, device, checkpoints, args.batch_size # Pass X
         )
     # --- END: Run Early Detection Analysis ---
     
