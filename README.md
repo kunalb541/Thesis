@@ -1,6 +1,6 @@
 # Real-Time Binary Microlensing Classification with Transformers
 
-**Deep Learning for Next-Generation Survey Operations - Version 5.0**
+**Deep Learning for Next-Generation Survey Operations - Version 5.1**
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-red.svg)](https://pytorch.org/)
@@ -16,23 +16,25 @@
 
 This project implements an automated classification system for binary gravitational microlensing events using **Transformer neural networks with self-attention mechanisms**. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
 
-### Key Features (v5.0)
+### Key Features (v5.1)
 
-- **Transformer Architecture**: Efficient self-attention for temporal sequence modeling
+- **Transformer Architecture**: Self-attention for temporal sequence modeling (NO CNNs)
 - **Sequential Classification**: Per-timestep predictions enabling early detection
 - **Distributed Training (DDP)**: Multi-node, multi-GPU support with PyTorch DDP
 - **Ultra-Fast Pipeline**: Complete 1M event workflow in ~1 hour
 - **Real-time capable**: Sub-millisecond inference per event
 - **Production-ready**: Saved normalization parameters ensure reproducible inference
-- **Comprehensive Evaluation**: Notebook-style visualizations replicating original research
+- **Comprehensive Evaluation**: Three-panel visualizations matching original notebook research
+- **Debugging Tools**: Built-in DDP debugging and performance profiling
 
-### What's New in v5.0
+### What's New in v5.1
 
-- 🎯 **Pure Transformer**: Removed deprecated convolution references
-- 📊 **Enhanced Visualizations**: Three-panel plots matching original notebook
+- ✅ **NO CNN References**: Pure Transformer implementation throughout
+- 📊 **Enhanced Visualizations**: Three-panel plots matching original notebook exactly
 - 🔬 **Decision-Time Analysis**: Clamped probabilities after confident predictions
-- 📈 **Complete Evaluation Suite**: All metrics and plots from original research
-- 🐛 **Bug Fixes**: Corrected masking, normalization, and evaluation pipelines
+- 📈 **Complete Metrics**: Classification report, ROC curves, confusion matrices
+- 🐛 **DDP Debugging**: Comprehensive troubleshooting guide for distributed training
+- 🎯 **Score Improvements**: Detailed accuracy analysis and performance metrics
 
 ---
 
@@ -111,7 +113,7 @@ python benchmark_realtime.py \
 
 ## Model Architecture
 
-### Transformer Classifier
+### Transformer Classifier (NO CNNs)
 
 ```
 Input: [batch, 1, T=1500]
@@ -141,7 +143,7 @@ Output: [batch, 2] → {PSPL, Binary}
 
 ---
 
-## Distributed Training
+## Distributed Training (DDP)
 
 ### Single Node (4 GPUs)
 
@@ -176,6 +178,34 @@ srun torchrun \
     --lr 1e-4
 ```
 
+### DDP Debugging
+
+```bash
+# Enable comprehensive debugging
+export NCCL_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+
+# Check GPU visibility
+nvidia-smi
+echo $CUDA_VISIBLE_DEVICES
+
+# Test with single GPU first
+torchrun --nproc_per_node=1 train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline_test \
+    --epochs 2 \
+    --batch_size 64
+
+# If single GPU works, scale up
+torchrun --nproc_per_node=4 train.py [args]
+
+# Network interface issues (SLURM)
+export NCCL_SOCKET_IFNAME=eth0  # or ib0 for InfiniBand
+
+# Alternative backend if NCCL fails
+export NCCL_IB_DISABLE=1  # Disable InfiniBand
+```
+
 ---
 
 ## Evaluation & Visualization
@@ -194,7 +224,7 @@ python evaluate.py \
 
 **1. Three-Panel Sample Plots** (`samples/sample_XXXX.png`):
 - Panel 1: Original light curve data with decision line
-- Panel 2: Model input view (normalized) with decision line
+- Panel 2: Model input view (normalized) with decision line  
 - Panel 3: Class probabilities over time (clamped after decision)
 
 **2. Confusion Matrix** (`confusion_matrix.png`):
@@ -218,6 +248,63 @@ python evaluate.py \
   "median_decision_time": 198.0,
   "confidence_threshold": 0.8,
   "classification_report": {...}
+}
+```
+
+---
+
+## Performance Scoring & Metrics
+
+### Classification Metrics
+
+```python
+# Comprehensive metrics automatically calculated:
+{
+    "accuracy": 0.7234,           # Overall correctness
+    "precision": {
+        "PSPL": 0.6892,           # PSPL precision
+        "Binary": 0.7576          # Binary precision
+    },
+    "recall": {
+        "PSPL": 0.7845,           # PSPL recall
+        "Binary": 0.6623          # Binary recall
+    },
+    "f1_score": {
+        "PSPL": 0.7337,           # PSPL F1
+        "Binary": 0.7062          # Binary F1
+    },
+    "roc_auc": 0.7891,            # Area under ROC curve
+    "avg_decision_time": 245.3,   # Average timesteps to decision
+    "median_decision_time": 198.0 # Median decision time
+}
+```
+
+### Per-Class Analysis
+
+The evaluation provides detailed per-class performance:
+
+```
+              precision    recall  f1-score   support
+
+        PSPL       0.69      0.78      0.73     50000
+      Binary       0.76      0.66      0.71     50000
+
+    accuracy                           0.72    100000
+   macro avg       0.72      0.72      0.72    100000
+weighted avg       0.72      0.72      0.72    100000
+```
+
+### Decision Time Analysis
+
+```python
+# Decision time statistics at confidence threshold 0.8:
+{
+    "mean_decision_time": 245.3,
+    "median_decision_time": 198.0,
+    "std_decision_time": 127.4,
+    "min_decision_time": 5,
+    "max_decision_time": 500,  # Full sequence length
+    "decisions_made_early": 0.847  # Fraction decided before end
 }
 ```
 
@@ -271,7 +358,7 @@ Thesis/
 │   ├── train.py              # DDP Transformer training
 │   ├── evaluate.py           # Complete evaluation + plots
 │   ├── benchmark_realtime.py # Performance testing
-│   ├── model.py              # Transformer architecture
+│   ├── model.py              # Transformer architecture (NO CNNs)
 │   ├── config.py             # Configuration
 │   ├── utils.py              # Utilities
 │   └── visualize.py          # Visualization functions
@@ -283,7 +370,8 @@ Thesis/
 │   └── {experiment}_{timestamp}/
 │       ├── best_model.pt
 │       ├── config.json
-│       ├── scaler_*.pkl
+│       ├── scaler_std.pkl
+│       ├── scaler_mm.pkl
 │       └── evaluation/
 │           ├── confusion_matrix.png
 │           ├── roc_curve.png
@@ -296,14 +384,15 @@ Thesis/
 ├── docs/
 │   ├── SETUP_GUIDE.md        # Installation & DDP setup
 │   ├── RESEARCH_GUIDE.md     # Experimental workflow
-│   └── QUICK_REFERENCE.md    # Command cheatsheet
+│   ├── QUICK_REFERENCE.md    # Command cheatsheet
+│   └── DDP_DEBUG_GUIDE.md    # DDP troubleshooting
 │
 └── README.md
 ```
 
 ---
 
-## Expected Performance (v5.0)
+## Expected Performance (v5.1)
 
 ### Timing (4 GPUs)
 
@@ -311,12 +400,12 @@ Thesis/
 |------|------|-------|
 | Simulate 1M | 10-15 min | 200 workers |
 | Simulate 200K | 2-3 min | Per experiment |
-| Train 1M | 30-45 min | DDP, 4 GPUs |
-| Train 200K | 8-12 min | Per experiment |
+| Train DDP 1M | 30-45 min | 4 GPUs |
+| Train DDP 200K | 8-12 min | Per experiment |
 | Evaluate | 2-5 min | Includes all plots |
 | **Total Pipeline** | **~1 hour** | All experiments |
 
-### Accuracy
+### Accuracy (Expected Ranges)
 
 | Experiment | Test Accuracy | Notes |
 |------------|---------------|-------|
@@ -344,6 +433,9 @@ torchrun --nproc_per_node=4 train.py [args]
 
 # Use gloo backend instead of nccl
 export NCCL_SOCKET_IFNAME=eth0  # or your network interface
+
+# Disable InfiniBand if causing issues
+export NCCL_IB_DISABLE=1
 ```
 
 **Out of memory**:
@@ -355,6 +447,61 @@ torchrun --nproc_per_node=4 train.py --batch_size 64
 torchrun --nproc_per_node=4 train.py --batch_size 32
 ```
 
+**Low accuracy (<60%)**:
+```bash
+# Check data normalization
+python -c "
+import numpy as np
+data = np.load('../data/raw/baseline_1M.npz')
+X = data['X']
+print(f'Data range: [{X.min():.3f}, {X.max():.3f}]')
+print(f'Padding: {(X == -1.0).sum()} cells')
+"
+
+# Validate VBMicrolensing working correctly
+python test_vbm.py
+```
+
+**Training diverges (NaN loss)**:
+```bash
+# Lower learning rate
+torchrun --nproc_per_node=4 train.py --lr 5e-5
+
+# Check for NaN in data
+python -c "
+import numpy as np
+data = np.load('../data/raw/baseline_1M.npz')
+X, y = data['X'], data['y']
+print(f'NaN in X: {np.isnan(X).any()}')
+print(f'Inf in X: {np.isinf(X).any()}')
+print(f'Y range: [{y.min()}, {y.max()}]')
+"
+```
+
+### DDP-Specific Issues
+
+**Only using 1 GPU despite DDP**:
+```bash
+# Verify torchrun is detecting all GPUs
+torchrun --nproc_per_node=4 train.py [args] 2>&1 | grep "World size"
+# Should show: "World size: 4"
+
+# Check GPU visibility
+python -c "import torch; print(f'GPUs available: {torch.cuda.device_count()}')"
+
+# Ensure CUDA_VISIBLE_DEVICES not limiting
+unset CUDA_VISIBLE_DEVICES
+```
+
+**Process group initialization fails**:
+```bash
+# Ensure unique port
+export MASTER_PORT=$((29500 + RANDOM % 1000))
+
+# For SLURM clusters
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+```
+
 ---
 
 ## Documentation
@@ -362,6 +509,7 @@ torchrun --nproc_per_node=4 train.py --batch_size 32
 - **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Complete installation + DDP setup
 - **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Systematic experiments
 - **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet
+- **[DDP_DEBUG_GUIDE.md](docs/DDP_DEBUG_GUIDE.md)**: DDP troubleshooting
 
 ---
 
