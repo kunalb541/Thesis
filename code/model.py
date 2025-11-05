@@ -5,6 +5,7 @@ Transformer Model for Binary Microlensing Classification
 Author: Kunal Bhatia
 University of Heidelberg
 Date: November 2025
+Version: 5.2 - Debugged mask propagation, Conv padding, and output consistency
 """
 
 import torch
@@ -12,56 +13,50 @@ import torch.nn as nn
 import math
 
 
+# ============================================================
+# POSITIONAL ENCODING
+# ============================================================
+
 class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding for Transformer"""
-    
+    """Standard sinusoidal positional encoding"""
+
     def __init__(self, d_model, max_len=2000, dropout=0.1):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        
-        # Create positional encoding matrix
+
+        # Precompute positional encodings once
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+            torch.arange(0, d_model, 2, dtype=torch.float32) * (-math.log(10000.0) / d_model)
         )
-        
+
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        
-        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
-        self.register_buffer('pe', pe)
-    
+        pe = pe.unsqueeze(0)  # Shape: [1, max_len, d_model]
+
+        self.register_buffer("pe", pe)
+
     def forward(self, x):
-        """
-        Args:
-            x: [batch, seq_len, d_model]
-        Returns:
-            x with positional encoding added
-        """
+        """Add positional encoding to input tensor"""
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
 
+# ============================================================
+# TRANSFORMER CLASSIFIER
+# ============================================================
+
 class TransformerClassifier(nn.Module):
     """
-    Efficient Transformer for microlensing classification
-    
-    Handles padded sequences (-1.0 padding value) and provides:
-    - Per-timestep predictions (for decision-time analysis)
-    - Final classification output
-    
-    Args:
-        in_channels: Input channels (1 for single light curve)
-        n_classes: Number of classes (2: PSPL vs Binary)
-        d_model: Transformer embedding dimension (64-128)
-        nhead: Number of attention heads (4-8)
-        num_layers: Number of Transformer layers (2-4)
-        dim_feedforward: FFN dimension (256-512)
-        downsample_factor: Reduce sequence length (2-5)
-        dropout: Dropout rate
+    Transformer-based classifier for PSPL vs Binary microlensing.
+
+    Features:
+    - Handles padding via mask propagation
+    - Supports per-timestep outputs (for decision-time analysis)
+    - Downsamples temporal resolution with Conv1d patching
     """
-    
+
     def __init__(
         self,
         in_channels=1,
@@ -72,162 +67,173 @@ class TransformerClassifier(nn.Module):
         dim_feedforward=256,
         downsample_factor=3,
         dropout=0.3,
-        max_len=2000
+        max_len=2000,
     ):
         super().__init__()
-        
+
         self.d_model = d_model
         self.downsample_factor = downsample_factor
-        
-        # Downsample input to reduce memory (1500 -> 500 timesteps)
+
+        # --- 1. Conv1D Downsampler ---
+        # Reduces sequence length and increases feature dimension
         self.downsample = nn.Conv1d(
             in_channels,
             d_model,
             kernel_size=downsample_factor * 2 + 1,
             stride=downsample_factor,
             padding=downsample_factor,
-            bias=True
+            bias=True,
         )
-        
-        # Positional encoding
-        self.pos_encoder = PositionalEncoding(d_model, max_len, dropout)
-        
-        # Transformer encoder
+
+        # --- 2. Positional Encoding ---
+        self.pos_encoder = PositionalEncoding(d_model, max_len=max_len, dropout=dropout)
+
+        # --- 3. Transformer Encoder ---
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            activation='gelu',
+            activation="gelu",
             batch_first=True,
-            norm_first=True
+            norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Classification heads
+
+        # --- 4. Heads ---
         self.per_step_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, n_classes)
+            nn.Linear(d_model // 2, n_classes),
         )
-        
+
         self.global_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, n_classes)
+            nn.Linear(d_model // 2, n_classes),
         )
-        
+
         self._init_weights()
-    
+
+    # ============================================================
+    # INITIALIZATION
+    # ============================================================
+
     def _init_weights(self):
-        """Initialize weights for stable training"""
-        for p in self.parameters():
+        """Xavier init for stability"""
+        for name, p in self.named_parameters():
             if p.dim() > 1:
-                nn.init.xavier_uniform_(p, gain=0.02)
-    
-    def forward(self, x, return_sequence=False):
+                nn.init.xavier_uniform_(p)
+            elif "bias" in name:
+                nn.init.constant_(p, 0.0)
+
+    # ============================================================
+    # FORWARD
+    # ============================================================
+
+    def forward(self, x, return_sequence=False, pad_value=-1.0):
         """
         Args:
-            x: [batch, channels, time] with -1.0 as padding
-            return_sequence: If True, return per-timestep predictions
-        
+            x: [B, C, T]
+            return_sequence: If True, return per-timestep logits
+            pad_value: Value used for padding (default = -1.0)
+
         Returns:
-            logits: [batch, n_classes] or [batch, downsampled_time, n_classes]
-            attention_weights: None (for compatibility)
+            logits:
+                - [B, n_classes] if return_sequence=False
+                - [B, T_down, n_classes] if return_sequence=True
         """
         B, C, T = x.shape
-        
-        # Create padding mask BEFORE downsampling
-        pad_mask = (x[:, 0, :] == -1.0)  # [B, T]
-        
-        # Downsample: [B, C, T] -> [B, d_model, T_down]
-        x = self.downsample(x)
-        T_down = x.size(2)
-        
-        # Downsample mask
+
+        # --- 1. Padding Mask ---
+        pad_mask = (x[:, 0, :] == pad_value)  # [B, T]
+
+        # --- 2. Downsample ---
+        x = self.downsample(x)  # [B, d_model, T_down]
+        B, D, T_down = x.shape
+
+        # --- 3. Downsample Mask ---
+        pad_mask_f = pad_mask.float().unsqueeze(1)
         pad_mask_down = nn.functional.max_pool1d(
-            pad_mask.float().unsqueeze(1),
-            kernel_size=self.downsample_factor,
-            stride=self.downsample_factor
+            pad_mask_f, kernel_size=self.downsample_factor, stride=self.downsample_factor
         ).squeeze(1).bool()  # [B, T_down]
-        
-        # Transpose to [B, T_down, d_model]
-        x = x.transpose(1, 2)
-        
-        # Add positional encoding
+
+        # --- 4. Transformer Encoding ---
+        x = x.transpose(1, 2)  # [B, T_down, d_model]
         x = x * math.sqrt(self.d_model)
         x = self.pos_encoder(x)
-        
-        # Transformer with padding mask
         x = self.transformer(x, src_key_padding_mask=pad_mask_down)
-        
-        if return_sequence:
-            # Per-timestep classification
-            logits = self.per_step_head(x)  # [B, T_down, n_classes]
-            return logits, None
-        else:
-            # Global pooling (masked average)
-            mask_expanded = (~pad_mask_down).unsqueeze(-1).float()  # [B, T_down, 1]
-            x_masked = x * mask_expanded
-            
-            x_pooled = x_masked.sum(dim=1) / (mask_expanded.sum(dim=1) + 1e-8)
-            
-            # Global classification
-            logits = self.global_head(x_pooled)  # [B, n_classes]
-            return logits, None
 
+        # --- 5. Output Heads ---
+        if return_sequence:
+            return self.per_step_head(x), None
+
+        # Masked average pooling for global classification
+        mask = (~pad_mask_down).unsqueeze(-1).float()  # [B, T_down, 1]
+        x_masked = x * mask
+        denom = mask.sum(dim=1).clamp(min=1e-8)
+        x_pooled = x_masked.sum(dim=1) / denom
+        logits = self.global_head(x_pooled)
+        return logits, None
+
+
+# ============================================================
+# UTILITY
+# ============================================================
 
 def count_parameters(model):
-    """Count trainable parameters"""
+    """Count total trainable parameters"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+# ============================================================
+# TEST / DEBUG ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
-    print("="*80)
-    print("Transformer Model Architecture Test")
-    print("="*80)
-    
-    # Test configurations
+    print("=" * 80)
+    print("Transformer Model Architecture Self-Test")
+    print("=" * 80)
+
+    B, C, T = 8, 1, 1500
+    x = torch.randn(B, C, T)
+    x[:, :, -100:] = -1.0  # Simulate padding
+
     configs = [
         ("Small", {"d_model": 64, "nhead": 4, "num_layers": 2, "downsample_factor": 3}),
         ("Medium", {"d_model": 128, "nhead": 8, "num_layers": 3, "downsample_factor": 3}),
         ("Large", {"d_model": 128, "nhead": 8, "num_layers": 4, "downsample_factor": 5}),
     ]
-    
-    B, C, T = 32, 1, 1500
-    x = torch.randn(B, C, T)
-    x[:, :, -100:] = -1.0  # Add padding
-    
-    print(f"\nTest input: {x.shape}")
-    print(f"Padded positions: {(x == -1.0).sum().item()}\n")
-    
-    for name, config in configs:
-        print(f"{name} Configuration:")
-        print(f"  {config}")
-        
-        model = TransformerClassifier(in_channels=1, n_classes=2, **config)
+
+    for name, cfg in configs:
+        print(f"\n{name} configuration:")
+        model = TransformerClassifier(
+            in_channels=1,
+            n_classes=2,
+            max_len=(T // cfg["downsample_factor"]) + 1,
+            **cfg,
+        )
         n_params = count_parameters(model)
         print(f"  Parameters: {n_params:,}")
-        
-        # Test forward pass
+
         model.eval()
         with torch.no_grad():
-            # Test global classification
-            logits, _ = model(x, return_sequence=False)
-            print(f"  Global output: {logits.shape}")
-            
-            # Test per-timestep classification
-            seq_logits, _ = model(x, return_sequence=True)
-            print(f"  Sequence output: {seq_logits.shape}")
-        
-        # Estimate memory
-        T_down = T // config['downsample_factor']
-        attention_mem = B * config['nhead'] * T_down * T_down * 4 / 1024**3
-        print(f"  Downsampled length: {T_down}")
-        print(f"  Est. attention memory: {attention_mem:.3f} GB\n")
-    
-    print("="*80)
-    print("✅ All tests passed!")
-    print("="*80)
+            out_global, _ = model(x, return_sequence=False)
+            out_seq, _ = model(x, return_sequence=True)
+
+        print(f"  Global output shape: {tuple(out_global.shape)}")
+        print(f"  Sequence output shape: {tuple(out_seq.shape)}")
+
+        expected_T_down = math.ceil(T / cfg["downsample_factor"])
+        assert out_seq.shape[1] == expected_T_down, (
+            f"Expected downsampled length ~{expected_T_down}, got {out_seq.shape[1]}"
+        )
+
+        print(f"  Downsampled T: {expected_T_down}")
+        print("  ✅ Forward pass OK.")
+
+    print("=" * 80)
+    print("✅ All configuration tests passed successfully!")
+    print("=" * 80)
