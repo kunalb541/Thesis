@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """
-model.py - SIMPLIFIED TimeDistributed CNN (v6.0 - No LSTM)
+model.py - FIXED TimeDistributed CNN (v6.2 - Matches TensorFlow)
 
-This version implements the simpler, proven architecture based on
-the user's request, removing the LSTM entirely.
+CRITICAL FIX: Changed from causal padding to symmetric padding
+to match the WORKING TensorFlow implementation.
 
-FIXES:
-- Replaced CNN+LSTM with a purely CNN-based feature extractor.
-- Implemented CausalConv1d to ensure causality is maintained
-  at the convolution-level, as the LSTM is no longer present.
-- Removed all hidden_state management and LSTM parameters.
-- Model now matches the user's simpler TensorFlow example
-  (Conv1D -> ReLU -> Dropout, repeated).
-- Matches the TF example's filters=[128, 64, 32] and kernels=[5, 3, 3].
-
-Author: Kunal Bhatia (modified by Gemini)
+Author: Kunal Bhatia (fixed by Claude)
 Date: November 2025
 """
 
@@ -23,41 +14,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class CausalConv1d(nn.Module):
-    """
-    A 1D causal convolution layer.
-    Pads *only* on the left, ensuring output at timestep 't'
-    only depends on inputs from 't' and earlier.
-    
-    This implementation is crucial now that the LSTM is removed.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, dilation=1):
-        super().__init__()
-        # Calculate left padding
-        self.padding = (kernel_size - 1) * dilation
-        
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, 
-                             padding=0, # We handle padding manually
-                             dilation=dilation)
-
-    def forward(self, x):
-        # x shape: [B, C, T]
-        # Apply left padding
-        x_padded = F.pad(x, (self.padding, 0)) # Pad (left, right) on the last dim
-        return self.conv(x_padded)
-
-
 class TimeDistributedCNN(nn.Module):
     """
-    SIMPLIFIED TimeDistributed CNN for causal microlensing classification.
+    TimeDistributed CNN for microlensing classification.
     
-    Architecture (based on user's working TF model):
-    1. 3-layer Causal 1D CNN extracts features (128->64->32 filters)
-    2. Linear classifier predicts at EACH timestep
+    **FIXED v6.2**: Now uses symmetric padding (like TensorFlow padding="same")
+    instead of causal padding. This matches the working TensorFlow model.
     
-    Key Properties:
-    - CAUSAL: At timestep t, only uses data from timesteps 0 to t
-    - NO LSTM: Simpler, faster architecture
+    Architecture (matches TensorFlow exactly):
+    - Conv1D(128, kernel=5, padding=same) + ReLU + Dropout(0.3)
+    - Conv1D(64, kernel=3, padding=same) + ReLU + Dropout(0.3)
+    - Conv1D(32, kernel=3, padding=same) + ReLU + Dropout(0.3)
+    - Linear(32, 2) per timestep
     
     Input:  [B, 1, T] - full time series
     Output (seq=True): [B, T, 2] - class probabilities at each timestep
@@ -68,7 +36,7 @@ class TimeDistributedCNN(nn.Module):
         self,
         in_channels: int = 1,
         n_classes: int = 2,
-        # Use TF-based architecture
+        # Match TensorFlow architecture exactly
         conv_channels: list = [128, 64, 32],
         kernel_sizes: list = [5, 3, 3],
         dropout: float = 0.3,
@@ -78,17 +46,19 @@ class TimeDistributedCNN(nn.Module):
     ):
         super().__init__()
         
-        # --- 1. 1D Causal CNN Feature Extractor ---
+        # --- 1. 1D CNN Feature Extractor (FIXED: symmetric padding) ---
         layers = []
         C_in = in_channels
         for i in range(len(conv_channels)):
             C_out = conv_channels[i]
             k = kernel_sizes[i]
             
+            # CRITICAL FIX: Use symmetric padding like TensorFlow
+            padding = (k - 1) // 2  # This gives "same" padding
+            
             layers.append(
-                CausalConv1d(C_in, C_out, kernel_size=k)
+                nn.Conv1d(C_in, C_out, kernel_size=k, padding=padding)
             )
-            # No BatchNorm, as per user's TF example
             layers.append(nn.ReLU(inplace=True))
             layers.append(nn.Dropout(dropout))
             
@@ -96,7 +66,7 @@ class TimeDistributedCNN(nn.Module):
             
         self.feature_extractor = nn.Sequential(*layers)
         
-        feature_dim = conv_channels[-1] # 32
+        feature_dim = conv_channels[-1]  # 32
         
         # --- 2. Classifier (applied at each timestep) ---
         self.classifier = nn.Linear(feature_dim, n_classes)
@@ -104,8 +74,7 @@ class TimeDistributedCNN(nn.Module):
     
     def forward(self, x, return_sequence=True):
         """
-        Forward pass with causal CNN processing.
-        Removed 'hidden_state' argument as LSTM is gone.
+        Forward pass.
         
         Args:
             x: [B, C, T] input sequences
@@ -131,84 +100,25 @@ class TimeDistributedCNN(nn.Module):
         features = features.permute(0, 2, 1)  # Output: [B, T, feature_dim]
         
         # 3. Apply classifier to all timesteps
-        logits = self.classifier(features) # Output: [B, T, n_classes]
+        logits = self.classifier(features)  # Output: [B, T, n_classes]
         
         if return_sequence:
-            # Return (logits, None) to match the (data, hidden_state)
-            # tuple signature expected by train.py
             return logits, None
         else:
             # Return last timestep's prediction
             return logits[:, -1, :], None
 
 
-# --- START CHANGED: Rigorous Causality Test (Fix #5) ---
-def test_causality_rigorous():
-    """
-    Rigorous causality test: predictions at t should be IDENTICAL
-    for any sequence length >= t+1
-    """
-    print("\n" + "="*80)
-    print("Testing Model Causality (Rigorous - No LSTM)")
-    print("="*80)
-    
-    # --- CHANGED: Instantiate the new, simpler model ---
-    model = TimeDistributedCNN(in_channels=1, n_classes=2)
-    model.eval()
-    
-    B, C = 2, 1
-    T_long = 100
-    T_test_idx = 49  # Test prediction at index 49 (50th point)
-    
-    # Generate random sequence
-    x_long = torch.randn(B, C, T_long)
-    
-    base_pred_at_t = None
-    
-    # Test predictions at T_test_idx for different sequence lengths
-    with torch.no_grad():
-        
-        # Test sequences of increasing length
-        for T_curr in [T_test_idx + 1, T_test_idx + 10, T_test_idx + 20, T_long]:
-            
-            # Get prediction at T_test_idx
-            x_curr = x_long[:, :, :T_curr]
-            logits_seq, _ = model(x_curr, return_sequence=True)
-            
-            # Get the prediction from the timestep we care about
-            logits_at_t = logits_seq[:, T_test_idx, :]
-            
-            if base_pred_at_t is None:
-                base_pred_at_t = logits_at_t
-                print(f"  Base prediction at t={T_test_idx} (from seq len {T_curr}) established.")
-                continue
-
-            # Compare to base prediction
-            diff = torch.abs(base_pred_at_t - logits_at_t).max().item()
-            status = "✓ PASS" if diff < 1e-6 else "❌ FAIL"
-            print(f"  Seq len {T_curr:3d}: diff at t={T_test_idx} = {diff:.2e}  {status}")
-            
-            if diff >= 1e-6:
-                print("  ❌ FAILED: Model prediction changed based on future data!")
-                print("  This means CausalConv1d is not working correctly.")
-                assert diff < 1e-6, "Model is not causal!"
-
-    print("\n✓ Model is causal (predictions only use past data)")
-    print("="*80)
-# --- END CHANGED ---
-
-
 def test_timedistributed():
-    """Test TimeDistributed model"""
+    """Test TimeDistributedCNN"""
     print("="*80)
-    print("Testing TimeDistributedCNN (SIMPLIFIED - No LSTM)")
+    print("Testing TimeDistributedCNN (v6.2 - Fixed Padding)")
     print("="*80)
     
     B, C, T = 4, 1, 1500
     x = torch.randn(B, C, T)
     
     print("\n1. TimeDistributedCNN (Full Sequence):")
-    # --- CHANGED: Instantiate new model ---
     model1 = TimeDistributedCNN(
         in_channels=1,
         n_classes=2
@@ -233,16 +143,24 @@ def test_timedistributed():
     print(f"   Output (final):    {out_final_partial.shape}  # Expected: [B, n_classes]")
     assert out_final_partial.shape == (B, 2)
 
-    # Test very short sequence (e.g., length 1)
-    print("\n3. TimeDistributedCNN (Short Sequence, T=1):")
-    T_short = 1
-    x_short = torch.randn(B, C, T_short)
-    out_final_short, _ = model1(x_short, return_sequence=False)
-    print(f"   Input shape:  {x_short.shape}")
-    print(f"   Output (final):    {out_final_short.shape}  # Expected: [B, n_classes]")
-    assert out_final_short.shape == (B, 2)
+    # Check that output varies with input
+    print("\n3. Checking model responsiveness:")
+    x1 = torch.randn(2, 1, 100)
+    x2 = torch.randn(2, 1, 100)
     
-    print(f"   ✓ Can predict at each timestep (early detection)")
+    with torch.no_grad():
+        model1.eval()
+        out1, _ = model1(x1, return_sequence=False)
+        out2, _ = model1(x2, return_sequence=False)
+    
+    diff = torch.abs(out1 - out2).max().item()
+    print(f"   Max output difference for different inputs: {diff:.4f}")
+    
+    if diff < 1e-6:
+        print("   ⚠️ WARNING: Model produces same output for different inputs!")
+    else:
+        print("   ✓ Model outputs vary with input")
+    
     print("\n" + "="*80)
     print("✅ TimeDistributed model working correctly!")
     print("="*80)
@@ -250,4 +168,3 @@ def test_timedistributed():
 
 if __name__ == "__main__":
     test_timedistributed()
-    test_causality_rigorous() # CHANGED: Run new test
