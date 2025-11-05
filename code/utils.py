@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Utility functions for data loading and preprocessing - FIXED VERSION (v5.3)
+Utility functions for data loading and preprocessing - FIXED VERSION (v5.4)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.3 - Fixed load_npz_dataset to always return 3D [N, C, T] data.
+Version: 5.4 - Added missing Path import
 """
 
 import json
@@ -178,7 +178,7 @@ def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
     N, C, T = X.shape
     F_flat = C * T
     
-    # --- FIX: Check scaler features against flattened features ---
+    # Check scaler features against flattened features
     if getattr(scaler_standard, "mean_", None) is None:
         raise ValueError("Standard scaler is not fitted (mean_ missing).")
     F_scaler = scaler_standard.mean_.shape[0]
@@ -214,7 +214,6 @@ def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
     return X_scaled.astype(np.float32, copy=False)
 
 
-# --- START CHANGED: Fix #4 ---
 def load_npz_dataset(path, apply_perm=False, normalize=False):
     """
     Load dataset from .npz file
@@ -249,7 +248,6 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
                          "then use normalization functions.")
 
     return X, y, timestamps, meta
-# --- END CHANGED ---
 
 
 def check_gpu():
@@ -284,7 +282,7 @@ if __name__ == "__main__":
     print("Testing Scaler Functions (3D):")
     print("="*60)
 
-    # --- Test with 3D data [N, C, T] ---
+    # Test with 3D data [N, C, T]
     np.random.seed(42)
     N_train, N_val, N_test, C, T = 1000, 200, 200, 1, 1500
     X_train = np.random.randn(N_train, C, T).astype(np.float32)

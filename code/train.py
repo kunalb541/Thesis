@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Transformer-Based Microlensing Classifier with DDP (Fixed v5.3)
+Transformer-Based Microlensing Classifier with DDP (Fixed v5.4)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.4 (Patched DDP eval loading and exp_dir broadcast)
+Version: 5.4 (Fixed DDP eval loading, exp_dir broadcast, and tqdm import)
 """
 
 import os
@@ -22,6 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 from model import TransformerClassifier, count_parameters
 from utils import load_npz_dataset, two_stage_normalize
@@ -191,7 +192,7 @@ def main():
     is_main = is_main_process(rank)
     
     # Ensure num_workers is adjusted for DDP
-    args.num_workers = args.num_workers // world_size
+    args.num_workers = max(0, args.num_workers // world_size)
 
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
@@ -227,47 +228,26 @@ def main():
             X_train, X_val, X_test, pad_value
         )
     else:
-        # Create empty tensors to receive broadcasted data
-        X_train, y_train = np.empty([0,0,0], dtype=np.float32), np.empty([0], dtype=np.int64)
-        X_val, y_val     = np.empty([0,0,0], dtype=np.float32), np.empty([0], dtype=np.int64)
-        X_test, y_test   = np.empty([0,0,0], dtype=np.float32), np.empty([0], dtype=np.int64)
+        # Create placeholder arrays to receive broadcasted data
+        X_train, y_train = None, None
+        X_val, y_val = None, None
+        X_test, y_test = None, None
         scaler_std, scaler_mm = None, None
 
     # Broadcast data from rank 0 to all other processes
     if is_ddp:
         log_main(f"Broadcasting data to all {world_size} ranks...", rank)
+        
         # 1. Broadcast scalers
         scalers = [scaler_std, scaler_mm]
         dist.broadcast_object_list(scalers, src=0)
         if not is_main:
             scaler_std, scaler_mm = scalers
             
-        # 2. Broadcast datasets (using torch.distributed.broadcast)
-        def broadcast_tensor(tensor, dtype, rank, device):
-            if rank == 0:
-                data = torch.from_numpy(tensor).to(device)
-            else:
-                data = torch.empty(dtype=dtype, device=device) # Shape will be set by broadcast
-            
-            if rank == 0:
-                shape_tensor = torch.tensor(data.shape, device=device, dtype=torch.long)
-            else:
-                shape_tensor = torch.empty((3 if dtype==torch.float32 else 1), device=device, dtype=torch.long)
-            
-            dist.broadcast(shape_tensor, src=0)
-            
-            if rank != 0:
-                data = torch.empty(tuple(shape_tensor.cpu().numpy()), dtype=dtype, device=device)
-            
-            dist.broadcast(data, src=0)
-            return data.cpu().numpy()
-
-        X_train = broadcast_tensor(X_train, torch.float32, rank, device)
-        y_train = broadcast_tensor(y_train, torch.long, rank, device)
-        X_val   = broadcast_tensor(X_val, torch.float32, rank, device)
-        y_val   = broadcast_tensor(y_val, torch.long, rank, device)
-        X_test  = broadcast_tensor(X_test, torch.float32, rank, device)
-        y_test  = broadcast_tensor(y_test, torch.long, rank, device)
+        # 2. Broadcast datasets using object_list for simplicity
+        data_objects = [X_train, y_train, X_val, y_val, X_test, y_test]
+        dist.broadcast_object_list(data_objects, src=0)
+        X_train, y_train, X_val, y_val, X_test, y_test = data_objects
 
     train_ds = MicrolensingDataset(X_train, y_train)
     val_ds = MicrolensingDataset(X_val, y_val)
@@ -292,10 +272,9 @@ def main():
 
     # ------------------------ Model Setup ------------------------
     log_main("Building model...", rank)
-    # Ensure in_channels matches data
     model = TransformerClassifier(
         in_channels=X_train.shape[1],
-        n_classes=len(np.unique(y_train)), # Use 2 if binary, or unique for safety
+        n_classes=2,
         d_model=args.d_model,
         nhead=args.nhead,
         num_layers=args.num_layers,
@@ -332,8 +311,8 @@ def main():
             "world_size": world_size,
             "data_file": args.data,
             "timestamp": timestamp,
-            "X_train_shape": X_train.shape,
-            "y_train_classes": len(np.unique(y_train)),
+            "X_train_shape": list(X_train.shape),
+            "y_train_classes": 2,
         })
         with open(exp_dir / "config.json", "w") as f:
             json.dump(config, f, indent=2)
@@ -346,7 +325,7 @@ def main():
 
         log_main(f"Experiment directory: {exp_dir}", rank)
     
-    # FIX: Broadcast the experiment directory path from rank 0
+    # Broadcast the experiment directory path from rank 0
     if is_ddp:
         dir_obj = [str(exp_dir) if is_main else None]
         dist.broadcast_object_list(dir_obj, src=0)
@@ -419,8 +398,7 @@ def main():
     # ------------------------ Evaluation ------------------------
     log_main("\nEvaluating on test set...", rank)
     
-    # FIX: All processes must load the best model for correct DDP evaluation
-    # Load checkpoint onto the correct device
+    # All processes must load the best model for correct DDP evaluation
     checkpoint = torch.load(exp_dir / "best_model.pt", map_location=device)
     model_base.load_state_dict(checkpoint['model_state_dict'])
     log_main(f"[Rank {rank}] Loaded best model from epoch {checkpoint['epoch']+1}", rank)
@@ -462,11 +440,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Import tqdm only if main
-    try:
-        from tqdm import tqdm
-    except ImportError:
-        def tqdm(iterable, *args, **kwargs):
-            return iterable
-
     main()

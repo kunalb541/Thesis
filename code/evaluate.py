@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.3)
+Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.4)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.3 - Fixed scaler loading and normalization consistency
+Version: 5.4 - Added missing tqdm import
 """
 
 import torch
