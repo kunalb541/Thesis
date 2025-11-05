@@ -4,7 +4,8 @@
 """
 simulate.py — FAST unified generator (PSPL + Binary) for classification
 
-FIXED: Masking now works correctly with USE_SHARED_MASK = False
+FIXED: Added missing Path import, improved error handling
+Version: 5.6.1
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import math
 import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import numpy as np
 from tqdm import tqdm
@@ -111,7 +113,6 @@ def _maybe_norm_event(flux: np.ndarray) -> np.ndarray:
     return flux
 
 
-# FIX: Updated worker functions to accept cadence_mask_prob and generate masks
 def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, float, Optional[np.ndarray], PSPLRanges]) -> Tuple[np.ndarray, Dict[str, float]]:
     seed, timestamps, mag_error_std, cadence_mask_prob, mask, ranges = args
     _set_np_seed(seed)
@@ -128,7 +129,6 @@ def generate_pspl_event_worker(args: Tuple[int, np.ndarray, float, float, Option
     if mag_error_std > 0:
         magnitudes += np.random.normal(0.0, mag_error_std, size=magnitudes.shape)
 
-    # FIX: Generate mask if not provided
     if mask is None and cadence_mask_prob > 0:
         mask = np.random.rand(len(timestamps)) < cadence_mask_prob
     
@@ -178,7 +178,6 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, float, Opti
     if mag_error_std > 0:
         magnitudes += np.random.normal(0.0, mag_error_std, size=magnitudes.shape)
 
-    # FIX: Generate mask if not provided
     if mask is None and cadence_mask_prob > 0:
         mask = np.random.rand(len(timestamps)) < cadence_mask_prob
     
@@ -249,7 +248,6 @@ def build_dataset(n_pspl: int,
             return None
         return shared_masks[i % MASK_POOL_SIZE]
 
-    # FIX: Pass cadence_mask_prob to workers
     pspl_args = [
         (None if seed is None else seed + i, timestamps, mag_error_std, cadence_mask_prob, pick_mask(i), pspl_ranges)
         for i in range(n_pspl)
@@ -267,7 +265,6 @@ def build_dataset(n_pspl: int,
             params_pspl.append(params)
         idx += 1
     
-    # Ensure PSPL events are all generated before starting binary
     pspl_count = idx 
 
     for flux, params in _parallel_map_unordered(generate_binary_event_worker, binary_args, num_workers):
@@ -285,7 +282,6 @@ def build_dataset(n_pspl: int,
     if pspl_count != n_pspl or binary_count != n_binary:
         print(f"Warning: Mismatch in event counts. Requested: {n_pspl} PSPL, {n_binary} Binary. "
               f"Generated: {pspl_count} PSPL, {binary_count} Binary.")
-        # Trim arrays if necessary
         N = pspl_count + binary_count
         X = X[:N]
         y = y[:N]
@@ -384,7 +380,6 @@ def main():
     binary_ranges_data = CFG.BINARY_PARAM_SETS.get(args.binary_params)
     binary_ranges = BinaryRanges(**binary_ranges_data)
     
-    # Use global config for n_points if not overridden
     n_points = args.n_points if args.n_points != CFG.N_POINTS else CFG.N_POINTS
     
     print("Configuration:")

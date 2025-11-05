@@ -286,11 +286,62 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
     if normalize:
         raise ValueError("normalize=True is deprecated. "
                          "Load raw data, split, then use two_stage_normalize().")
-
+    validate_dataset(X, y, min_samples_per_class=100)
     print(f"✓ Loaded dataset: {X.shape}, {len(y)} labels")
     print(f"  PSPL: {np.sum(y == 0)}, Binary: {np.sum(y == 1)}")
 
     return X, y, timestamps, meta
+
+# Add this function after load_npz_dataset (around line 200):
+
+def validate_dataset(X, y, min_samples_per_class=100):
+    """
+    Validate dataset has sufficient samples and is balanced
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Data array
+    y : np.ndarray
+        Labels
+    min_samples_per_class : int
+        Minimum required samples per class
+        
+    Raises
+    ------
+    ValueError if validation fails
+    """
+    if len(X) == 0 or len(y) == 0:
+        raise ValueError("Dataset is empty!")
+    
+    if len(X) != len(y):
+        raise ValueError(f"X and y length mismatch: {len(X)} vs {len(y)}")
+    
+    # Check class distribution
+    unique, counts = np.unique(y, return_counts=True)
+    
+    if len(unique) < 2:
+        raise ValueError(f"Need at least 2 classes, got {len(unique)}")
+    
+    for cls, count in zip(unique, counts):
+        if count < min_samples_per_class:
+            raise ValueError(
+                f"Class {cls} has only {count} samples, "
+                f"need at least {min_samples_per_class}"
+            )
+    
+    # Check for data quality
+    if np.all(np.isnan(X)) or np.all(X == -1.0):
+        raise ValueError("Dataset contains only NaN or padding values!")
+    
+    imbalance_ratio = counts.max() / counts.min()
+    if imbalance_ratio > 10:
+        print(f"⚠️  Warning: High class imbalance (ratio: {imbalance_ratio:.1f})")
+    
+    print(f"✓ Dataset validation passed:")
+    for cls, count in zip(unique, counts):
+        cls_name = "PSPL" if cls == 0 else "Binary"
+        print(f"  {cls_name}: {count} samples")
 
 
 def check_gpu():

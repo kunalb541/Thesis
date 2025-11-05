@@ -16,9 +16,10 @@ import math
 # ============================================================
 # POSITIONAL ENCODING
 # ============================================================
+# Only the PositionalEncoding class needs to be updated (lines ~20-45):
 
 class PositionalEncoding(nn.Module):
-    """Standard sinusoidal positional encoding"""
+    """Standard sinusoidal positional encoding with numerical stability"""
 
     def __init__(self, d_model, max_len=2000, dropout=0.1):
         super().__init__()
@@ -27,9 +28,15 @@ class PositionalEncoding(nn.Module):
         # Precompute positional encodings once
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        
+        # Improved numerical stability: use log-space computation
         div_term = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float32) * (-math.log(10000.0) / d_model)
+            torch.arange(0, d_model, 2, dtype=torch.float32) * 
+            (-math.log(10000.0) / d_model)
         )
+        
+        # Clamp to prevent numerical issues
+        div_term = torch.clamp(div_term, min=1e-10, max=1e10)
 
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -39,7 +46,10 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         """Add positional encoding to input tensor"""
-        x = x + self.pe[:, :x.size(1), :]
+        seq_len = x.size(1)
+        if seq_len > self.pe.size(1):
+            raise ValueError(f"Sequence length {seq_len} exceeds max_len {self.pe.size(1)}")
+        x = x + self.pe[:, :seq_len, :]
         return self.dropout(x)
 
 

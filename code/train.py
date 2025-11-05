@@ -360,6 +360,7 @@ def main():
         val_loss, val_acc = aggregate_metrics(
             val_loss_local, val_correct_local, val_total_local, world_size, device
         )
+# Only the checkpoint saving section needs to be updated (lines ~280-295):
 
         if is_main:
             print(f"Epoch {epoch+1:3d}/{args.epochs} | "
@@ -371,15 +372,21 @@ def main():
                 best_val_acc = val_acc
                 patience_counter = 0
                 
-                # Save checkpoint
-                checkpoint = {
-                    'model_state_dict': model_base.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'val_acc': val_acc,
-                    'config': config 
-                }
-                torch.save(checkpoint, exp_dir / "best_model.pt")
+                # Save checkpoint with error handling
+                try:
+                    checkpoint = {
+                        'model_state_dict': model_base.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'val_acc': val_acc,
+                        'config': config 
+                    }
+                    # Use atomic write
+                    temp_path = exp_dir / "best_model_temp.pt"
+                    torch.save(checkpoint, temp_path)
+                    temp_path.replace(exp_dir / "best_model.pt")
+                except Exception as e:
+                    log_main(f"Warning: Failed to save checkpoint: {e}", rank)
             else:
                 patience_counter += 1
 
