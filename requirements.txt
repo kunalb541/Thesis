@@ -1,68 +1,30 @@
-# Microlensing Binary Classification - Requirements
-# Exact versions pinned for reproducibility
-# Last updated: October 27, 2025
+# Transformer-Based Microlensing Classification
+# Requirements File
 
-# =============================================================================
 # Core Scientific Computing
-# =============================================================================
-numpy==1.26.4
-scipy==1.11.4
+numpy>=1.24.0
+scipy>=1.10.0
 
-# =============================================================================
 # Machine Learning
-# =============================================================================
-scikit-learn==1.4.0
+scikit-learn>=1.3.0
 
-# =============================================================================
 # Visualization
-# =============================================================================
-matplotlib==3.8.2
-seaborn==0.13.1
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
-# =============================================================================
 # Utilities
-# =============================================================================
-tqdm==4.66.1
-joblib==1.3.2
+tqdm>=4.65.0
 
-# =============================================================================
 # Microlensing Simulation
-# =============================================================================
-VBMicrolensing
+VBMicrolensing>=3.6.0
 
-# =============================================================================
-# Data Handling
-# =============================================================================
-pandas==2.2.0
-
-# =============================================================================
-# Optional but Recommended
-# =============================================================================
-ipython==8.20.0
-jupyter==1.0.0
-
-# =============================================================================
-# Testing (optional)
-# =============================================================================
-pytest==8.0.0
-pytest-cov==4.1.0
-
-# =============================================================================
-# PyTorch - Install Separately Based on Your GPU
-# =============================================================================
-# PyTorch is NOT included in this requirements file because the installation
-# depends on your GPU hardware. Install it separately:
-#
+# PyTorch - Install separately based on your hardware:
+# 
 # For NVIDIA GPUs (CUDA 12.1):
-#   pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 #
 # For NVIDIA GPUs (CUDA 11.8):
-#   pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu118
-#
-# For AMD GPUs (ROCm 6.0):
-#   pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 #
 # For CPU only:
-#   pip install torch==2.2.0 torchvision==0.17.0
-#
-# =============================================================================
+#   pip install torch torchvision
