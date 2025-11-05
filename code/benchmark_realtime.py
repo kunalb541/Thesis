@@ -3,11 +3,15 @@
 """
 benchmark_realtime.py - Real-time inference performance benchmarking
 
-FIXED: Now uses TDConvClassifier from train.py (matching your trained models!)
+FIXED (v5.0): 
+- Removed hard-coded TDConvClassifier
+- Imports models from model.py
+- Reads config.json to load the correct model (Simple or LSTM)
+- Calls model(x, return_sequence=False) for final prediction
 
 Author: Kunal Bhatia
-Version: 4.0
-Date: October 2025
+Version: 5.0
+Date: November 2025
 """
 
 import torch
@@ -19,38 +23,8 @@ import json
 import time
 from tqdm import tqdm
 
-# Define TDConvClassifier exactly as in train.py
-class TDConvClassifier(nn.Module):
-    """Compact 1D CNN for binary classification - from train.py"""
-    def __init__(self, in_ch: int = 1, n_classes: int = 2, dropout: float = 0.3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(in_ch, 128, kernel_size=9, padding=4),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Conv1d(128, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Conv1d(64, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-        )
-        self.classifier = nn.Sequential(
-            nn.Linear(32 * 2, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(64, n_classes),
-        )
-
-    def forward(self, x):
-        h = self.net(x)
-        mean_pool = torch.mean(h, dim=-1)
-        max_pool, _ = torch.max(h, dim=-1)
-        z = torch.cat([mean_pool, max_pool], dim=1)
-        return self.classifier(z)
+# Import model architectures (matches train.py)
+from model import TimeDistributedCNNSimple, TimeDistributedCNN
 
 from utils import load_npz_dataset, load_scalers, apply_scalers_to_data
 import config as CFG
@@ -85,9 +59,11 @@ def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=10
     print(f"\nWarming up ({n_warmup} iterations)...")
     for i in range(n_warmup):
         idx = np.random.choice(n_samples, size=batch_size, replace=False)
+        # Input shape [B, T] -> [B, 1, T]
         X_batch = torch.from_numpy(X_processed[idx]).float().unsqueeze(1).to(device)
         with torch.no_grad():
-            _ = model(X_batch)
+            # --- FIX: Call model with return_sequence=False ---
+            _ = model(X_batch, return_sequence=False)
     
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -98,6 +74,7 @@ def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=10
     
     for i in tqdm(range(n_runs), desc="Benchmarking"):
         idx = indices[i*batch_size:(i+1)*batch_size]
+        # Input shape [B, T] -> [B, 1, T]
         X_batch = torch.from_numpy(X_processed[idx]).float().unsqueeze(1).to(device)
         
         if torch.cuda.is_available():
@@ -106,7 +83,8 @@ def benchmark_inference(model, X, device, batch_size=128, n_warmup=10, n_runs=10
         start = time.perf_counter()
         
         with torch.no_grad():
-            _ = model(X_batch)
+            # --- FIX: Call model with return_sequence=False ---
+            _ = model(X_batch, return_sequence=False)
         
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -162,10 +140,12 @@ def measure_memory(model, X, device, batch_size=128):
     baseline_memory = torch.cuda.memory_allocated(device)
     
     idx = np.random.choice(len(X), size=batch_size, replace=False)
+    # Input shape [B, T] -> [B, 1, T]
     X_batch = torch.from_numpy(X_processed[idx]).float().unsqueeze(1).to(device)
     
     with torch.no_grad():
-        _ = model(X_batch)
+        # --- FIX: Call model with return_sequence=False ---
+        _ = model(X_batch, return_sequence=False)
     
     torch.cuda.synchronize()
     
@@ -207,7 +187,7 @@ def print_results_table(results):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Benchmark real-time inference (FIXED)')
+    parser = argparse.ArgumentParser(description='Benchmark real-time inference (v5.0 - TimeDistributed Compatible)')
     parser.add_argument("--model", type=str, default=None, help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, help='Path to test data')
     parser.add_argument("--output_dir", type=str, default=None, help='Output directory')
@@ -235,13 +215,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("REAL-TIME INFERENCE BENCHMARK (FIXED - TDConvClassifier)")
+    print("REAL-TIME INFERENCE BENCHMARK (TimeDistributed Compatible)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
     
     # Load data
     print("\nLoading data...")
+    # Load data, X shape is (N, T)
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
     
     if len(X) > args.n_samples:
@@ -249,13 +230,41 @@ def main():
         X = X[indices]
     
     scaler_std, scaler_mm = load_scalers(results_dir)
+    # apply_scalers_to_data expects (N, F) where F=T
     X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    model = TDConvClassifier(in_ch=1, n_classes=2, dropout=0.3)
+    # --- FIX: Load model based on config.json ---
+    config_path = results_dir / "config.json"
+    model_type = 'TimeDistributed_Simple'
+    config = {}
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+            model_type = config.get('model_type', 'TimeDistributed_Simple')
+
+    if model_type == 'TimeDistributed_LSTM':
+        print("Loading TimeDistributedCNN (LSTM)...")
+        window_size = config.get('window_size', 50)
+        model = TimeDistributedCNN(
+            in_channels=1, 
+            n_classes=2, 
+            window_size=window_size,
+            use_lstm=True,
+            dropout=0.3 
+        )
+    else:
+        print("Loading TimeDistributedCNNSimple...")
+        model = TimeDistributedCNNSimple(
+            in_channels=1, 
+            n_classes=2, 
+            dropout=0.3
+        )
+    # --- End Fix ---
+    
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)
     
@@ -264,7 +273,7 @@ def main():
     
     model.load_state_dict(state_dict)
     model = model.to(device)
-    print("✓ Model loaded (TDConvClassifier)")
+    print(f"✓ Model loaded ({model_type})")
     
     # Benchmark
     results = benchmark_inference(model, X, device, batch_size=args.batch_size, n_runs=args.n_runs)
@@ -284,7 +293,7 @@ def main():
     # Save
     benchmark_summary = {
         'model_path': str(args.model),
-        'model_architecture': 'TDConvClassifier',
+        'model_architecture': model_type,
         'benchmark': results,
         'memory': memory_results,
     }

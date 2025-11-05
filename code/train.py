@@ -262,6 +262,7 @@ def main():
     n_classes = int(np.max(y) + 1)
     
     if X.ndim == 2:
+        # Reshape (N, T) to (N, 1, T) for CNN
         X = X[:, None, :]
     
     # Verify balance
@@ -331,7 +332,7 @@ def main():
     if args.use_lstm:
         rank0_print("Creating TimeDistributedCNN with LSTM...")
         model = TimeDistributedCNN(
-            in_channels=X.shape[1],
+            in_channels=X.shape[1], # Should be 1
             n_classes=n_classes,
             window_size=args.window_size,
             use_lstm=True,
@@ -340,7 +341,7 @@ def main():
     else:
         rank0_print("Creating TimeDistributedCNNSimple...")
         model = TimeDistributedCNNSimple(
-            in_channels=X.shape[1],
+            in_channels=X.shape[1], # Should be 1
             n_classes=n_classes,
             dropout=0.3
         ).to(device)

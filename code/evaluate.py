@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py - Model Evaluation with Fixed Issues (v4.0)
+evaluate.py - Model Evaluation (v5.0 - TimeDistributed Compatible)
 
 FIXED:
-- Cleaner output (suppressed warnings)
-- Better error handling
-- Complete metrics computation
-- Proper scaler loading
-- Works with DDP-trained models
+- Removed hard-coded TDConvClassifier
+- Imports models from model.py
+- Reads config.json to load the correct model (Simple or LSTM)
+- Calls model(x, return_sequence=False) for final prediction
 
 Author: Kunal Bhatia
-Version: 4.0
-Date: October 2025
+Version: 5.0
+Date: November 2025
 """
 
 import warnings
@@ -37,38 +36,8 @@ import os
 # Suppress specific warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-# Import model architecture (matches train.py)
-class TDConvClassifier(nn.Module):
-    """Compact 1D CNN for binary classification - from train.py"""
-    def __init__(self, in_ch: int = 1, n_classes: int = 2, dropout: float = 0.3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(in_ch, 128, kernel_size=9, padding=4),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Conv1d(128, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Conv1d(64, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-        )
-        self.classifier = nn.Sequential(
-            nn.Linear(32 * 2, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(64, n_classes),
-        )
-
-    def forward(self, x):
-        h = self.net(x)
-        mean_pool = torch.mean(h, dim=-1)
-        max_pool, _ = torch.max(h, dim=-1)
-        z = torch.cat([mean_pool, max_pool], dim=1)
-        return self.classifier(z)
+# Import model architectures (matches train.py)
+from model import TimeDistributedCNNSimple, TimeDistributedCNN
 
 # Import utilities
 sys.path.insert(0, str(Path(__file__).parent))
@@ -114,9 +83,11 @@ def evaluate_model(model, X, device, batch_size=128, quiet=False):
             batch_end = min(i + batch_size, n_samples)
             X_batch = X[i:batch_end]
             
+            # Input shape [B, T] -> [B, 1, T]
             X_tensor = torch.from_numpy(X_batch).float().unsqueeze(1).to(device)
             
-            outputs = model(X_tensor)
+            # --- FIX: Call model with return_sequence=False ---
+            outputs = model(X_tensor, return_sequence=False)
             probs = torch.softmax(outputs, dim=1)
             
             probs_np = probs.cpu().numpy()
@@ -190,11 +161,12 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
         
         # 3. Precision-Recall Curve
         precision, recall, _ = precision_recall_curve(y_true, y_prob_binary)
-        avg_precision = np.trapz(precision, recall)
+        # Note: Using trapz(recall, precision) is more standard for PR-AUC
+        pr_auc = auc(recall, precision) 
         
         plt.figure(figsize=(8, 6))
         plt.plot(recall, precision, linewidth=2.5, 
-                label=f'PR Curve (AP = {avg_precision:.3f})', color='darkgreen')
+                label=f'PR Curve (AUC = {pr_auc:.3f})', color='darkgreen')
         plt.xlabel('Recall', fontsize=12)
         plt.ylabel('Precision', fontsize=12)
         plt.title('Precision-Recall Curve', fontsize=14, fontweight='bold')
@@ -209,7 +181,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate model (v4.0)')
+    parser = argparse.ArgumentParser(description='Evaluate model (v5.0 - TimeDistributed Compatible)')
     parser.add_argument("--model", type=str, default=None, 
                        help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, 
@@ -249,7 +221,7 @@ def main():
     
     if not args.quiet:
         print("=" * 80)
-        print("MODEL EVALUATION (v4.0)")
+        print("MODEL EVALUATION (v5.0 - TimeDistributed Compatible)")
         print("=" * 80)
         print(f"\nModel: {args.model}")
         print(f"Data: {args.data}")
@@ -261,6 +233,7 @@ def main():
         print("LOADING DATA")
         print("=" * 80)
     
+    # Load data, X shape is (N, T)
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, 
                                               normalize=False)
     
@@ -281,6 +254,7 @@ def main():
     
     # Apply scalers if available
     if scaler_std is not None and scaler_mm is not None:
+        # apply_scalers_to_data expects (N, F) where F=T
         X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
         if not args.quiet:
             print("✓ Applied normalization")
@@ -291,13 +265,41 @@ def main():
     if not args.quiet:
         print(f"\nDevice: {device}")
     
-    model = TDConvClassifier(in_ch=1, n_classes=2, dropout=0.3)
+    # --- FIX: Load model based on config.json ---
+    config_path = results_dir / "config.json"
+    model_type = 'TimeDistributed_Simple'
+    config = {}
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+            model_type = config.get('model_type', 'TimeDistributed_Simple')
     
+    if model_type == 'TimeDistributed_LSTM':
+        if not args.quiet:
+            print("Loading TimeDistributedCNN (LSTM)...")
+        window_size = config.get('window_size', 50)
+        model = TimeDistributedCNN(
+            in_channels=1, 
+            n_classes=2, 
+            window_size=window_size,
+            use_lstm=True,
+            dropout=0.3 
+        )
+    else:
+        if not args.quiet:
+            print("Loading TimeDistributedCNNSimple...")
+        model = TimeDistributedCNNSimple(
+            in_channels=1, 
+            n_classes=2, 
+            dropout=0.3
+        )
+    # --- End Fix ---
+
     try:
         ckpt = torch.load(args.model, map_location=device, weights_only=False)
+        # Handle checkpoints saved from DDP
         state_dict = ckpt.get('model_state_dict', ckpt)
         
-        # Handle DataParallel/DDP models
         if list(state_dict.keys())[0].startswith('module.'):
             state_dict = {k.replace('module.', ''): v 
                          for k, v in state_dict.items()}
@@ -306,13 +308,15 @@ def main():
         model = model.to(device)
         
         if not args.quiet:
-            print("✓ Model loaded (TDConvClassifier)")
+            print(f"✓ Model loaded ({model_type})")
     
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
+        print(f"❌ Error loading model state_dict: {e}")
+        print("   This often happens if the model architecture in model.py")
+        print("   does not match the saved checkpoint.")
         sys.exit(1)
     
-    # Replace PAD_VALUE with 0.0
+    # Replace PAD_VALUE with 0.0 for CNN
     X_processed = X.copy()
     X_processed[X_processed == CFG.PAD_VALUE] = 0.0
     
@@ -387,7 +391,7 @@ def main():
         'metadata': meta,
         'data_path': str(args.data),
         'model_path': str(args.model),
-        'model_architecture': 'TDConvClassifier',
+        'model_architecture': model_type,
         'scalers_used': str(results_dir),
         'n_samples': int(len(X)),
         'class_distribution': {
