@@ -1,6 +1,6 @@
 # Real-Time Binary Microlensing Classification with Transformers
 
-**Deep Learning for Next-Generation Survey Operations - Version 5.3**
+**Deep Learning for Next-Generation Survey Operations - Version 5.5**
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-red.svg)](https://pytorch.org/)
@@ -16,7 +16,7 @@
 
 This project implements an automated classification system for binary gravitational microlensing events using **Transformer neural networks**. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
 
-### Key Features (v5.3)
+### Key Features (v5.5)
 
 - **Transformer Architecture**: Encoder-based architecture for temporal classification
 - **Sequential Classification**: Per-timestep predictions enabling early detection
@@ -27,13 +27,11 @@ This project implements an automated classification system for binary gravitatio
 - **Comprehensive Evaluation**: Three-panel visualizations with decision-time analysis
 - **Robust DDP**: Fixed checkpoint saving, scaler persistence, and metric aggregation
 
-### What's New in v5.3
+### What's New in v5.5
 
-- ✅ **Fixed DDP Training**: Proper checkpoint saving with all necessary state
-- ✅ **Fixed Scaler Saving**: Scalers saved correctly on rank 0 with proper structure
-- ✅ **Consistent Normalization**: Evaluate.py uses same normalization pipeline as training
-- ✅ **Fixed Model Loading**: Checkpoint includes model_state_dict, optimizer, and config
-- ✅ **Clearer Documentation**: Accurate architecture description without confusion
+- ✅ **Fixed Path Import**: evaluate.py now imports Path correctly
+- ✅ **Clearer Documentation**: Consistent terminology (Conv1D preprocessing vs Transformer model)
+- ✅ **Minor Code Cleanup**: Improved variable naming consistency
 
 ---
 
@@ -117,9 +115,9 @@ python benchmark_realtime.py \
 Input: [batch, 1, T=1500] light curve time series
    ↓
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PREPROCESSING LAYER (not the main model)
+PREPROCESSING LAYER (downsampling only)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1D Convolution (Downsampling Only)
+1D Convolution (Reduce sequence length)
    [batch, 1, 1500] → [batch, d_model=64, 500]
    
    Purpose: Reduce sequence length by 3×
@@ -285,12 +283,12 @@ python evaluate.py \
 Thesis/
 ├── code/
 │   ├── simulate.py           # Fast parallel simulation
-│   ├── train.py              # DDP Transformer training (v5.3)
-│   ├── evaluate.py           # Evaluation + plots (v5.3)
+│   ├── train.py              # DDP Transformer training (v5.5)
+│   ├── evaluate.py           # Evaluation + plots (v5.5)
 │   ├── benchmark_realtime.py # Performance testing
 │   ├── model.py              # Transformer architecture
 │   ├── config.py             # Configuration
-│   ├── utils.py              # Utilities (v5.3)
+│   ├── utils.py              # Utilities (v5.5)
 │   └── visualize.py          # Visualization
 │
 ├── data/raw/                 # Simulated datasets
@@ -301,7 +299,7 @@ Thesis/
 
 ---
 
-## Expected Performance (v5.3)
+## Expected Performance (v5.5)
 
 ### Timing (4 GPUs)
 
