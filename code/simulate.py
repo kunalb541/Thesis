@@ -17,23 +17,8 @@ from dataclasses import asdict, dataclass
 from typing import Dict, Tuple, Optional, List
 import numpy as np
 from tqdm import tqdm
+import config as CFG # Direct import, no fallback
 
-try:
-    import config as CFG
-except Exception:
-    class _Fallback:
-        PAD_VALUE = -1
-        TIME_MIN = -100
-        TIME_MAX = 100
-        NORMALIZE_PER_EVENT = True
-        USE_SHARED_MASK = False
-        MASK_POOL_SIZE = 256
-        BINARY_PARAM_SETS = {'baseline': {
-            's_min': 0.7, 's_max': 2.0, 'q_min': 0.1, 'q_max': 0.5, 'rho_min': 0.005, 'rho_max': 0.02,
-            'alpha_min': 0.0, 'alpha_max': math.pi / 2, 'tE_min': 50.0, 'tE_max': 200.0,
-            't0_min': -20.0, 't0_max': 20.0, 'u0_min': 0.1, 'u0_max': 0.3
-        }}
-    CFG = _Fallback()
 
 PAD_VALUE = float(CFG.PAD_VALUE)
 TIME_MIN = float(CFG.TIME_MIN)
@@ -56,16 +41,17 @@ except Exception:
 
 @dataclass
 class PSPLRanges:
-    t0_min: float = getattr(CFG, "PSPL_T0_MIN", -20.0)
-    t0_max: float = getattr(CFG, "PSPL_T0_MAX", 20.0)
-    u0_min: float = getattr(CFG, "PSPL_U0_MIN", 0.01)
-    u0_max: float = getattr(CFG, "PSPL_U0_MAX", 0.5)
-    tE_min: float = getattr(CFG, "PSPL_TE_MIN", 10.0)
-    tE_max: float = getattr(CFG, "PSPL_TE_MAX", 150.0)
+    t0_min: float = getattr(CFG, "T0_MIN", -20.0)
+    t0_max: float = getattr(CFG, "T0_MAX", 20.0)
+    u0_min: float = getattr(CFG, "U0_MIN", 0.01)
+    u0_max: float = getattr(CFG, "U0_MAX", 0.5)
+    tE_min: float = getattr(CFG, "TE_MIN", 10.0)
+    tE_max: float = getattr(CFG, "TE_MAX", 150.0)
 
 
 @dataclass
 class BinaryRanges:
+    # Default values, will be overwritten by config
     s_min: float = 0.7
     s_max: float = 2.0
     q_min: float = 0.1
@@ -74,14 +60,25 @@ class BinaryRanges:
     rho_max: float = 0.02
     alpha_min: float = 0.0
     alpha_max: float = math.pi / 2
-    tE_min: float = 50.0
-    tE_max: float = 200.0
-    t0_min: float = -20.0
-    t0_max: float = 20.0
-    u0_min: float = 0.1
-    u0_max: float = 0.3
+    
+    # These often come from the shared config
+    tE_min: float = getattr(CFG, "TE_MIN", 50.0)
+    tE_max: float = getattr(CFG, "TE_MAX", 200.0)
+    t0_min: float = getattr(CFG, "T0_MIN", -20.0)
+    t0_max: float = getattr(CFG, "T0_MAX", 20.0)
+    u0_min: float = getattr(CFG, "U0_MIN", 0.1)
+    u0_max: float = getattr(CFG, "U0_MAX", 0.3)
     
     def __init__(self, **kwargs):
+        # Set all defaults from CFG first
+        self.tE_min = getattr(CFG, "TE_MIN", 50.0)
+        self.tE_max = getattr(CFG, "TE_MAX", 200.0)
+        self.t0_min = getattr(CFG, "T0_MIN", -20.0)
+        self.t0_max = getattr(CFG, "T0_MAX", 20.0)
+        self.u0_min = getattr(CFG, "U0_MIN", 0.1)
+        self.u0_max = getattr(CFG, "U0_MAX", 0.3)
+
+        # Overwrite with any values from the specific binary param set
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -198,13 +195,19 @@ def generate_binary_event_worker(args: Tuple[int, np.ndarray, float, float, Opti
 
 
 def _parallel_map_unordered(fn, args_list, num_workers: int):
+    # Use 0 or 1 for no parallelism (easier debugging)
     if num_workers is None or num_workers <= 1:
+        print(f"Generating {fn.__name__.split('_')[1]} (Serial)...")
         for a in tqdm(args_list, desc=f"Generating {fn.__name__.split('_')[1]}"):
             yield fn(a)
         return
+        
     import multiprocessing as mp
     n = len(args_list)
+    # Adjust chunksize dynamically
     chunksize = max(1, n // (num_workers * 8))
+    
+    print(f"Generating {fn.__name__.split('_')[1]} (Parallel with {num_workers} workers, chunksize {chunksize})...")
     with mp.Pool(processes=num_workers) as pool:
         for res in tqdm(pool.imap_unordered(fn, args_list, chunksize=chunksize), total=n, desc=f"Generating {fn.__name__.split('_')[1]} (Parallel)"):
             yield res
@@ -224,6 +227,7 @@ def build_dataset(n_pspl: int,
     _set_np_seed(seed)
     timestamps = np.linspace(TIME_MIN, TIME_MAX, n_points, dtype=np.float64)
 
+    # Use global config values for PSPL
     pspl_ranges = PSPLRanges()
 
     N = n_pspl + n_binary
@@ -251,7 +255,7 @@ def build_dataset(n_pspl: int,
         for i in range(n_pspl)
     ]
     binary_args = [
-        (None if seed is None else seed + 10_000 + i, timestamps, mag_error_std, cadence_mask_prob, pick_mask(i), binary_ranges)
+        (None if seed is None else seed + n_pspl + i, timestamps, mag_error_std, cadence_mask_prob, pick_mask(i), binary_ranges)
         for i in range(n_binary)
     ]
 
@@ -262,13 +266,29 @@ def build_dataset(n_pspl: int,
         if save_params and params_pspl is not None:
             params_pspl.append(params)
         idx += 1
+    
+    # Ensure PSPL events are all generated before starting binary
+    pspl_count = idx 
 
     for flux, params in _parallel_map_unordered(generate_binary_event_worker, binary_args, num_workers):
+        if idx >= N:
+             print(f"Warning: Index overflow ({idx}), N={N}. Skipping event.")
+             continue
         X[idx, :] = flux
         y[idx] = 1
         if save_params and params_binary is not None:
             params_binary.append(params)
         idx += 1
+        
+    binary_count = idx - pspl_count
+    
+    if pspl_count != n_pspl or binary_count != n_binary:
+        print(f"Warning: Mismatch in event counts. Requested: {n_pspl} PSPL, {n_binary} Binary. "
+              f"Generated: {pspl_count} PSPL, {binary_count} Binary.")
+        # Trim arrays if necessary
+        N = pspl_count + binary_count
+        X = X[:N]
+        y = y[:N]
 
     print("Creating permutation (deferred shuffle)...")
     if seed is not None:
@@ -276,8 +296,8 @@ def build_dataset(n_pspl: int,
     perm = np.random.permutation(N).astype(np.int64)
 
     meta = {
-        "n_pspl": n_pspl,
-        "n_binary": n_binary,
+        "n_pspl": pspl_count,
+        "n_binary": binary_count,
         "n_points": n_points,
         "mag_error_std": mag_error_std,
         "cadence_mask_prob": cadence_mask_prob,
@@ -309,7 +329,10 @@ def save_npz(path: str,
              params_pspl: Optional[List[Dict]],
              params_binary: Optional[List[Dict]],
              perm: np.ndarray) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+             
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     out = {
         "X": X,
         "y": y,
@@ -321,19 +344,26 @@ def save_npz(path: str,
         out["params_pspl_json"] = np.array(json.dumps(params_pspl))
     if params_binary is not None:
         out["params_binary_json"] = np.array(json.dumps(params_binary))
-    np.savez(path, **out)
-    print(f"Saved dataset to: {path}")
-    print(f"Shapes: X={X.shape}, y={y.shape}, timestamps={timestamps.shape}, perm={perm.shape}")
+        
+    try:
+        np.savez(path, **out)
+        print(f"Saved dataset to: {path}")
+        print(f"Shapes: X={X.shape}, y={y.shape}, timestamps={timestamps.shape}, perm={perm.shape}")
+    except Exception as e:
+        print(f"Error saving NPZ file: {e}")
+        print("Attempting to save without compression...")
+        np.savez_compressed(path, **out)
+        print(f"Saved dataset (compressed) to: {path}")
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Simulate PSPL and Binary microlensing datasets (fast).")
     p.add_argument("--n_pspl", type=int, default=5000)
     p.add_argument("--n_binary", type=int, default=5000)
-    p.add_argument("--n_points", type=int, default=256)
-    p.add_argument("--mag_error_std", type=float, default=0.02)
-    p.add_argument("--cadence_mask_prob", type=float, default=0.10)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--n_points", type=int, default=CFG.N_POINTS)
+    p.add_argument("--mag_error_std", type=float, default=CFG.MAG_ERROR_STD)
+    p.add_argument("--cadence_mask_prob", type=float, default=CFG.CADENCE_MASK_PROB)
+    p.add_argument("--seed", type=int, default=CFG.SEED)
     p.add_argument("--output", type=str, default="data/raw/events_fast.npz")
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--save-params", action="store_true")
@@ -346,14 +376,22 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     
-    binary_ranges_data = CFG.BINARY_PARAM_SETS.get(args.binary_params, CFG.BINARY_PARAM_SETS['baseline'])
+    if not hasattr(CFG, "BINARY_PARAM_SETS") or args.binary_params not in CFG.BINARY_PARAM_SETS:
+        print(f"Error: --binary_params '{args.binary_params}' not found in config.py.")
+        print(f"Available sets: {list(CFG.BINARY_PARAM_SETS.keys())}")
+        return
+
+    binary_ranges_data = CFG.BINARY_PARAM_SETS.get(args.binary_params)
     binary_ranges = BinaryRanges(**binary_ranges_data)
+    
+    # Use global config for n_points if not overridden
+    n_points = args.n_points if args.n_points != CFG.N_POINTS else CFG.N_POINTS
     
     print("Configuration:")
     print(json.dumps({
         "n_pspl": args.n_pspl,
         "n_binary": args.n_binary,
-        "n_points": args.n_points,
+        "n_points": n_points,
         "mag_error_std": args.mag_error_std,
         "cadence_mask_prob": args.cadence_mask_prob,
         "seed": args.seed,
@@ -366,12 +404,20 @@ def main():
         "NORMALIZE_PER_EVENT": NORMALIZE_PER_EVENT,
         "USE_SHARED_MASK": USE_SHARED_MASK,
         "binary_params_set": args.binary_params,
+        "binary_ranges": asdict(binary_ranges)
     }, indent=2))
+    
+    if _VBM is None:
+        print("\n" + "="*60)
+        print("WARNING: VBMicrolensing not found or failed to import.")
+        print("Binary events will be simulated as PSPL events.")
+        print("This is NOT suitable for real training.")
+        print("="*60 + "\n")
 
     X, y, timestamps, meta, p_pspl, p_bin, perm = build_dataset(
         n_pspl=args.n_pspl,
         n_binary=args.n_binary,
-        n_points=args.n_points,
+        n_points=n_points,
         mag_error_std=args.mag_error_std,
         cadence_mask_prob=args.cadence_mask_prob,
         seed=args.seed,
@@ -398,4 +444,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

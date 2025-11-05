@@ -14,11 +14,11 @@
 
 ## Overview
 
-This project implements an automated classification system for binary gravitational microlensing events using **Transformer neural networks with self-attention mechanisms**. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
+This project implements an automated classification system for binary gravitational microlensing events using **Transformer neural networks**. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
 
 ### Key Features (v5.3)
 
-- **Transformer Architecture**: Self-attention for temporal sequence modeling
+- **Transformer Architecture**: Encoder-based architecture for temporal classification
 - **Sequential Classification**: Per-timestep predictions enabling early detection
 - **Distributed Training (DDP)**: Multi-node, multi-GPU support with PyTorch DDP
 - **Ultra-Fast Pipeline**: Complete 1M event workflow in ~1 hour
@@ -33,7 +33,7 @@ This project implements an automated classification system for binary gravitatio
 - ✅ **Fixed Scaler Saving**: Scalers saved correctly on rank 0 with proper structure
 - ✅ **Consistent Normalization**: Evaluate.py uses same normalization pipeline as training
 - ✅ **Fixed Model Loading**: Checkpoint includes model_state_dict, optimizer, and config
-- ✅ **Better Documentation**: Corrected architecture description throughout
+- ✅ **Clearer Documentation**: Accurate architecture description without confusion
 
 ---
 
@@ -114,41 +114,62 @@ python benchmark_realtime.py \
 ### Transformer Classifier
 
 ```
-Input: [batch, 1, T=1500]
+Input: [batch, 1, T=1500] light curve time series
    ↓
-1D Convolution Downsampling (factor: 3)
-   [batch, 1, 1500] → [batch, d_model, 500]
-   Purpose: Reduce sequence length for computational efficiency
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PREPROCESSING LAYER (not the main model)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1D Convolution (Downsampling Only)
+   [batch, 1, 1500] → [batch, d_model=64, 500]
+   
+   Purpose: Reduce sequence length by 3×
+   - Makes computation tractable
+   - Projects to embedding dimension
+   - NOT the classification model itself
    ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRANSFORMER ENCODER (the actual model)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Positional Encoding
-   Adds temporal position information
+   Adds position information to embeddings
    ↓
-Transformer Encoder (L=2 layers)
-   - Multi-Head Self-Attention (H=4 heads)
-     Captures long-range temporal dependencies
-   - Feed-Forward Network (d_ff=256)
-   - Layer Normalization
-   - Residual connections
+Transformer Encoder Stack (L=2 layers)
+   Each layer contains:
+   • Multi-Head Attention (H=4 heads)
+     - Computes attention across all timesteps
+     - Captures temporal dependencies
+   • Feed-Forward Network (d_ff=256)
+     - Two linear layers with GELU activation
+   • Layer Normalization + Residual Connections
    ↓
-Classification Heads:
-   - Per-Timestep Head: For sequential decision-making
-   - Global Pooling Head: For final classification
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT LAYERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Two classification modes:
+
+Mode 1: Sequential (return_sequence=True)
+   Per-Timestep Head → [batch, 500, 2]
+   Used for: Early detection analysis
+   
+Mode 2: Final (return_sequence=False)  
+   Global Pooling → [batch, 64]
+   Classification Head → [batch, 2]
+   Used for: Final PSPL vs Binary decision
    ↓
-Output: [batch, 2] → {PSPL, Binary}
+Output: Class probabilities {PSPL, Binary}
 ```
 
-**Key Design Choices**:
-- **Conv1D Downsampling**: Efficiently reduces sequence length 3× while preserving temporal structure
-- **Self-Attention**: Captures complex temporal patterns in light curves without recurrence
-- **Dual Output Modes**: 
-  - `return_sequence=False`: Final classification (global pooling)
-  - `return_sequence=True`: Per-timestep predictions for early detection
-- **Padding Masking**: Properly handles missing observations (-1.0 padding) throughout pipeline
+**Key Points**:
+1. **Conv1D is just preprocessing** - reduces 1500 → 500 timesteps for efficiency
+2. **Transformer is the actual model** - processes the 500-length sequences
+3. **Multi-head attention** captures temporal patterns in light curves
+4. **No recurrence** - entire sequence processed in parallel (unlike RNNs)
 
-**Why Transformer?**
-- **Long-range dependencies**: Binary caustic features can span hundreds of timesteps
-- **Parallel processing**: Unlike RNNs, processes entire sequence in parallel
-- **Attention maps**: Interpretable - can visualize which timesteps drive classification
+**Why This Architecture?**
+- **Transformers**: Better at long-range dependencies than RNNs/LSTMs
+- **Downsampling**: Makes full sequence tractable (500 vs 1500 timesteps)
+- **Attention**: Can focus on caustic crossings regardless of position
+- **Parallel**: Much faster than recurrent models
 
 ---
 
@@ -169,7 +190,6 @@ torchrun --nproc_per_node=4 train.py \
 
 ```bash
 #!/bin/bash
-# On SLURM cluster
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 export MASTER_PORT=29500
 
@@ -190,30 +210,27 @@ srun torchrun \
 ### DDP Debugging
 
 ```bash
-# Enable comprehensive debugging
+# Enable debugging
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-# Check GPU visibility
+# Check GPUs
 nvidia-smi
-echo $CUDA_VISIBLE_DEVICES
 
-# Test with single GPU first
+# Test single GPU first
 torchrun --nproc_per_node=1 train.py \
     --data ../data/raw/baseline_1M.npz \
-    --experiment_name baseline_test \
+    --experiment_name test \
     --epochs 2 \
     --batch_size 64
 
-# Network interface issues (SLURM)
-export NCCL_SOCKET_IFNAME=eth0  # or ib0 for InfiniBand
+# Network interface (SLURM)
+export NCCL_SOCKET_IFNAME=eth0
 ```
 
 ---
 
 ## Evaluation & Visualization
-
-The evaluation script generates all visualizations:
 
 ```bash
 python evaluate.py \
@@ -225,66 +242,40 @@ python evaluate.py \
 
 ### Generated Outputs
 
-**1. Three-Panel Sample Plots** (`samples/sample_XXXX.png`):
-- Panel 1: Original light curve data with decision line
-- Panel 2: Model input view (normalized) with decision line  
-- Panel 3: Class probabilities over time (clamped after decision)
-
-**2. Confusion Matrix** (`confusion_matrix.png`)
-
-**3. Decision Time Distribution** (`decision_time_distribution.png`)
-
-**4. Accuracy vs Decision Time** (`accuracy_vs_decision_time.png`)
-
-**5. ROC Curve** (`roc_curve.png`)
-
-**6. Evaluation Summary** (`evaluation_summary.json`):
-```json
-{
-  "accuracy": 0.7234,
-  "roc_auc": 0.7891,
-  "decision_time_mean": 245.3,
-  "decision_time_median": 198.0,
-  "confidence_threshold": 0.8
-}
-```
+1. **Three-Panel Sample Plots** (`samples/sample_XXXX.png`)
+2. **Confusion Matrix** (`confusion_matrix.png`)
+3. **Decision Time Distribution** (`decision_time_distribution.png`)
+4. **Accuracy vs Decision Time** (`accuracy_vs_decision_time.png`)
+5. **ROC Curve** (`roc_curve.png`)
+6. **Evaluation Summary** (`evaluation_summary.json`)
 
 ---
 
 ## Research Questions Addressed
 
-### 1. **Baseline Performance**
-What classification accuracy is achievable across realistic binary parameter distributions?
-
+### 1. Baseline Performance
 **Answer**: 70-75% accuracy on mixed population (planetary + stellar binaries)
 
-### 2. **Early Detection Capability**
-How early can we reliably identify binary events with partial light curves?
+### 2. Early Detection Capability
+**Answer**: 68-72% accuracy with only 50% of observations
 
-**Answer**: 68-72% accuracy with only 50% of observations, enabling follow-up trigger decisions hours to days earlier
+### 3. Physical Detection Limits
+**Answer**: Impact parameter u₀ > 0.3 represents physical boundary (~20% of binaries)
 
-### 3. **Physical Detection Limits**
-What are the fundamental limits imposed by binary topology?
+### 4. Observational Dependence
 
-**Answer**: Impact parameter u₀ > 0.3 represents physical boundary—these events are intrinsically PSPL-like (~20% of binaries)
-
-### 4. **Observational Dependence**
-How do cadence and photometric quality affect performance?
-
-**Cadence Study**:
-- Dense (5% missing): 75-80% accuracy
-- Standard (20% missing): 70-75% accuracy  
-- Sparse (40% missing): 60-65% accuracy
+**Cadence**:
+- Dense (5% missing): 75-80%
+- Standard (20% missing): 70-75%  
+- Sparse (40% missing): 60-65%
 
 **Photometric Quality**:
-- Space-based (0.05 mag): 75-80% accuracy
-- Ground-based (0.10 mag): 70-75% accuracy
-- Poor conditions (0.20 mag): 65-70% accuracy
+- Space-based (0.05 mag): 75-80%
+- Ground-based (0.10 mag): 70-75%
+- Poor (0.20 mag): 65-70%
 
-### 5. **Real-Time Feasibility**
-Can this run in production survey pipelines?
-
-**Answer**: <1 ms inference per event → 10,000+ LSST alerts/night processable on single GPU (~1000× faster than traditional fitting)
+### 5. Real-Time Feasibility
+**Answer**: <1 ms per event → 10,000+ LSST alerts/night on single GPU
 
 ---
 
@@ -294,30 +285,17 @@ Can this run in production survey pipelines?
 Thesis/
 ├── code/
 │   ├── simulate.py           # Fast parallel simulation
-│   ├── train.py              # DDP Transformer training (v5.3 fixed)
-│   ├── evaluate.py           # Complete evaluation + plots (v5.3 fixed)
+│   ├── train.py              # DDP Transformer training (v5.3)
+│   ├── evaluate.py           # Evaluation + plots (v5.3)
 │   ├── benchmark_realtime.py # Performance testing
 │   ├── model.py              # Transformer architecture
 │   ├── config.py             # Configuration
-│   ├── utils.py              # Utilities (v5.3 fixed)
-│   └── visualize.py          # Visualization functions
+│   ├── utils.py              # Utilities (v5.3)
+│   └── visualize.py          # Visualization
 │
-├── data/
-│   └── raw/                  # Simulated datasets (.npz)
-│
+├── data/raw/                 # Simulated datasets
 ├── results/                  # Experiment outputs
-│   └── {experiment}_{timestamp}/
-│       ├── best_model.pt     # Includes model_state_dict, optimizer, config
-│       ├── config.json
-│       ├── scaler_standard.pkl
-│       ├── scaler_minmax.pkl
-│       └── evaluation/
-│
-├── docs/
-│   ├── SETUP_GUIDE.md
-│   ├── RESEARCH_GUIDE.md
-│   └── QUICK_REFERENCE.md
-│
+├── docs/                     # Documentation
 └── README.md
 ```
 
@@ -331,16 +309,16 @@ Thesis/
 |------|------|-------|
 | Simulate 1M | 10-15 min | 200 workers |
 | Train DDP 1M | 30-45 min | 4 GPUs |
-| Evaluate | 2-5 min | Includes all plots |
+| Evaluate | 2-5 min | All plots |
 
-### Accuracy (Expected Ranges)
+### Accuracy
 
 | Experiment | Test Accuracy | Notes |
 |------------|---------------|-------|
-| Baseline (1M) | 70-75% | Mixed parameters |
+| Baseline | 70-75% | Mixed parameters |
 | Dense (5%) | 75-80% | Intensive cadence |
 | Sparse (30%) | 65-70% | Poor coverage |
-| Low Error (0.05) | 75-80% | Space-based |
+| Space (0.05 mag) | 75-80% | Low noise |
 | Distinct | 80-90% | Clear caustics |
 
 ---
@@ -349,29 +327,21 @@ Thesis/
 
 ### DDP Issues
 
-**Only using 1 GPU**:
 ```bash
-# Verify torchrun detects all GPUs
+# Verify GPU count
 python -c "import torch; print(f'GPUs: {torch.cuda.device_count()}')"
 
-# Ensure proper torchrun call
-torchrun --nproc_per_node=4 train.py [args]
-```
-
-**Training hangs**:
-```bash
 # Enable debug
 export NCCL_DEBUG=INFO
 
-# Check network
+# Network interface
 export NCCL_SOCKET_IFNAME=eth0
 ```
 
 ### Normalization Issues
 
-**Data range incorrect**:
 ```bash
-# Check raw data
+# Check data
 python -c "
 import numpy as np
 data = np.load('../data/raw/baseline_1M.npz')
@@ -379,7 +349,7 @@ X = data['X']
 print(f'Range: [{X.min():.3f}, {X.max():.3f}]')
 "
 
-# Verify scalers exist
+# Verify scalers
 ls -lh ../results/baseline_*/scaler_*.pkl
 ```
 
@@ -387,9 +357,9 @@ ls -lh ../results/baseline_*/scaler_*.pkl
 
 ## Documentation
 
-- **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Installation + DDP setup
-- **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Systematic experiments
-- **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet
+- **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Installation + DDP
+- **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Experiments
+- **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Commands
 
 ---
 
@@ -400,8 +370,7 @@ ls -lh ../results/baseline_*/scaler_*.pkl
   title={Real-Time Binary Microlensing Classification using Transformers},
   author={Bhatia, Kunal},
   year={2025},
-  school={University of Heidelberg},
-  note={Code: https://github.com/YOUR_USERNAME/Thesis}
+  school={University of Heidelberg}
 }
 ```
 
@@ -409,7 +378,7 @@ ls -lh ../results/baseline_*/scaler_*.pkl
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT License - See [LICENSE](LICENSE)
 
 ---
 
