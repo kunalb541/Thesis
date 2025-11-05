@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py - Model Evaluation (v5.3 - Causal Early Detection)
+evaluate.py - Model Evaluation (v6.1 - MASKED LOSS)
 
 FIXED:
-- Loads 3D data [N, 1, T] directly via new utils.
-- No longer needs to reshape data.
-- REPLACED `run_early_detection_analysis` with a memory-efficient
-  and truly causal version that uses sequence truncation.
-- v6.0 FIX: Updated model loading to match simplified CausalCNN
+- v6.1: CRITICAL FIX: Updated `evaluate_model_final_step` and
+        `run_early_detection_analysis` to use masked loss logic
+        and compute accuracy on the LAST VALID timestep.
+- v6.0: Updated model loading to match simplified CausalCNN.
 
 Author: Kunal Bhatia
-Version: 6.0
+Version: 6.1
 Date: November 2025
 """
 
@@ -64,13 +63,12 @@ def find_latest_results_dir(experiment_name, base_dir='../results'):
     return matching_dirs[0]
 
 
-def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
+# --- START: CRITICAL FIX - MASKED EVALUATION ---
+def evaluate_model_final_step(model, X_3d, y_true, device, batch_size=128, quiet=False):
     """
-    Evaluate model and return predictions and confidences
-    based on the FINAL timestep (return_sequence=False).
-    X_3d is shape [N, C, T]
-    
-    --- NOTE: X_3d is passed with -1.0 pads, model handles them ---
+    Evaluate model (v6.1)
+    Returns predictions and confidences based on the LAST VALID timestep.
+    X_3d is shape [N, C, T] (with -1.0 pads)
     """
     model.eval()
     
@@ -81,7 +79,7 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
     n_samples = len(X_3d)
     
     if not quiet:
-        print(f"\nEvaluating {n_samples} samples (final step)...")
+        print(f"\nEvaluating {n_samples} samples (last valid step)...")
     
     with torch.no_grad():
         for i in range(0, n_samples, batch_size):
@@ -89,12 +87,22 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
             batch_end = min(i + batch_size, n_samples)
             X_batch = X_3d[batch_start:batch_end]
             
-            # Input shape [B, C, T]
             X_tensor = torch.from_numpy(X_batch).float().to(device)
+            B, C, T = X_tensor.shape
+
+            # Get predictions for the *entire* sequence
+            logits_seq, _ = model(X_tensor, return_sequence=True) # [B, T, n_classes]
             
-            # --- Call model with return_sequence=False ---
-            # --- NOTE: Model now returns (logits, None) ---
-            outputs, _ = model(X_tensor, return_sequence=False) # [B, n_classes]
+            # --- Find last valid timestep ---
+            pad_mask = (X_tensor[:, 0, :] != -1.0) # [B, T]
+            last_valid_idx = pad_mask.long().sum(dim=1) - 1 # [B]
+            last_valid_idx = torch.clamp(last_valid_idx, min=0, max=T-1)
+            
+            # Gather predictions from last valid timestep
+            batch_indices = torch.arange(B, device=device)
+            outputs = logits_seq[batch_indices, last_valid_idx, :] # [B, n_classes]
+            
+            # --- Standard logic from here ---
             probs = torch.softmax(outputs, dim=1)
             
             probs_np = probs.cpu().numpy()
@@ -114,25 +122,24 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
     return (np.array(predictions), 
             np.array(confidences), 
             np.array(all_probs))
+# --- END: CRITICAL FIX ---
 
 
-# --- START CHANGED: Efficient Causal Early Detection (Fix #3) ---
+# --- START: CRITICAL FIX - MASKED EARLY DETECTION ---
 @torch.no_grad()
 def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size=128):
     """
-    Evaluates model accuracy at different observation checkpoints
-    using sequence truncation. This is memory-efficient and
-    guarantees causal evaluation.
-    X_3d is shape [N, C, T]
-    
-    --- NOTE: X_3d is passed with -1.0 pads, model handles them ---
+    Evaluates model accuracy at different observation checkpoints (v6.1)
+    Uses sequence truncation.
+    Computes accuracy on LAST VALID timestep *within the truncated sequence*.
+    X_3d is shape [N, C, T] (with -1.0 pads)
     """
     model.eval()
     N, C, T = X_3d.shape
     results = {}
     
     print("\n" + "=" * 80)
-    print("EARLY DETECTION ANALYSIS (Causal Truncation Method)")
+    print("EARLY DETECTION ANALYSIS (Causal Truncation, Last Valid Step)")
     print("=" * 80)
     
     for chk in checkpoints:
@@ -152,12 +159,23 @@ def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size
         for i in range(0, N, batch_size):
             batch_start = i
             batch_end = min(i + batch_size, N)
-            X_batch = X_truncated[batch_start:batch_end]
-            X_tensor = torch.from_numpy(X_batch).float().to(device)
             
-            # Get FINAL prediction on the TRUNCATED sequence
-            # --- NOTE: Model now returns (logits, None) ---
-            logits, _ = model(X_tensor, return_sequence=False)  # [B, n_classes]
+            X_batch_np = X_truncated[batch_start:batch_end]
+            X_tensor = torch.from_numpy(X_batch_np).float().to(device)
+            B_b, C_b, T_b = X_tensor.shape # T_b is the truncated length
+            
+            # Get FULL sequence predictions *for the truncated input*
+            logits_seq, _ = model(X_tensor, return_sequence=True)  # [B_b, T_b, n_classes]
+            
+            # --- Find last valid timestep *within this truncated view* ---
+            pad_mask = (X_tensor[:, 0, :] != -1.0) # [B_b, T_b]
+            last_valid_idx = pad_mask.long().sum(dim=1) - 1 # [B_b]
+            last_valid_idx = torch.clamp(last_valid_idx, min=0, max=T_b-1)
+            
+            # Gather predictions
+            batch_indices = torch.arange(B_b, device=device)
+            logits = logits_seq[batch_indices, last_valid_idx, :] # [B_b, n_classes]
+            
             preds = torch.argmax(logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
         
@@ -171,7 +189,7 @@ def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size
 
     print("=" * 80)
     return results
-# --- END CHANGED ---
+# --- END: CRITICAL FIX ---
 
 
 def plot_results(output_dir, cm, y_true, probs, quiet=False):
@@ -189,7 +207,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
                 cbar_kws={'label': 'Count'})
     plt.xlabel('Predicted', fontsize=12)
     plt.ylabel('True', fontsize=12)
-    plt.title('Confusion Matrix (Final Step)', fontsize=14, fontweight='bold')
+    plt.title('Confusion Matrix (Last Valid Step)', fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(output_dir / 'confusion_matrix.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -211,7 +229,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
         plt.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Random Classifier')
         plt.xlabel('False Positive Rate', fontsize=12)
         plt.ylabel('True Positive Rate', fontsize=12)
-        plt.title('ROC Curve (Final Step)', fontsize=14, fontweight='bold')
+        plt.title('ROC Curve (Last Valid Step)', fontsize=14, fontweight='bold')
         plt.legend(fontsize=11, loc='lower right')
         plt.grid(alpha=0.3)
         plt.tight_layout()
@@ -230,7 +248,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
                 label=f'PR Curve (AUC = {pr_auc:.3f})', color='darkgreen')
         plt.xlabel('Recall', fontsize=12)
         plt.ylabel('Precision', fontsize=12)
-        plt.title('Precision-Recall Curve (Final Step)', fontsize=14, fontweight='bold')
+        plt.title('Precision-Recall Curve (Last Valid Step)', fontsize=14, fontweight='bold')
         plt.legend(fontsize=11, loc='lower left')
         plt.grid(alpha=0.3)
         plt.tight_layout()
@@ -242,7 +260,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate model (v5.3 - Causal Early Detection)')
+    parser = argparse.ArgumentParser(description='Evaluate model (v6.1 - Masked Loss)')
     parser.add_argument("--model", type=str, default=None, 
                        help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, 
@@ -280,7 +298,7 @@ def main():
     
     if not args.quiet:
         print("=" * 80)
-        print("MODEL EVALUATION (v6.0 - Causal Simplified CNN)")
+        print("MODEL EVALUATION (v6.1 - Causal Simplified CNN, Masked Loss)")
         print("=" * 80)
         print(f"\nModel: {args.model}")
         print(f"Data: {args.data}")
@@ -328,14 +346,12 @@ def main():
         with open(config_path) as f:
             config = json.load(f)
     
-    # --- START: MODEL INSTANTIATION FIX ---
+    # --- START: MODEL INSTANTIATION FIX (already fixed) ---
     if not args.quiet:
         print("Loading TimeDistributedCNN (Simplified Causal CNN)...")
     model = TimeDistributedCNN(
         in_channels=1, 
         n_classes=2, 
-        # window_size=window_size, # REMOVED
-        # use_lstm=True,           # REMOVED
         dropout=config.get('dropout', 0.3) # Get dropout from config
     )
     model_type = "TimeDistributed_CausalCNN_Simplified"
@@ -355,22 +371,16 @@ def main():
         print(f"❌ Error loading model state_dict: {e}")
         sys.exit(1)
     
-    # --- START: PADDING FIX ---
-    # We NO LONGER replace PAD_VALUE with 0.0
-    # The model is trained on -1.0 pads and will be evaluated on -1.0 pads
-    # X_processed = X.copy()
-    # X_processed[X_processed == CFG.PAD_VALUE] = 0.0 # <-- REMOVED
-    
-    # We pass X directly to the evaluation functions
-    # --- END: PADDING FIX ---
+    # --- We pass X (with -1.0 pads) directly to evaluation ---
     
     # Evaluate (Final Step)
     if not args.quiet:
         print("\n" + "=" * 80)
-        print("INFERENCE (Final Timestep)")
+        print("INFERENCE (Last Valid Timestep)")
         print("=" * 80)
     
-    preds, confs, probs = evaluate_model_final_step(model, X, device, # Pass X
+    # --- CRITICAL FIX: Pass 'y' to the evaluation function ---
+    preds, confs, probs = evaluate_model_final_step(model, X, y, device, # Pass X and y
                                                     batch_size=args.batch_size,
                                                     quiet=args.quiet)
     
@@ -385,7 +395,7 @@ def main():
     # Print results (final step)
     if not args.quiet:
         print("\n" + "=" * 80)
-        print("RESULTS (Final Timestep)")
+        print("RESULTS (Last Valid Timestep)")
         print("=" * 80)
     
     print(f"\n{'Metric':<20} {'Value':<10}")

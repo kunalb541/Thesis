@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# train.py - Training with TimeDistributed architecture (v5.4 - Aligned Loss)
+# train.py - Training with TimeDistributed architecture (v6.1 - MASKED LOSS)
 #
 # FIXES:
-# 1. load_data_with_shuffle now returns 3D data [N, 1, T] directly.
-# 2. Normalization functions (fit/apply) handle 3D data.
-# 3. Training step `step_timedistributed` simplified to use
-#    loss = loss_all_steps (CrossEntropyLoss on all timesteps)
-# 4. `evaluate` function aligned to use the *same* loss_all_steps
-#    metric for validation loss.
-# 5. Accuracy is still computed on the FINAL timestep prediction.
+# 1. CRITICAL FIX: Implemented masked loss in `step_timedistributed`
+#    and `evaluate` to ignore -1.0 pad values.
+# 2. CRITICAL FIX: Accuracy is now computed on the LAST VALID timestep,
+#    not the final timestep.
+# 3. Added data validation block to `main`.
 #
 import warnings
 warnings.filterwarnings('ignore')
@@ -230,12 +228,12 @@ def save_scalers_rank0(params, out_dir):
 # --- END Normalization ---
 
 
-# --- START CHANGED: Simplified Training Step (Fix #2) ---
+# --- START: CRITICAL FIX 1 - MASKED LOSS (FROM USER) ---
 def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None):
     """
-    FIXED Training step for TimeDistributed model (v5.4)
-    Uses simplified loss: loss_all_steps
-    Accuracy is still computed on the FINAL timestep.
+    FIXED Training step (v6.1)
+    Uses MASKED loss (ignores -1.0 pads).
+    Computes accuracy on LAST VALID timestep.
     """
     x, y = batch
     x = x.to(device, non_blocking=True) # [B, C, T]
@@ -250,27 +248,43 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
     with torch.cuda.amp.autocast(enabled=use_amp):
         
         # Get predictions at all timesteps
-        # --- NOTE: Model now returns (logits, None) ---
         logits_seq, _ = model(x, return_sequence=True)  # [B, T, n_classes]
         
-        # ===== CRITICAL FIX: Supervise ALL timesteps =====
+        # ===== CRITICAL FIX: Create padding mask =====
+        # Identify non-padded timesteps (where input != -1.0)
+        # Check the first channel (all channels have same padding pattern)
+        pad_mask = (x[:, 0, :] != -1.0)  # [B, T], True for valid data
+        
         # Expand labels to match sequence length
         y_expanded = y.unsqueeze(1).expand(B, T)  # [B] -> [B, T]
         
-        # 1. Loss on all timesteps
+        # Flatten
         logits_flat = logits_seq.reshape(B * T, -1)  # [B*T, n_classes]
         y_flat = y_expanded.reshape(B * T)  # [B*T]
+        pad_mask_flat = pad_mask.reshape(B * T)  # [B*T]
         
-        # --- NOTE: This (correctly) feeds data with -1.0 pads to the loss,
-        # --- but CrossEntropyLoss's 'mean' reduction handles it.
-        # --- The model's ReLU layers already zeroed-out the -1.0 pads
-        # --- during the forward pass (ReLU(negative) = 0).
-        loss = criterion(logits_flat, y_flat)
+        # ===== ONLY COMPUTE LOSS ON NON-PADDED TIMESTEPS =====
+        n_valid = pad_mask_flat.sum()
+        if n_valid > 0:  # Safety check
+            logits_valid = logits_flat[pad_mask_flat]  # [N_valid, n_classes]
+            y_valid = y_flat[pad_mask_flat]  # [N_valid]
+            loss = criterion(logits_valid, y_valid)
+        else:
+            # Handle empty batch (shouldn't happen, but safe)
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
         # ================================================
     
-    # Accuracy computed on FINAL prediction only
-    pred = logits_seq[:, -1, :].argmax(dim=1)
+    # ===== ACCURACY ON FINAL VALID TIMESTEP =====
+    # Find last valid timestep for each sample
+    # B * T - (B * T - T) = T
+    last_valid_idx = pad_mask.long().sum(dim=1) - 1  # [B]
+    last_valid_idx = torch.clamp(last_valid_idx, min=0, max=T-1) # Ensure in-bounds
+    
+    # Gather predictions from last valid timestep
+    batch_indices = torch.arange(B, device=device)
+    pred = logits_seq[batch_indices, last_valid_idx, :].argmax(dim=1)
     correct = (pred == y).sum()
+    # ============================================
 
     if is_train:
         scaler.scale(loss).backward()
@@ -279,16 +293,16 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
 
     # Return loss, correct count, and B (number of samples)
     return loss.detach(), correct.detach(), y.numel()
-# --- END CHANGED ---
+# --- END: CRITICAL FIX 1 ---
 
 
-# --- START CHANGED: Aligned Evaluation Function (Fix #2) ---
+# --- START: CRITICAL FIX 2 - MASKED VALIDATION (FROM USER) ---
 @torch.no_grad()
 def evaluate(model, loader, device, criterion):
     """
-    Validation function.
-    Computes loss on ALL timesteps (to match training).
-    Computes accuracy on FINAL timestep (primary metric).
+    Validation function (v6.1)
+    Computes MASKED loss on ALL valid timesteps.
+    Computes accuracy on LAST VALID timestep.
     """
     model.eval()
     loss_sum = torch.tensor(0.0, device=device)
@@ -301,21 +315,35 @@ def evaluate(model, loader, device, criterion):
         y = y.to(device, non_blocking=True)
         B, C, T = x.shape
         
-        # --- Get FULL sequence (like training) ---
-        # --- NOTE: Model now returns (logits, None) ---
-        logits_seq, _ = model(x, return_sequence=True) # [B, T, n_classes]
+        logits_seq, _ = model(x, return_sequence=True)
         
-        # --- Compute SAME loss as training (all steps) ---
+        # ===== CREATE PADDING MASK =====
+        pad_mask = (x[:, 0, :] != -1.0) # [B, T]
+        
         y_expanded = y.unsqueeze(1).expand(B, T)
         logits_flat = logits_seq.reshape(B * T, -1)
         y_flat = y_expanded.reshape(B * T)
-        loss = criterion(logits_flat, y_flat)
+        pad_mask_flat = pad_mask.reshape(B * T)
         
-        # --- Accuracy computed on FINAL prediction only ---
-        pred = logits_seq[:, -1, :].argmax(dim=1)
+        # ===== MASKED LOSS =====
+        n_valid = pad_mask_flat.sum()
+        if n_valid > 0:
+            logits_valid = logits_flat[pad_mask_flat]
+            y_valid = y_flat[pad_mask_flat]
+            loss = criterion(logits_valid, y_valid)
+        else:
+            loss = torch.tensor(0.0, device=device)
+        
+        # ===== ACCURACY ON FINAL VALID TIMESTEP =====
+        last_valid_idx = pad_mask.long().sum(dim=1) - 1
+        last_valid_idx = torch.clamp(last_valid_idx, min=0, max=T-1)
+        batch_indices = torch.arange(B, device=device)
+        pred = logits_seq[batch_indices, last_valid_idx, :].argmax(dim=1)
         correct = (pred == y).sum()
+        # ============================================
 
-        loss_sum += loss * y.numel() # loss is avg per timestep, * y.numel() is per batch
+        # Note: We scale loss by B (y.numel()) for averaging
+        loss_sum += loss * y.numel()
         correct_sum += correct
         count_sum += y.numel()
 
@@ -323,10 +351,12 @@ def evaluate(model, loader, device, criterion):
     reduce_tensor(correct_sum)
     reduce_tensor(count_sum)
 
+    # Avg loss per *sample* (not per valid timestep, but consistent)
     loss_avg = (loss_sum / count_sum).item() if count_sum.item() > 0 else 0.0
+    # Avg acc per sample
     acc = (correct_sum / count_sum).item() if count_sum.item() > 0 else 0.0
     return loss_avg, acc
-# --- END CHANGED ---
+# --- END: CRITICAL FIX 2 ---
 
 
 def main():
@@ -355,39 +385,53 @@ def main():
 
     if rank == 0:
         rank0_print("=" * 76)
-        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v6.0 - Simplified Causal CNN)")
+        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v6.1 - MASKED LOSS)")
         rank0_print("=" * 76)
         rank0_print(f"World size: {world_size} | Rank: {rank} | Local rank: {local_rank}")
         rank0_print(f"Data: {args.data}")
         rank0_print(f"Model: Causal TimeDistributedCNN (Simplified, No LSTM)")
-        rank0_print(f"Loss: CrossEntropyLoss (all timesteps)")
+        rank0_print(f"Loss: MASKED CrossEntropyLoss (all valid timesteps)")
         rank0_print("=" * 76)
     
     # --- CHANGED: Load 3D data [N, 1, T] ---
     X, y = load_data_with_shuffle(args.data)
     n_classes = int(np.max(y) + 1)
     
-    # --- No reshape needed ---
-    
-    # (Balance check... no changes)
+    # --- START: CRITICAL FIX 3 - DATA VALIDATION (FROM USER) ---
     if rank == 0:
-        # ... (balance check code)
-        pass
-
+        rank0_print("\nValidating data...")
+        
+        # Check shape
+        if X.ndim != 3:
+            raise ValueError(f"Expected 3D data [N,C,T], got shape {X.shape}")
+        if X.shape[1] != 1:
+            raise ValueError(f"Expected C=1, got C={X.shape[1]}")
+        
+        # Check for padding
+        n_padded = (X == -1.0).sum()
+        pct_padded = 100 * n_padded / X.size
+        rank0_print(f"  Shape: {X.shape} ✓")
+        rank0_print(f"  Padded values: {n_padded:,} ({pct_padded:.1f}%)")
+        
+        # Check class balance
+        n_class0 = (y == 0).sum()
+        n_class1 = (y == 1).sum()
+        rank0_print(f"  Class 0 (PSPL): {n_class0:,}")
+        rank0_print(f"  Class 1 (Binary): {n_class1:,}")
+        rank0_print(f"  Balance: {100*n_class1/(n_class0+n_class1):.1f}% binary")
+        
+        # Check for NaN/Inf
+        if np.isnan(X).any():
+            raise ValueError("Data contains NaN values!")
+        if np.isinf(X).any():
+            raise ValueError("Data contains Inf values!")
+        
+        rank0_print("  ✓ Data validation passed\n")
+    # --- END: CRITICAL FIX 3 ---
+    
     # Split (X is now 3D)
     test_size = args.test_split
     val_size = args.val_split / (1.0 - test_size)
-    
-    # --- START FIX: Add Data Shape Validation ---
-    if rank == 0:
-        if X.ndim != 3:
-            raise ValueError(f"Expected 3D data [N,C,T], got {X.shape}")
-        if X.shape[1] != 1:
-            rank0_print(f"⚠️ WARNING: Expected C=1, got C={X.shape[1]}")
-        # if X.shape[2] != 1500: # Removed hardcoded check
-        #     rank0_print(f"⚠️ WARNING: Expected T=1500, got T={X.shape[2]}")
-        rank0_print(f"✓ Data shape validated: {X.shape}")
-    # --- END FIX ---
     
     X_trainval, X_test, y_trainval, y_test = train_test_split(
         X, y, test_size=test_size, random_state=args.seed, stratify=y
@@ -431,12 +475,11 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
                             sampler=test_sampler, num_workers=args.num_workers, pin_memory=True)
 
-    # --- START: MODEL INSTANTIATION FIX ---
+    # --- START: MODEL INSTANTIATION (already fixed) ---
     rank0_print("Creating Causal TimeDistributedCNN (Simplified, No LSTM)...")
     model = TimeDistributedCNN(
         in_channels=X.shape[1], # Should be 1
         n_classes=n_classes,
-        # lstm_hidden=64,  <--- REMOVED
         dropout=0.3
     ).to(device)
     # --- END: MODEL INSTANTIATION FIX ---
@@ -444,7 +487,7 @@ def main():
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
 
-    # --- CHANGED: Use reduction='mean' for loss ---
+    # --- Use reduction='mean' for loss ---
     criterion = nn.CrossEntropyLoss(reduction='mean').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
@@ -460,9 +503,9 @@ def main():
         (Path(exp_dir) / "evaluation").mkdir(parents=True, exist_ok=True)
         with open(os.path.join(exp_dir, "config.json"), "w") as f:
             config_dict = vars(args).copy()
-            # --- START: CONFIG STRING FIX ---
+            # --- START: CONFIG STRING (already fixed) ---
             config_dict['model_type'] = 'TimeDistributed_CausalCNN_Simplified'
-            config_dict['loss_function'] = 'CrossEntropyLoss_AllTimesteps'
+            config_dict['loss_function'] = 'CrossEntropyLoss_Masked' # <-- Updated
             # --- END: CONFIG STRING FIX ---
             config_dict['dropout'] = 0.3 # Save dropout
             json.dump(config_dict, f, indent=2)
@@ -482,8 +525,7 @@ def main():
         correct_sum = torch.tensor(0.0, device=device)
         count_sum = torch.tensor(0.0, device=device)
 
-        # --- CHANGED: Use simplified training step ---
-        # --- START: ADD GRADIENT CHECK ---
+        # --- Use simplified training step ---
         for batch_idx, batch in enumerate(train_loader): # Added batch_idx
             loss, correct, count = step_timedistributed(
                 model, batch, device, criterion, scaler, optimizer
@@ -503,7 +545,6 @@ def main():
                 rank0_print(f"  --> First batch gradient norm: {total_norm:.6f}")
                 if total_norm < 1e-7:
                     rank0_print("  --> ⚠️ WARNING: Very small gradients! Model may not learn.")
-        # --- END: ADD GRADIENT CHECK ---
 
         reduce_tensor(loss_sum)
         reduce_tensor(correct_sum)
@@ -512,7 +553,7 @@ def main():
         train_loss = (loss_sum / count_sum).item()
         train_acc = (correct_sum / count_sum).item()
 
-        # --- CHANGED: Validation now uses the aligned 'evaluate' function ---
+        # --- Validation now uses the aligned 'evaluate' function ---
         val_loss, val_acc = evaluate(model, val_loader, device, criterion)
 
         if rank == 0:
@@ -542,7 +583,7 @@ def main():
     state_dict = broadcast_object_from_rank0(state_dict)
     (model.module if isinstance(model, DDP) else model).load_state_dict(state_dict)
 
-    # --- CHANGED: Test set uses aligned 'evaluate' function ---
+    # --- Test set uses aligned 'evaluate' function ---
     test_loss, test_acc = evaluate(model, test_loader, device, criterion)
 
     if rank == 0:
@@ -551,17 +592,15 @@ def main():
             "final_test_acc": float(test_acc),
             "best_val_acc": float(best_val_acc),
             "best_epoch": int(best_epoch),
-            # --- START: CONFIG STRING FIX ---
             "model_type": 'TimeDistributed_CausalCNN_Simplified',
-            "loss_function": 'CrossEntropyLoss_AllTimesteps',
-            # --- END: CONFIG STRING FIX ---
+            "loss_function": 'CrossEntropyLoss_Masked',
             "results_dir": exp_dir,
         }
         with open(os.path.join(exp_dir, "summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
 
         rank0_print("\n" + "=" * 80)
-        rank0_print("FINAL EVALUATION (Loss: AllSteps, Acc: FinalStep)") # CHANGED
+        rank0_print("FINAL EVALUATION (Loss: Masked, Acc: LastValidStep)")
         rank0_print("=" * 80)
         rank0_print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
         rank0_print(f"Best  | val acc {best_val_acc:.4f} (epoch {best_epoch})")
