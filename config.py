@@ -79,7 +79,7 @@ BINARY_PARAM_SETS = {
 }
 
 # ============================================================================
-# MODEL PARAMETERS
+# MODEL PARAMETERS (TRANSFORMER)
 # ============================================================================
 
 # Transformer architecture

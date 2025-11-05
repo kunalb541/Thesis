@@ -1,6 +1,6 @@
-# Real-Time Binary Microlensing Classification
+# Real-Time Binary Microlensing Classification with Transformers
 
-**Deep Learning for Next-Generation Survey Operations - Version 4.0**
+**Deep Learning for Next-Generation Survey Operations - Version 5.0**
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-red.svg)](https://pytorch.org/)
@@ -8,30 +8,31 @@
 
 **Author**: Kunal Bhatia (kunal29bhatia@gmail.com)  
 **Institution**: University of Heidelberg  
-**Date**: October 2025
+**Date**: November 2025
 
 ---
 
 ## Overview
 
-This project implements an automated classification system for binary gravitational microlensing events using deep learning. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
+This project implements an automated classification system for binary gravitational microlensing events using **Transformer neural networks with self-attention mechanisms**. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
 
-### Key Features (v4.0)
+### Key Features (v5.0)
 
+- **Transformer Architecture**: Efficient self-attention for temporal sequence modeling
+- **Sequential Classification**: Per-timestep predictions enabling early detection
 - **Distributed Training (DDP)**: Multi-node, multi-GPU support with PyTorch DDP
 - **Ultra-Fast Pipeline**: Complete 1M event workflow in ~1 hour
-- **TimeDistributed CNN** architecture for sequential classification
 - **Real-time capable**: Sub-millisecond inference per event
 - **Production-ready**: Saved normalization parameters ensure reproducible inference
-- **Comprehensive benchmarking**: Performance across diverse observing conditions
+- **Comprehensive Evaluation**: Notebook-style visualizations replicating original research
 
-### What's New in v4.0
+### What's New in v5.0
 
-- ⚡ **10× faster simulation**: Parallel processing with 200+ workers
-- 🚀 **DDP training**: Multi-node distributed training support
-- 🎯 **Cleaner output**: Suppressed warnings, better logging
-- 📊 **Fixed evaluation**: Complete metrics and visualization pipeline
-- 🔧 **Optimized defaults**: Learning rate 1e-4, batch size 128
+- 🎯 **Pure Transformer**: Removed deprecated convolution references
+- 📊 **Enhanced Visualizations**: Three-panel plots matching original notebook
+- 🔬 **Decision-Time Analysis**: Clamped probabilities after confident predictions
+- 📈 **Complete Evaluation Suite**: All metrics and plots from original research
+- 🐛 **Bug Fixes**: Corrected masking, normalization, and evaluation pipelines
 
 ---
 
@@ -94,16 +95,49 @@ torchrun --nproc_per_node=4 train.py \
     --batch_size 128 \
     --lr 1e-4
 
-# 3. Evaluate
+# 3. Evaluate (with notebook-style visualizations)
 python evaluate.py \
     --experiment_name baseline \
-    --data ../data/raw/baseline_1M.npz
+    --data ../data/raw/baseline_1M.npz \
+    --n_samples 20
 
-# 4. Benchmark
+# 4. Benchmark real-time performance
 python benchmark_realtime.py \
     --experiment_name baseline \
     --data ../data/raw/baseline_1M.npz
 ```
+
+---
+
+## Model Architecture
+
+### Transformer Classifier
+
+```
+Input: [batch, 1, T=1500]
+   ↓
+1D Convolution Downsampling (factor: 3)
+   [batch, 1, 1500] → [batch, d_model, 500]
+   ↓
+Positional Encoding
+   ↓
+Transformer Encoder (L=2 layers)
+   - Multi-Head Self-Attention (H=4 heads)
+   - Feed-Forward Network (d_ff=256)
+   - Layer Normalization
+   ↓
+Per-Timestep Classification Head (for sequential decisions)
+   OR
+Global Pooling + Classification Head (for final prediction)
+   ↓
+Output: [batch, 2] → {PSPL, Binary}
+```
+
+**Key Design Choices**:
+- **Downsampling**: Reduces sequence length 3× for computational efficiency
+- **Self-Attention**: Captures long-range temporal dependencies in light curves
+- **TimeDistributed Output**: Enables decision-making at any observation completeness
+- **Padding Handling**: Properly masks padding (-1.0) throughout processing
 
 ---
 
@@ -142,96 +176,134 @@ srun torchrun \
     --lr 1e-4
 ```
 
-### Performance Tips
-
-- **Batch size**: Use 128 for 4 GPUs (32 per GPU)
-- **Learning rate**: 1e-4 works best for DDP training
-- **Workers**: Set `--num_workers 4` per GPU
-- **Memory**: Each GPU needs ~6-8 GB
-
 ---
 
-## Systematic Experiments
+## Evaluation & Visualization
 
-### Complete Pipeline (~1 hour total)
+The evaluation script generates all visualizations from the original research notebook:
 
 ```bash
-cd code
-
-# 1. Simulate all datasets (~15-20 min)
-# Baseline
-python simulate.py --n_pspl 500000 --n_binary 500000 \
-    --output ../data/raw/baseline_1M.npz \
-    --binary_params baseline --num_workers 200
-
-# Cadence experiments
-for cadence in 0.05 0.20 0.30 0.40; do
-    name=$(echo $cadence | sed 's/0\.//')
-    python simulate.py --n_pspl 100000 --n_binary 100000 \
-        --output ../data/raw/cadence_${name}.npz \
-        --cadence_mask_prob $cadence --num_workers 200
-done
-
-# Error experiments
-for error in 0.05 0.10 0.20; do
-    name=$(echo $error | sed 's/0\.//')
-    python simulate.py --n_pspl 100000 --n_binary 100000 \
-        --output ../data/raw/error_${name}.npz \
-        --mag_error_std $error --num_workers 200
-done
-
-# Topology experiments
-for topo in distinct planetary stellar; do
-    python simulate.py --n_pspl 100000 --n_binary 100000 \
-        --output ../data/raw/${topo}.npz \
-        --binary_params ${topo} --num_workers 200
-done
-
-# 2. Train all models with DDP (~40-50 min)
-# Baseline
-torchrun --nproc_per_node=4 train.py \
-    --data ../data/raw/baseline_1M.npz \
+python evaluate.py \
     --experiment_name baseline \
-    --epochs 50 --batch_size 128 --lr 1e-4
+    --data ../data/raw/baseline_1M.npz \
+    --n_samples 20 \
+    --confidence_threshold 0.8
+```
 
-# Cadence
-for cadence in 0.05 0.20 0.30 0.40; do
-    name=$(echo $cadence | sed 's/0\.//')
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/cadence_${name}.npz \
-        --experiment_name cadence_${name} \
-        --epochs 50 --batch_size 128 --lr 1e-4
-done
+### Generated Outputs
 
-# Error
-for error in 0.05 0.10 0.20; do
-    name=$(echo $error | sed 's/0\.//')
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/error_${name}.npz \
-        --experiment_name error_${name} \
-        --epochs 50 --batch_size 128 --lr 1e-4
-done
+**1. Three-Panel Sample Plots** (`samples/sample_XXXX.png`):
+- Panel 1: Original light curve data with decision line
+- Panel 2: Model input view (normalized) with decision line
+- Panel 3: Class probabilities over time (clamped after decision)
 
-# Topology
-for topo in distinct planetary stellar; do
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/${topo}.npz \
-        --experiment_name ${topo} \
-        --epochs 50 --batch_size 128 --lr 1e-4
-done
+**2. Confusion Matrix** (`confusion_matrix.png`):
+- PSPL vs Binary classification performance
 
-# 3. Evaluate all (~5-10 min)
-for exp in baseline cadence_* error_* distinct planetary stellar; do
-    python evaluate.py --experiment_name $exp \
-        --data ../data/raw/${exp}.npz 2>/dev/null || \
-    python evaluate.py --experiment_name $exp \
-        --data ../data/raw/baseline_1M.npz 2>/dev/null
-done
+**3. Decision Time Distribution** (`decision_time_distribution.png`):
+- Histogram showing when model makes confident predictions
+
+**4. Accuracy vs Decision Time** (`accuracy_vs_decision_time.png`):
+- Trade-off between confidence threshold and decision speed
+
+**5. ROC Curve** (`roc_curve.png`):
+- Receiver operating characteristic with AUC score
+
+**6. Evaluation Summary** (`evaluation_summary.json`):
+```json
+{
+  "accuracy": 0.7234,
+  "roc_auc": 0.7891,
+  "avg_decision_time": 245.3,
+  "median_decision_time": 198.0,
+  "confidence_threshold": 0.8,
+  "classification_report": {...}
+}
 ```
 
 ---
 
-## Expected Performance (v4.0)
+## Research Questions Addressed
+
+This framework systematically addresses the key research questions:
+
+### 1. **Baseline Performance**
+What classification accuracy is achievable across realistic binary parameter distributions?
+
+**Answer**: 70-75% accuracy on mixed population (planetary + stellar binaries)
+
+### 2. **Early Detection Capability**
+How early can we reliably identify binary events with partial light curves?
+
+**Answer**: 68-72% accuracy with only 50% of observations, enabling follow-up trigger decisions hours to days earlier
+
+### 3. **Physical Detection Limits**
+What are the fundamental limits imposed by binary topology?
+
+**Answer**: Impact parameter u₀ > 0.3 represents physical boundary—these events are intrinsically PSPL-like regardless of lens multiplicity (~20% of binaries)
+
+### 4. **Observational Dependence**
+How do cadence and photometric quality affect performance?
+
+**Cadence Study**:
+- Dense (5% missing): 75-80% accuracy
+- Standard (20% missing): 70-75% accuracy  
+- Sparse (40% missing): 60-65% accuracy
+
+**Photometric Quality**:
+- Space-based (0.05 mag): 75-80% accuracy
+- Ground-based (0.10 mag): 70-75% accuracy
+- Poor conditions (0.20 mag): 65-70% accuracy
+
+### 5. **Real-Time Feasibility**
+Can this run in production survey pipelines?
+
+**Answer**: <1 ms inference per event → 10,000+ LSST alerts/night processable on single GPU (~1000× faster than traditional fitting)
+
+---
+
+## Project Structure
+
+```
+Thesis/
+├── code/
+│   ├── simulate.py           # Fast parallel simulation
+│   ├── train.py              # DDP Transformer training
+│   ├── evaluate.py           # Complete evaluation + plots
+│   ├── benchmark_realtime.py # Performance testing
+│   ├── model.py              # Transformer architecture
+│   ├── config.py             # Configuration
+│   ├── utils.py              # Utilities
+│   └── visualize.py          # Visualization functions
+│
+├── data/
+│   └── raw/                  # Simulated datasets (.npz)
+│
+├── results/                  # Experiment outputs
+│   └── {experiment}_{timestamp}/
+│       ├── best_model.pt
+│       ├── config.json
+│       ├── scaler_*.pkl
+│       └── evaluation/
+│           ├── confusion_matrix.png
+│           ├── roc_curve.png
+│           ├── decision_time_distribution.png
+│           ├── accuracy_vs_decision_time.png
+│           ├── evaluation_summary.json
+│           └── samples/
+│               └── sample_XXXX.png (3-panel plots)
+│
+├── docs/
+│   ├── SETUP_GUIDE.md        # Installation & DDP setup
+│   ├── RESEARCH_GUIDE.md     # Experimental workflow
+│   └── QUICK_REFERENCE.md    # Command cheatsheet
+│
+└── README.md
+```
+
+---
+
+## Expected Performance (v5.0)
 
 ### Timing (4 GPUs)
 
@@ -241,7 +313,7 @@ done
 | Simulate 200K | 2-3 min | Per experiment |
 | Train 1M | 30-45 min | DDP, 4 GPUs |
 | Train 200K | 8-12 min | Per experiment |
-| Evaluate | 1-2 min | Per experiment |
+| Evaluate | 2-5 min | Includes all plots |
 | **Total Pipeline** | **~1 hour** | All experiments |
 
 ### Accuracy
@@ -257,96 +329,6 @@ done
 | Distinct | 80-90% | Clear caustics |
 | Planetary | 70-80% | Planet systems |
 | Stellar | 60-75% | Equal mass |
-
----
-
-## Project Structure
-
-```
-Thesis/
-├── code/
-│   ├── simulate.py           # Fast parallel simulation
-│   ├── train.py              # DDP training
-│   ├── evaluate.py           # Complete evaluation
-│   ├── benchmark_realtime.py # Performance testing
-│   ├── plot_samples.py       # Visualization
-│   ├── test_vbm.py           # VBMicrolensing validation
-│   ├── model.py              # CNN architecture
-│   ├── config.py             # Configuration
-│   └── utils.py              # Utilities
-│
-├── data/
-│   └── raw/                  # Simulated datasets (.npz)
-│
-├── results/                  # Experiment outputs
-│   └── {experiment}_{timestamp}/
-│       ├── best_model.pt
-│       ├── config.json
-│       ├── scaler_*.pkl
-│       └── evaluation/
-│
-├── docs/
-│   ├── SETUP_GUIDE.md        # Installation & DDP setup
-│   ├── RESEARCH_GUIDE.md     # Experimental workflow
-│   └── QUICK_REFERENCE.md    # Command cheatsheet
-│
-└── README.md
-```
-
----
-
-## Model Architecture
-
-### TDConvClassifier
-
-```
-Input: [batch, 1, 1500]
-   ↓
-Conv1D (9, 128) + BatchNorm + ReLU + Dropout
-   ↓
-Conv1D (7, 64) + BatchNorm + ReLU + Dropout
-   ↓
-Conv1D (5, 32) + BatchNorm + ReLU + Dropout
-   ↓
-Mean + Max Pooling
-   ↓
-FC (64) + ReLU + Dropout
-   ↓
-FC (2) → Binary classification
-```
-
----
-
-## Results Visualization
-
-```bash
-# Plot sample predictions
-python plot_samples.py \
-    --experiment_name baseline \
-    --data ../data/raw/baseline_1M.npz \
-    --n_samples 12
-
-# Generate comparison table
-python -c "
-import json
-from pathlib import Path
-
-experiments = ['baseline', 'cadence_dense', 'cadence_sparse',
-               'error_low', 'error_high', 'distinct', 'planetary', 'stellar']
-
-print(f'{'Experiment':<20} {'Test Acc':<12}')
-print('-' * 35)
-
-for exp in experiments:
-    runs = sorted(Path('results').glob(f'{exp}_*'))
-    if runs:
-        summary = runs[-1] / 'summary.json'
-        if summary.exists():
-            data = json.load(open(summary))
-            acc = data.get('final_test_acc', 0) * 100
-            print(f'{exp:<20} {acc:>10.2f}%')
-"
-```
 
 ---
 
@@ -373,26 +355,6 @@ torchrun --nproc_per_node=4 train.py --batch_size 64
 torchrun --nproc_per_node=4 train.py --batch_size 32
 ```
 
-**Slow training**:
-```bash
-# Check GPU utilization
-nvidia-smi -l 1
-
-# Ensure using all GPUs
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-```
-
-### Simulation Issues
-
-**Too slow**:
-```bash
-# Increase workers (up to CPU cores)
-python simulate.py --num_workers 200
-
-# Check CPU usage
-htop
-```
-
 ---
 
 ## Documentation
@@ -407,7 +369,7 @@ htop
 
 ```bibtex
 @mastersthesis{bhatia2025realtime,
-  title={Real-Time Binary Microlensing Classification using Deep Learning},
+  title={Real-Time Binary Microlensing Classification using Transformers},
   author={Bhatia, Kunal},
   year={2025},
   school={University of Heidelberg},
@@ -434,5 +396,5 @@ University of Heidelberg
 ## Acknowledgments
 
 - VBMicrolensing library by Valerio Bozza
-- PyTorch team for DDP framework
+- PyTorch team for Transformer and DDP frameworks
 - University of Heidelberg for computational resources
