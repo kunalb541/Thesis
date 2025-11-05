@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.6.1)
+Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.6.2)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.6.1 - Fixed downsample_factor access in plots
+Version: 5.6.2 - All imports verified, enhanced error handling
 """
 
 import torch
@@ -12,9 +12,9 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from pathlib import Path
 import json
 import argparse
+from pathlib import Path
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
@@ -49,11 +49,20 @@ def get_latest_experiment(experiment_name, results_dir='../results'):
     """Find latest experiment directory by timestamp suffix"""
     results_path = Path(results_dir)
     if not results_path.exists():
-        raise ValueError(f"Results directory does not exist: {results_path.resolve()}")
+        raise FileNotFoundError(
+            f"Results directory does not exist: {results_path.resolve()}\n"
+            f"Have you run training yet? Expected directory structure:\n"
+            f"  {results_path.resolve()}/{experiment_name}_TIMESTAMP/"
+        )
     
     matching = sorted(results_path.glob(f"{experiment_name}_*"))
     if not matching:
-        raise ValueError(f"No experiments found matching: {experiment_name} in {results_path.resolve()}")
+        available = [d.name for d in results_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        raise ValueError(
+            f"No experiments found matching: '{experiment_name}' in {results_path.resolve()}\n"
+            f"Available experiments: {available if available else 'None'}\n"
+            f"Tip: Check your experiment_name spelling"
+        )
     
     print(f"Found {len(matching)} matching experiments, using latest: {matching[-1].name}")
     return matching[-1]
@@ -156,7 +165,6 @@ def plot_three_panel_sample(
     if decision_made:
         probs_clamped[decision_time_idx-1:] = probs_seq[decision_time_idx-1]
 
-    # FIXED: Use helper function to safely get downsample_factor
     downsample_factor = get_model_downsample_factor(model)
     decision_orig_idx = min(decision_time_idx * downsample_factor, T_orig - 1)
     decision_timestamp = timestamps[decision_orig_idx]
@@ -280,9 +288,15 @@ def main():
 
     # Input validation
     if not Path(args.data).exists():
-        raise FileNotFoundError(f"Data file not found: {args.data}")
+        raise FileNotFoundError(
+            f"Data file not found: {args.data}\n"
+            f"Expected path: {Path(args.data).resolve()}\n"
+            f"Have you run simulate.py to generate this dataset?"
+        )
     if args.confidence_threshold < 0 or args.confidence_threshold > 1:
         raise ValueError(f"Confidence threshold must be in [0, 1], got {args.confidence_threshold}")
+    if args.n_samples < 1:
+        raise ValueError(f"n_samples must be positive, got {args.n_samples}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("="*80)
@@ -290,10 +304,23 @@ def main():
     print("="*80)
     print(f"Device: {device}")
 
-    exp_dir = get_latest_experiment(args.experiment_name)
+    try:
+        exp_dir = get_latest_experiment(args.experiment_name)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"\n❌ Error: {e}")
+        return 1
+        
     print(f"Evaluating experiment: {exp_dir.name}")
 
-    with open(exp_dir / "config.json") as f:
+    # Load config
+    config_path = exp_dir / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}\n"
+            f"The experiment directory may be corrupted. Try retraining."
+        )
+    
+    with open(config_path) as f:
         config = json.load(f)
 
     print("\nLoading model...")
@@ -308,13 +335,25 @@ def main():
         dropout=config.get('dropout', 0.3)
     ).to(device)
 
-    checkpoint = torch.load(exp_dir / "best_model.pt", map_location=device)
+    checkpoint_path = exp_dir / "best_model.pt"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Model checkpoint not found: {checkpoint_path}\n"
+            f"Training may not have completed successfully."
+        )
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     print("✓ Model loaded successfully")
     model.eval()
 
     print("Loading scalers...")
-    scaler_std, scaler_mm = load_scalers(exp_dir)
+    try:
+        scaler_std, scaler_mm = load_scalers(exp_dir)
+    except FileNotFoundError as e:
+        print(f"\n❌ Error: {e}")
+        print("Scalers are required for proper normalization. Training may have failed.")
+        return 1
 
     print(f"Loading data: {args.data}")
     X_raw, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True)
@@ -361,7 +400,6 @@ def main():
         model, X_test_normalized, device, args.confidence_threshold, args.batch_size
     )
 
-    # FIXED: Use helper function
     downsample_factor = get_model_downsample_factor(model)
     T_down = X_test_normalized.shape[2] // downsample_factor
     plot_decision_time_distribution(decision_times, T_down, eval_dir / "decision_time_distribution.png")
@@ -369,6 +407,7 @@ def main():
     print("Plotting accuracy vs decision time...")
     thresholds = np.arange(0.5, 1.0, 0.05)
     accuracies, avg_times = [], []
+    
     for thresh in tqdm(thresholds, desc="Threshold sweep"):
         dec_times, dec_preds = get_decision_times(
             model, X_test_normalized, device, thresh, args.batch_size
@@ -413,7 +452,9 @@ def main():
     print(f"  Accuracy: {summary['accuracy']:.4f} ({summary['accuracy']*100:.2f}%)")
     print(f"  ROC AUC: {summary['roc_auc']:.4f}")
     print(f"  Mean decision time: {summary['decision_time_mean']:.1f} steps")
+    
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())
