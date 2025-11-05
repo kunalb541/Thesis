@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-plot_samples.py - Visualize sample light curves (v5.2)
+plot_samples.py - Visualize sample light curves (v5.3)
 
-FIXED (v5.2): 
+FIXED (v5.3): 
 - Loads TimeDistributedCNN (LSTM) model by default
-- Reshapes data to [N, 1, T] after loading
-- Calls model(x, return_sequence=False) for final prediction
+- Loads 3D data [N, 1, T] directly via new utils
+- Squeezes 3D raw data to 2D for plotting
 
 Author: Kunal Bhatia
-Version: 5.2
+Version: 5.3
 """
 
 import numpy as np
@@ -72,7 +72,7 @@ def plot_sample_predictions(
     
     with torch.no_grad():
         # --- Call model with return_sequence=False ---
-        outputs = model(X_tensor, return_sequence=False)  # [N_samples, 2]
+        outputs, _ = model(X_tensor, return_sequence=False)  # [N_samples, 2]
         probs = torch.softmax(outputs, dim=1).cpu().numpy()  # [N_samples, 2]
     
     L = X_original_2d.shape[1]
@@ -161,7 +161,7 @@ def plot_sample_predictions(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Plot sample predictions (v5.2)')
+    parser = argparse.ArgumentParser(description='Plot sample predictions (v5.3)')
     parser.add_argument('--model', type=str, default=None, help='Path to trained model')
     parser.add_argument('--data', required=True, help='Path to dataset')
     parser.add_argument('--output_dir', type=str, default=None, help='Output directory')
@@ -191,38 +191,34 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("SAMPLE PREDICTIONS VISUALIZATION (v5.2)")
+    print("SAMPLE PREDICTIONS VISUALIZATION (v5.3)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
     
-    # Load RAW data (X_original is 2D [N, T])
+    # --- START CHANGED: Load 3D data and squeeze for 2D plot (Fix #4) ---
     print("\nLoading data...")
-    X_original, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
-    L = X_original.shape[1]
-    
-    # --- START FIX: Reshape X to 3D [N, 1, T] for normalization ---
-    if X_original.ndim == 2:
-        X_3d = X_original[:, None, :] # [N, 1, T]
-        print(f"✓ Reshaped X to 3D: {X_3d.shape}")
-    else:
-        X_3d = X_original
-    # --- END FIX ---
+    # Load RAW 3D data [N, 1, T]
+    X_3d_raw, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
+    # Create 2D version [N, T] for plotting
+    X_original_2d = np.squeeze(X_3d_raw, axis=1)
+    print(f"✓ Loaded 3D data {X_3d_raw.shape}, squeezed to 2D {X_original_2d.shape}")
+    # --- END CHANGED ---
     
     # Load scalers and apply
     try:
         scaler_std, scaler_mm = load_scalers(results_dir)
-        # --- FIX: apply_scalers_to_data now expects 3D data ---
-        X_normalized_3d = apply_scalers_to_data(X_3d, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
+        # Apply scalers to the 3D raw data
+        X_normalized_3d = apply_scalers_to_data(X_3d_raw, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
     except Exception as e:
         print(f"⚠ Warning: Could not load or apply scalers: {e}. Using raw data.")
-        X_normalized_3d = X_3d # Fallback
+        X_normalized_3d = X_3d_raw # Fallback
     
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    # --- START FIX: Load TimeDistributedCNN (LSTM) model directly ---
+    # --- Load TimeDistributedCNN (LSTM) model (no change) ---
     config_path = results_dir / "config.json"
     config = {}
     if config_path.exists():
@@ -239,7 +235,7 @@ def main():
         dropout=0.3 
     )
     model_type = "TimeDistributed_LSTM"
-    # --- END FIX ---
+    # --- END ---
     
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)
@@ -252,13 +248,13 @@ def main():
     print(f"✓ Model loaded ({model_type})")
     
     # Select random samples
-    sample_indices = random.sample(range(len(X_original)), min(args.n_samples, len(X_original)))
+    sample_indices = random.sample(range(len(X_original_2d)), min(args.n_samples, len(X_original_2d)))
     print(f"\nGenerating plots for {len(sample_indices)} samples...")
     
     # Generate plots
     plot_sample_predictions(
         model,
-        X_original,      # Pass 2D original for plotting
+        X_original_2d,   # Pass 2D original for plotting
         X_normalized_3d, # Pass 3D normalized for model
         y,
         timestamps,

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-evaluate.py - Model Evaluation (v5.2 - Early Detection)
+evaluate.py - Model Evaluation (v5.3 - Causal Early Detection)
 
 FIXED:
-- Reshapes data to [N, 1, T] after loading.
-- Uses 3D-aware apply_scalers_to_data.
-- Loads TimeDistributedCNN (LSTM) model by default.
-- ADDS efficient `run_early_detection_analysis` that uses
-  return_sequence=True ONCE to evaluate all checkpoints.
+- Loads 3D data [N, 1, T] directly via new utils.
+- No longer needs to reshape data.
+- REPLACED `run_early_detection_analysis` with a memory-efficient
+  and truly causal version that uses sequence truncation.
 
 Author: Kunal Bhatia
-Version: 5.2
+Version: 5.3
 Date: November 2025
 """
 
@@ -91,7 +90,7 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
             X_tensor = torch.from_numpy(X_batch).float().to(device)
             
             # --- Call model with return_sequence=False ---
-            outputs = model(X_tensor, return_sequence=False) # [B, n_classes]
+            outputs, _ = model(X_tensor, return_sequence=False) # [B, n_classes]
             probs = torch.softmax(outputs, dim=1)
             
             probs_np = probs.cpu().numpy()
@@ -113,67 +112,59 @@ def evaluate_model_final_step(model, X_3d, device, batch_size=128, quiet=False):
             np.array(all_probs))
 
 
-# --- START: Efficient Early Detection Function ---
+# --- START CHANGED: Efficient Causal Early Detection (Fix #3) ---
 @torch.no_grad()
 def run_early_detection_analysis(model, X_3d, y, device, checkpoints, batch_size=128):
     """
-    Evaluates model accuracy at different observation checkpoints.
-    Uses return_sequence=True ONCE.
+    Evaluates model accuracy at different observation checkpoints
+    using sequence truncation. This is memory-efficient and
+    guarantees causal evaluation.
     X_3d is shape [N, C, T]
     """
     model.eval()
-    n_samples, C, T = X_3d.shape
-    
-    print("\n" + "=" * 80)
-    print("EARLY DETECTION ANALYSIS (Efficient)")
-    print("=" * 80)
-    
-    # Store results: {checkpoint_str: accuracy}
+    N, C, T = X_3d.shape
     results = {}
     
-    # Get all sequence predictions in batches
-    # all_logits_seq shape: [N, T, n_classes]
-    all_logits_seq = torch.empty((n_samples, T, 2), dtype=torch.float32, device='cpu')
-
-    print(f"Running model (return_sequence=True) on {n_samples} samples...")
-    for i in range(0, n_samples, batch_size):
-        batch_start = i
-        batch_end = min(i + batch_size, n_samples)
-        X_batch = X_3d[batch_start:batch_end]
-        X_tensor = torch.from_numpy(X_batch).float().to(device)
-        
-        # Get FULL sequence predictions
-        logits_seq_batch = model(X_tensor, return_sequence=True) # [B, T, n_classes]
-        all_logits_seq[batch_start:batch_end] = logits_seq_batch.cpu()
-
-    # Now, check accuracy at each checkpoint
-    print(f"Calculating accuracy at checkpoints...")
-    y_tensor = torch.from_numpy(y).long() # [N]
+    print("\n" + "=" * 80)
+    print("EARLY DETECTION ANALYSIS (Causal Truncation Method)")
+    print("=" * 80)
     
     for chk in checkpoints:
         if chk <= 0 or chk > 1.0:
             continue
             
-        # Get timestep index
-        t_idx = int(T * chk) - 1
-        if t_idx < 0: t_idx = 0 # for very small chk
+        # Get timestep index to truncate *to*
+        t_idx = int(T * chk)
+        if t_idx < 1: t_idx = 1 # Must have at least one timestep
         
-        # Get all predictions at this specific timestep
-        # logits_at_t shape: [N, n_classes]
-        logits_at_t = all_logits_seq[:, t_idx, :]
+        # Create a truncated view of the data [N, C, t_idx]
+        X_truncated = X_3d[:, :, :t_idx]
         
-        preds_at_t = torch.argmax(logits_at_t, dim=1) # [N]
+        all_preds = []
         
-        acc = accuracy_score(y_tensor.numpy(), preds_at_t.numpy())
+        # Evaluate on the truncated sequences
+        for i in range(0, N, batch_size):
+            batch_start = i
+            batch_end = min(i + batch_size, N)
+            X_batch = X_truncated[batch_start:batch_end]
+            X_tensor = torch.from_numpy(X_batch).float().to(device)
+            
+            # Get FINAL prediction on the TRUNCATED sequence
+            logits, _ = model(X_tensor, return_sequence=False)  # [B, n_classes]
+            preds = torch.argmax(logits, dim=1)
+            all_preds.extend(preds.cpu().numpy())
+        
+        # Calculate accuracy for this checkpoint
+        acc = accuracy_score(y, np.array(all_preds))
         
         chk_str = f"{chk*100:.0f}%"
         results[chk_str] = acc
         
-        print(f"  Accuracy at {chk_str:>4} ({t_idx+1}/{T} steps): {acc:.4f}")
+        print(f"  Accuracy at {chk_str:>4} ({t_idx}/{T} steps): {acc:.4f}")
 
     print("=" * 80)
     return results
-# --- END: Efficient Early Detection Function ---
+# --- END CHANGED ---
 
 
 def plot_results(output_dir, cm, y_true, probs, quiet=False):
@@ -244,7 +235,7 @@ def plot_results(output_dir, cm, y_true, probs, quiet=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate model (v5.2 - Early Detection)')
+    parser = argparse.ArgumentParser(description='Evaluate model (v5.3 - Causal Early Detection)')
     parser.add_argument("--model", type=str, default=None, 
                        help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, 
@@ -282,7 +273,7 @@ def main():
     
     if not args.quiet:
         print("=" * 80)
-        print("MODEL EVALUATION (v5.2 - Early Detection)")
+        print("MODEL EVALUATION (v5.3 - Causal Early Detection)")
         print("=" * 80)
         print(f"\nModel: {args.model}")
         print(f"Data: {args.data}")
@@ -294,16 +285,13 @@ def main():
         print("LOADING DATA")
         print("=" * 80)
     
-    # Load data, X shape is (N, T)
+    # --- START CHANGED: Load 3D data [N, 1, T] directly (Fix #4) ---
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, 
                                               normalize=False)
     
-    # --- START FIX: Reshape X to 3D [N, 1, T] ---
-    if X.ndim == 2:
-        X = X[:, None, :] # [N, T] -> [N, 1, T]
-        if not args.quiet:
-            print(f"✓ Reshaped X to 3D: {X.shape}")
-    # --- END FIX ---
+    if not args.quiet:
+        print(f"✓ Loaded 3D data: {X.shape}")
+    # --- END CHANGED ---
 
     # Load scalers
     try:
@@ -316,7 +304,7 @@ def main():
     
     # Apply scalers if available
     if scaler_std is not None and scaler_mm is not None:
-        # --- FIX: apply_scalers_to_data now expects 3D data ---
+        # Apply scalers to 3D data
         X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
         if not args.quiet:
             print("✓ Applied normalization")
@@ -326,7 +314,7 @@ def main():
     if not args.quiet:
         print(f"\nDevice: {device}")
     
-    # --- START FIX: Load TimeDistributedCNN (LSTM) model directly ---
+    # --- Load TimeDistributedCNN (LSTM) model (no change) ---
     config_path = results_dir / "config.json"
     config = {}
     if config_path.exists():
@@ -344,7 +332,7 @@ def main():
         dropout=0.3 
     )
     model_type = "TimeDistributed_LSTM"
-    # --- END FIX ---
+    # --- END ---
 
     try:
         ckpt = torch.load(args.model, map_location=device, weights_only=False)
@@ -410,7 +398,7 @@ def main():
     # Generate plots (final step)
     plot_results(output_dir, cm, y, probs, quiet=args.quiet)
     
-    # --- START: Run Early Detection Analysis ---
+    # --- START: Run Causal Early Detection Analysis (Fix #3) ---
     early_detection_results = None
     if args.early_detection:
         checkpoints = [0.1, 0.25, 0.33, 0.5, 0.67, 0.83, 1.0]

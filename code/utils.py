@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Utility functions for data loading and preprocessing - FIXED VERSION (v5.2)
+Utility functions for data loading and preprocessing - FIXED VERSION (v5.3)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.2 - Fixed normalization functions to handle 3D [N, C, T] data.
+Version: 5.3 - Fixed load_npz_dataset to always return 3D [N, C, T] data.
 """
 
 import json
@@ -214,9 +214,11 @@ def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
     return X_scaled.astype(np.float32, copy=False)
 
 
+# --- START CHANGED: Fix #4 ---
 def load_npz_dataset(path, apply_perm=False, normalize=False):
     """
     Load dataset from .npz file
+    ALWAYS returns 3D data: [N, C, T]
     """
     data = np.load(path, allow_pickle=False)
 
@@ -237,12 +239,17 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
     else:
         y = y.astype(np.uint8)
     
+    # ALWAYS return 3D data
+    if X.ndim == 2:
+        X = X[:, None, :]  # [N, T] -> [N, 1, T]
+    
     if normalize:
         raise ValueError("normalize=True is deprecated. "
-                         "Load raw data, reshape to 3D, split, "
+                         "Load raw data, split, "
                          "then use normalization functions.")
 
     return X, y, timestamps, meta
+# --- END CHANGED ---
 
 
 def check_gpu():
@@ -277,7 +284,7 @@ if __name__ == "__main__":
     print("Testing Scaler Functions (3D):")
     print("="*60)
 
-    # --- FIX: Test with 3D data [N, C, T] ---
+    # --- Test with 3D data [N, C, T] ---
     np.random.seed(42)
     N_train, N_val, N_test, C, T = 1000, 200, 200, 1, 1500
     X_train = np.random.randn(N_train, C, T).astype(np.float32)

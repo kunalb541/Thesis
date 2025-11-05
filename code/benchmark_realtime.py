@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-benchmark_realtime.py - Real-time inference performance benchmarking (v5.2)
+benchmark_realtime.py - Real-time inference performance benchmarking (v5.3)
 
-FIXED (v5.2): 
+FIXED (v5.3): 
 - Loads TimeDistributedCNN (LSTM) model by default
-- Reshapes data to [N, 1, T] after loading
-- Calls model(x, return_sequence=False) for final prediction
+- Loads 3D data [N, 1, T] directly via new utils
+- Removed redundant reshaping code
 
 Author: Kunal Bhatia
-Version: 5.2
+Version: 5.3
 Date: November 2025
 """
 
@@ -186,7 +186,7 @@ def print_results_table(results):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Benchmark real-time inference (v5.2)')
+    parser = argparse.ArgumentParser(description='Benchmark real-time inference (v5.3)')
     parser.add_argument("--model", type=str, default=None, help='Path to model checkpoint')
     parser.add_argument("--data", type=str, required=True, help='Path to test data')
     parser.add_argument("--output_dir", type=str, default=None, help='Output directory')
@@ -214,29 +214,27 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    print("REAL-TIME INFERENCE BENCHMARK (v5.2)")
+    print("REAL-TIME INFERENCE BENCHMARK (v5.3)")
     print("="*80)
     print(f"\nModel: {args.model}")
     print(f"Data: {args.data}")
     
     # Load data
     print("\nLoading data...")
-    # Load data, X shape is (N, T)
+    # --- START CHANGED: Load 3D data [N, 1, T] directly (Fix #4) ---
     X, y, timestamps, meta = load_npz_dataset(args.data, apply_perm=True, normalize=False)
+    print(f"✓ Loaded 3D X data: {X.shape}")
+    # --- END CHANGED ---
     
     if len(X) > args.n_samples:
         indices = np.random.choice(len(X), args.n_samples, replace=False)
         X = X[indices]
     
-    # --- START FIX: Reshape X to 3D [N, 1, T] ---
-    if X.ndim == 2:
-        X = X[:, None, :] # [N, T] -> [N, 1, T]
-        print(f"✓ Reshaped X to 3D: {X.shape}")
-    # --- END FIX ---
+    # --- Reshape no longer needed ---
     
     try:
         scaler_std, scaler_mm = load_scalers(results_dir)
-        # --- FIX: apply_scalers_to_data now expects 3D data ---
+        # --- Apply scalers to 3D data ---
         X = apply_scalers_to_data(X, scaler_std, scaler_mm, pad_value=CFG.PAD_VALUE)
     except Exception as e:
         print(f"⚠ Warning: Could not load or apply scalers: {e}. Using raw data.")
@@ -245,7 +243,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    # --- START FIX: Load TimeDistributedCNN (LSTM) model directly ---
+    # --- Load TimeDistributedCNN (LSTM) model (no change) ---
     config_path = results_dir / "config.json"
     config = {}
     if config_path.exists():
@@ -262,7 +260,7 @@ def main():
         dropout=0.3 
     )
     model_type = "TimeDistributed_LSTM"
-    # --- END FIX ---
+    # --- END ---
     
     ckpt = torch.load(args.model, map_location=device, weights_only=False)
     state_dict = ckpt.get('model_state_dict', ckpt)

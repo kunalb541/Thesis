@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# train.py - Training with TimeDistributed architecture (v5.3 - Causal)
+# train.py - Training with TimeDistributed architecture (v5.4 - Aligned Loss)
 #
 # FIXES:
-# 1. Reshapes data [N, T] -> [N, 1, T] IMMEDIATELY after loading.
-# 2. Normalization functions (fit/apply) now handle 3D data.
-# 3. Training step `step_timedistributed` now uses a combined
-#    loss: loss_all_steps + 0.5 * loss_final + temporal_weight * loss_temporal
-# 4. Model imported is the new causal CNN+LSTM.
+# 1. load_data_with_shuffle now returns 3D data [N, 1, T] directly.
+# 2. Normalization functions (fit/apply) handle 3D data.
+# 3. Training step `step_timedistributed` simplified to use
+#    loss = loss_all_steps (CrossEntropyLoss on all timesteps)
+# 4. `evaluate` function aligned to use the *same* loss_all_steps
+#    metric for validation loss.
+# 5. Accuracy is still computed on the FINAL timestep prediction.
 #
 import warnings
 warnings.filterwarnings('ignore')
@@ -33,9 +35,11 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-# --- FIX: Import the one and only (causal) model ---
+# --- Import the one and only (causal) model ---
 from model import TimeDistributedCNN
 
+# --- CHANGED: Import 3D-aware loader ---
+from utils import load_npz_dataset
 
 # --- DDP Helper Functions (no changes) ---
 def is_dist():
@@ -105,26 +109,22 @@ class TimeSeriesDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+# --- CHANGED: Use 3D-aware loader from utils ---
 def load_data_with_shuffle(path):
-    # (This is the same as before, returns 2D [N, T] X)
-    with np.load(path, allow_pickle=True) as data:
-        X = data['X']
-        y = data['y']
-        if 'perm' in data.files:
-            perm = data['perm']
-            X = X[perm]
-            y = y[perm]
-            rank0_print("✓ Applied saved permutation (data shuffled)")
-        else:
-            rank0_print("⚠️  No permutation found - shuffling now")
-            np.random.seed(42)
-            perm = np.random.permutation(len(X))
-            X = X[perm]
-            y = y[perm]
-    if y.dtype.kind in ('U', 'S', 'O'):
-        y = np.array([0 if 'PSPL' in str(v).upper() else 1 for v in y], dtype=np.int64)
+    """
+    Loads data using the 3D-aware loader from utils.
+    Returns X as [N, 1, T]
+    """
+    rank0_print(f"Loading data from {path}...")
+    # load_npz_dataset now applies permutation and returns 3D X
+    X, y, _, meta = load_npz_dataset(path, apply_perm=True)
+    
+    if 'perm' in meta.get('meta_json', {}):
+        rank0_print("✓ Applied saved permutation (data shuffled)")
     else:
-        y = y.astype(np.int64)
+        rank0_print("✓ Data loaded (permutation applied by loader)")
+        
+    rank0_print(f"✓ Loaded data shapes: X={X.shape}, y={y.shape}")
     return X, y
 
 
@@ -230,11 +230,12 @@ def save_scalers_rank0(params, out_dir):
 # --- END Normalization ---
 
 
-# --- START FIX: Updated Training Step ---
-def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None, temporal_weight=0.1):
+# --- START CHANGED: Simplified Training Step (Fix #2) ---
+def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None):
     """
-    FIXED Training step for TimeDistributed model (v5.3)
-    Uses loss = loss_all_steps + 0.5 * loss_final + temporal_weight * loss_temporal
+    FIXED Training step for TimeDistributed model (v5.4)
+    Uses simplified loss: loss_all_steps
+    Accuracy is still computed on the FINAL timestep.
     """
     x, y = batch
     x = x.to(device, non_blocking=True) # [B, C, T]
@@ -249,7 +250,7 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
     with torch.cuda.amp.autocast(enabled=use_amp):
         
         # Get predictions at all timesteps
-        logits_seq = model(x, return_sequence=True)  # [B, T, n_classes]
+        logits_seq, _ = model(x, return_sequence=True)  # [B, T, n_classes]
         
         # ===== CRITICAL FIX: Supervise ALL timesteps =====
         # Expand labels to match sequence length
@@ -258,17 +259,7 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
         # 1. Loss on all timesteps
         logits_flat = logits_seq.reshape(B * T, -1)  # [B*T, n_classes]
         y_flat = y_expanded.reshape(B * T)  # [B*T]
-        loss_all_steps = criterion(logits_flat, y_flat)
-        
-        # 2. Extra emphasis on final prediction (most important)
-        loss_final = criterion(logits_seq[:, -1, :], y)
-        
-        # 3. Temporal smoothness (optional - helps stability)
-        diff = logits_seq[:, 1:, :] - logits_seq[:, :-1, :]
-        loss_temporal = torch.mean(diff ** 2)
-        
-        # 4. Combined loss
-        loss = loss_all_steps + 0.5 * loss_final + temporal_weight * loss_temporal
+        loss = criterion(logits_flat, y_flat)
         # ================================================
     
     # Accuracy computed on FINAL prediction only
@@ -282,15 +273,16 @@ def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None
 
     # Return loss, correct count, and B (number of samples)
     return loss.detach(), correct.detach(), y.numel()
-# --- END FIX: Updated Training Step ---
+# --- END CHANGED ---
 
 
+# --- START CHANGED: Aligned Evaluation Function (Fix #2) ---
 @torch.no_grad()
 def evaluate(model, loader, device, criterion):
     """
     Validation function.
-    Evaluates on the FINAL prediction only (return_sequence=False)
-    for speed and to match the primary loss term.
+    Computes loss on ALL timesteps (to match training).
+    Computes accuracy on FINAL timestep (primary metric).
     """
     model.eval()
     loss_sum = torch.tensor(0.0, device=device)
@@ -301,15 +293,22 @@ def evaluate(model, loader, device, criterion):
         x, y = batch
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
+        B, C, T = x.shape
         
-        # --- Get FINAL prediction (fast) ---
-        logits = model(x, return_sequence=False) # [B, n_classes]
+        # --- Get FULL sequence (like training) ---
+        logits_seq, _ = model(x, return_sequence=True) # [B, T, n_classes]
         
-        loss = criterion(logits, y)
-        pred = logits.argmax(dim=1)
+        # --- Compute SAME loss as training (all steps) ---
+        y_expanded = y.unsqueeze(1).expand(B, T)
+        logits_flat = logits_seq.reshape(B * T, -1)
+        y_flat = y_expanded.reshape(B * T)
+        loss = criterion(logits_flat, y_flat)
+        
+        # --- Accuracy computed on FINAL prediction only ---
+        pred = logits_seq[:, -1, :].argmax(dim=1)
         correct = (pred == y).sum()
 
-        loss_sum += loss * y.numel()
+        loss_sum += loss * y.numel() # loss is avg per timestep, * y.numel() is per batch
         correct_sum += correct
         count_sum += y.numel()
 
@@ -320,6 +319,7 @@ def evaluate(model, loader, device, criterion):
     loss_avg = (loss_sum / count_sum).item() if count_sum.item() > 0 else 0.0
     acc = (correct_sum / count_sum).item() if count_sum.item() > 0 else 0.0
     return loss_avg, acc
+# --- END CHANGED ---
 
 
 def main():
@@ -336,9 +336,9 @@ def main():
     
     parser.add_argument("--window_size", type=int, default=50,
                        help='(No longer used for windowing) Kept for config compatibility')
-    # --- FIX: Updated temporal_weight default ---
-    parser.add_argument("--temporal_weight", type=float, default=0.05,
-                       help='Weight for temporal smoothness loss')
+    # --- temporal_weight no longer used ---
+    parser.add_argument("--temporal_weight", type=float, default=0.0,
+                       help='(No longer used) Weight for temporal smoothness loss')
     
     args = parser.parse_args()
 
@@ -348,23 +348,19 @@ def main():
 
     if rank == 0:
         rank0_print("=" * 76)
-        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v5.3 - Causal CNN+LSTM)")
+        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v5.4 - Aligned Loss)")
         rank0_print("=" * 76)
         rank0_print(f"World size: {world_size} | Rank: {rank} | Local rank: {local_rank}")
         rank0_print(f"Data: {args.data}")
         rank0_print(f"Model: Causal TimeDistributedCNN (CNN+LSTM)")
-        rank0_print(f"Loss: AllSteps + 0.5*Final + {args.temporal_weight}*TemporalSmoothness")
+        rank0_print(f"Loss: CrossEntropyLoss (all timesteps)")
         rank0_print("=" * 76)
     
-    # Load data (X is 2D [N, T])
+    # --- CHANGED: Load 3D data [N, 1, T] ---
     X, y = load_data_with_shuffle(args.data)
     n_classes = int(np.max(y) + 1)
     
-    # --- START FIX: Reshape data to 3D [N, C, T] IMMEDIATELY ---
-    if X.ndim == 2:
-        X = X[:, None, :]  # [N, T] -> [N, 1, T]
-        rank0_print(f"✓ Reshaped X from 2D to 3D: {X.shape}")
-    # --- END FIX ---
+    # --- No reshape needed ---
     
     # (Balance check... no changes)
     if rank == 0:
@@ -386,7 +382,7 @@ def main():
         # ... (split balance check code)
         pass
 
-    # --- FIX: Normalize 3D data ---
+    # --- Normalize 3D data (no changes) ---
     if rank == 0:
         rank0_print("Fitting scalers on 3D training data...")
         scaler_params = fit_two_stage_scalers_rank0(X_train)
@@ -400,7 +396,7 @@ def main():
     rank0_print("✓ Data normalized.")
     # --- END FIX ---
 
-    # Datasets (X is now 3D and normalized)
+    # Datasets (X is 3D and normalized)
     train_ds = TimeSeriesDataset(X_train, y_train)
     val_ds = TimeSeriesDataset(X_val, y_val)
     test_ds = TimeSeriesDataset(X_test, y_test)
@@ -416,12 +412,12 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
                             sampler=test_sampler, num_workers=args.num_workers, pin_memory=True)
 
-    # --- FIX: Model (default to causal LSTM) ---
+    # --- Model (no changes) ---
     rank0_print("Creating Causal TimeDistributedCNN (CNN+LSTM)...")
     model = TimeDistributedCNN(
         in_channels=X.shape[1], # Should be 1
         n_classes=n_classes,
-        lstm_hidden=64, # Example hidden size
+        lstm_hidden=64,
         dropout=0.3
     ).to(device)
     # --- END FIX ---
@@ -429,7 +425,8 @@ def main():
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
 
-    criterion = nn.CrossEntropyLoss().to(device)
+    # --- CHANGED: Use reduction='mean' for loss ---
+    criterion = nn.CrossEntropyLoss(reduction='mean').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
@@ -445,6 +442,7 @@ def main():
         with open(os.path.join(exp_dir, "config.json"), "w") as f:
             config_dict = vars(args).copy()
             config_dict['model_type'] = 'TimeDistributed_Causal_LSTM'
+            config_dict['loss_function'] = 'CrossEntropyLoss_AllTimesteps' # CHANGED
             json.dump(config_dict, f, indent=2)
         save_scalers_rank0(scaler_params, exp_dir)
 
@@ -462,11 +460,10 @@ def main():
         correct_sum = torch.tensor(0.0, device=device)
         count_sum = torch.tensor(0.0, device=device)
 
-        # --- FIX: Use new training step ---
+        # --- CHANGED: Use simplified training step ---
         for batch in train_loader:
             loss, correct, count = step_timedistributed(
-                model, batch, device, criterion, scaler, optimizer, 
-                temporal_weight=args.temporal_weight
+                model, batch, device, criterion, scaler, optimizer
             )
             loss_sum += loss * count # loss is avg, count is B
             correct_sum += correct
@@ -479,7 +476,7 @@ def main():
         train_loss = (loss_sum / count_sum).item()
         train_acc = (correct_sum / count_sum).item()
 
-        # Validation uses the 'evaluate' function (final step accuracy)
+        # --- CHANGED: Validation now uses the aligned 'evaluate' function ---
         val_loss, val_acc = evaluate(model, val_loader, device, criterion)
 
         if rank == 0:
@@ -500,7 +497,7 @@ def main():
         if is_dist():
             dist.barrier()
 
-    # Final eval on test set (final step accuracy)
+    # Final eval on test set
     if rank == 0:
         best_path = os.path.join(exp_dir, "best_model.pt")
         state_dict = torch.load(best_path, map_location="cpu")
@@ -509,6 +506,7 @@ def main():
     state_dict = broadcast_object_from_rank0(state_dict)
     (model.module if isinstance(model, DDP) else model).load_state_dict(state_dict)
 
+    # --- CHANGED: Test set uses aligned 'evaluate' function ---
     test_loss, test_acc = evaluate(model, test_loader, device, criterion)
 
     if rank == 0:
@@ -518,13 +516,14 @@ def main():
             "best_val_acc": float(best_val_acc),
             "best_epoch": int(best_epoch),
             "model_type": 'TimeDistributed_Causal_LSTM',
+            "loss_function": 'CrossEntropyLoss_AllTimesteps', # CHANGED
             "results_dir": exp_dir,
         }
         with open(os.path.join(exp_dir, "summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
 
         rank0_print("\n" + "=" * 80)
-        rank0_print("FINAL EVALUATION (on final timestep)")
+        rank0_print("FINAL EVALUATION (Loss: AllSteps, Acc: FinalStep)") # CHANGED
         rank0_print("=" * 80)
         rank0_print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
         rank0_print(f"Best  | val acc {best_val_acc:.4f} (epoch {best_epoch})")
