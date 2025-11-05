@@ -25,7 +25,7 @@ TIME_MAX = 1000  # End time (days)
 # t0: Time of maximum magnification (days)
 T0_MIN = 300.0
 T0_MAX = 700.0
-
+NORMALIZE_PER_EVENT = False 
 # u0: Impact parameter (minimum separation in Einstein radii)
 # CRITICAL PARAMETER: Low u0 = close approach = strong signal
 U0_MIN = 0.01
