@@ -1,615 +1,270 @@
 #!/usr/bin/env python3
-# train.py - Training with TimeDistributed architecture (v6.1 - MASKED LOSS)
-#
-# FIXES:
-# 1. CRITICAL FIX: Implemented masked loss in `step_timedistributed`
-#    and `evaluate` to ignore -1.0 pad values.
-# 2. CRITICAL FIX: Accuracy is now computed on the LAST VALID timestep,
-#    not the final timestep.
-# 3. Added data validation block to `main`.
-#
-import warnings
-warnings.filterwarnings('ignore')
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+"""
+train.py - WORKING Training Script for Microlensing Classification
 
+Key fixes applied:
+1. NO preprocessing (MinMaxScaler was destroying the signal!)
+2. Apply permutation to shuffle data
+3. Use global average pooling to capture mean flux
+4. num_workers=0 to avoid data loading issues
+
+Author: Kunal Bhatia (fixed by Claude)
+Date: November 2025
+"""
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+import numpy as np
+from sklearn.model_selection import train_test_split
+from model import TimeDistributedCNN
 import argparse
-import json
-import pickle
-import random
-import socket
-import sys
-import time
 from datetime import datetime
 from pathlib import Path
+import json
 
-import numpy as np
-import torch
-import torch.distributed as dist
-import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-
-# --- Import the one and only (causal) model ---
-from model import TimeDistributedCNN
-
-# --- CHANGED: Import 3D-aware loader ---
-from utils import load_npz_dataset
-
-# --- DDP Helper Functions (no changes) ---
-def is_dist():
-    return dist.is_available() and dist.is_initialized()
-def get_rank():
-    return dist.get_rank() if is_dist() else 0
-def get_world_size():
-    return dist.get_world_size() if is_dist() else 1
-def setup_ddp(backend=None):
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-        if backend is None:
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
-        if torch.cuda.is_available():
-            torch.distributed.barrier(device_ids=[local_rank])
-        else:
-            torch.distributed.barrier()
-        return rank, world_size, local_rank
-    return 0, 1, 0
-def set_seeds(seed, rank):
-    seed = seed + rank
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-def reduce_tensor(t, op=dist.ReduceOp.SUM):
-    if is_dist():
-        dist.all_reduce(t, op=op)
-    return t
-def now_stamp():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-def make_experiment_dir(base, exp_name):
-    ts = now_stamp()
-    exp_dir = os.path.join("..", "results", f"{exp_name}_{ts}")
-    Path(exp_dir).mkdir(parents=True, exist_ok=True)
-    return exp_dir
-def rank0_print(*args, **kwargs):
-    if get_rank() == 0:
-        print(*args, **kwargs)
-        sys.stdout.flush()
-def broadcast_object_from_rank0(obj):
-    world_size = get_world_size()
-    if world_size == 1:
-        return obj
-    if get_rank() == 0:
-        obj_list = [obj]
-    else:
-        obj_list = [None]
-    dist.broadcast_object_list(obj_list, src=0)
-    return obj_list[0]
-# --- End DDP Helpers ---
-
-
-class TimeSeriesDataset(Dataset):
+class SimpleDataset(Dataset):
+    """Dataset that transposes [N, T, F] to [N, F, T] for Conv1d"""
     def __init__(self, X, y):
-        # X is already 3D [N, C, T]
-        self.X = torch.from_numpy(X.astype(np.float32))
-        self.y = torch.from_numpy(y.astype(np.int64))
+        self.X = torch.tensor(X, dtype=torch.float32).transpose(1, 2)
+        self.y = torch.tensor(y, dtype=torch.long)
+    
     def __len__(self):
-        return self.X.shape[0]
+        return len(self.y)
+    
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
 
-# --- CHANGED: Use 3D-aware loader from utils ---
-def load_data_with_shuffle(path):
-    """
-    Loads data using the 3D-aware loader from utils.
-    Returns X as [N, 1, T]
-    """
-    rank0_print(f"Loading data from {path}...")
-    # load_npz_dataset now applies permutation and returns 3D X
-    X, y, _, meta = load_npz_dataset(path, apply_perm=True)
-    
-    if 'perm' in meta.get('meta_json', {}):
-        rank0_print("✓ Applied saved permutation (data shuffled)")
-    else:
-        rank0_print("✓ Data loaded (permutation applied by loader)")
-        
-    rank0_print(f"✓ Loaded data shapes: X={X.shape}, y={y.shape}")
-    return X, y
-
-
-# --- 3D-Aware Normalization Functions (DDP-local, no changes) ---
-
-def _feature_means_ignore_pad_flat(X_flat: np.ndarray, pad_value: float) -> np.ndarray:
-    """Compute per-feature means on 2D [N, F] data, ignoring pad_value."""
-    N, F = X_flat.shape
-    means = np.zeros(F, dtype=np.float32)
-    for j in range(F):
-        col = X_flat[:, j]
-        valid = col != pad_value
-        if np.any(valid):
-            means[j] = col[valid].mean(dtype=np.float64)
-        else:
-            means[j] = 0.0
-    return means.astype(np.float32)
-
-def fit_two_stage_scalers_rank0(X_train_3d, pad_value=-1.0):
-    """Fits scalers on 3D [N, C, T] data."""
-    N, C, T = X_train_3d.shape
-    F_flat = C * T
-    rank0_print(f"Fitting scalers on 3D data: [N, {C}, {T}] -> [N, {F_flat}]")
-    
-    X_train_flat = X_train_3d.reshape(N, F_flat)
-    pad_mask = (X_train_flat == pad_value)
-
-    # Compute means ignoring pads
-    means_train = _feature_means_ignore_pad_flat(X_train_flat, pad_value)
-    
-    # Fill pads for fitting
-    X_train_filled = np.where(pad_mask, means_train, X_train_flat)
-
-    # Stage 1: StandardScaler
-    std = StandardScaler(with_mean=True, with_std=True)
-    flat_std = std.fit_transform(X_train_filled)
-    
-    # Stage 2: MinMaxScaler
-    mm = MinMaxScaler(feature_range=(0.0, 1.0))
-    mm.fit(flat_std)
-    
-    params = {
-        "std_mean": std.mean_.astype(np.float64),
-        "std_scale": std.scale_.astype(np.float64),
-        "mm_min": mm.min_.astype(np.float64),
-        "mm_scale": mm.scale_.astype(np.float64),
-        "shape": (C, T), # Store original C, T shape
-    }
-    return params
-
-def apply_two_stage_scalers(params, X_3d, pad_value=-1.0):
-    """Applies fitted scalers to 3D [N, C, T] data."""
-    N, C, T = X_3d.shape
-    F_flat = C * T
-    
-    # Check shape
-    scaler_shape = tuple(params["shape"])
-    if (C, T) != scaler_shape:
-        raise ValueError(f"Shape mismatch: X is [N, {C}, {T}] but scaler was fit on [N, {scaler_shape[0]}, {scaler_shape[1]}]")
-    
-    X_flat = X_3d.reshape(N, F_flat)
-    pad_mask = (X_flat == pad_value)
-    
-    # Fill pads with *saved* train means
-    X_filled = np.where(pad_mask, params["std_mean"], X_flat)
-    
-    # Apply transforms
-    flat_std = (X_filled - params["std_mean"]) / (params["std_scale"] + 1e-12)
-    flat_scaled = flat_std * params["mm_scale"] + params["mm_min"]
-    
-    # Restore pads
-    flat_scaled[pad_mask] = pad_value
-    
-    # Reshape back to 3D
-    return flat_scaled.reshape(N, C, T)
-
-def save_scalers_rank0(params, out_dir):
-    """Saves scalers as standard pickle files AND a json dict"""
-    if get_rank() != 0:
-        return
-    
-    # Save pkl files for utils.py
-    std = StandardScaler(with_mean=True, with_std=True)
-    mm = MinMaxScaler(feature_range=(0.0, 1.0))
-    std.mean_ = params["std_mean"].copy()
-    std.scale_ = params["std_scale"].copy()
-    std.n_features_in_ = len(std.mean_)
-    mm.min_ = params["mm_min"].copy()
-    mm.scale_ = params["mm_scale"].copy()
-    mm.n_features_in_ = len(mm.min_)
-    mm.feature_range = (0.0, 1.0)
-    with open(os.path.join(out_dir, "scaler_standard.pkl"), "wb") as f:
-        pickle.dump(std, f)
-    with open(os.path.join(out_dir, "scaler_minmax.pkl"), "wb") as f:
-        pickle.dump(mm, f)
-    
-    # Also save the params dict (which contains the shape) as JSON
-    with open(os.path.join(out_dir, "scaler_params.json"), "w") as f:
-        params_json = {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in params.items()}
-        json.dump(params_json, f, indent=2)
-    rank0_print(f"✓ Scalers saved to {out_dir}/")
-        
-# --- END Normalization ---
-
-
-# --- START: CRITICAL FIX 1 - MASKED LOSS (FROM USER) ---
-def step_timedistributed(model, batch, device, criterion, scaler, optimizer=None):
-    """
-    FIXED Training step (v6.1)
-    Uses MASKED loss (ignores -1.0 pads).
-    Computes accuracy on LAST VALID timestep.
-    """
-    x, y = batch
-    x = x.to(device, non_blocking=True) # [B, C, T]
-    y = y.to(device, non_blocking=True) # [B]
-    B, C, T = x.shape
-    
-    is_train = optimizer is not None
-    if is_train:
-        optimizer.zero_grad(set_to_none=True)
-
-    use_amp = device.type == "cuda"
-    with torch.cuda.amp.autocast(enabled=use_amp):
-        
-        # Get predictions at all timesteps
-        logits_seq, _ = model(x, return_sequence=True)  # [B, T, n_classes]
-        
-        # ===== CRITICAL FIX: Create padding mask =====
-        # Identify non-padded timesteps (where input != -1.0)
-        # Check the first channel (all channels have same padding pattern)
-        pad_mask = (x[:, 0, :] != -1.0)  # [B, T], True for valid data
-        
-        # Expand labels to match sequence length
-        y_expanded = y.unsqueeze(1).expand(B, T)  # [B] -> [B, T]
-        
-        # Flatten
-        logits_flat = logits_seq.reshape(B * T, -1)  # [B*T, n_classes]
-        y_flat = y_expanded.reshape(B * T)  # [B*T]
-        pad_mask_flat = pad_mask.reshape(B * T)  # [B*T]
-        
-        # ===== ONLY COMPUTE LOSS ON NON-PADDED TIMESTEPS =====
-        n_valid = pad_mask_flat.sum()
-        if n_valid > 0:  # Safety check
-            logits_valid = logits_flat[pad_mask_flat]  # [N_valid, n_classes]
-            y_valid = y_flat[pad_mask_flat]  # [N_valid]
-            loss = criterion(logits_valid, y_valid)
-        else:
-            # Handle empty batch (shouldn't happen, but safe)
-            loss = torch.tensor(0.0, device=device, requires_grad=True)
-        # ================================================
-    
-    # ===== ACCURACY ON FINAL VALID TIMESTEP =====
-    # Find last valid timestep for each sample
-    # B * T - (B * T - T) = T
-    last_valid_idx = pad_mask.long().sum(dim=1) - 1  # [B]
-    last_valid_idx = torch.clamp(last_valid_idx, min=0, max=T-1) # Ensure in-bounds
-    
-    # Gather predictions from last valid timestep
-    batch_indices = torch.arange(B, device=device)
-    pred = logits_seq[batch_indices, last_valid_idx, :].argmax(dim=1)
-    correct = (pred == y).sum()
-    # ============================================
-
-    if is_train:
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-    # Return loss, correct count, and B (number of samples)
-    return loss.detach(), correct.detach(), y.numel()
-# --- END: CRITICAL FIX 1 ---
-
-
-# --- START: CRITICAL FIX 2 - MASKED VALIDATION (FROM USER) ---
-@torch.no_grad()
-def evaluate(model, loader, device, criterion):
-    """
-    Validation function (v6.1)
-    Computes MASKED loss on ALL valid timesteps.
-    Computes accuracy on LAST VALID timestep.
-    """
-    model.eval()
-    loss_sum = torch.tensor(0.0, device=device)
-    correct_sum = torch.tensor(0.0, device=device)
-    count_sum = torch.tensor(0.0, device=device)
-
-    for batch in loader:
-        x, y = batch
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-        B, C, T = x.shape
-        
-        logits_seq, _ = model(x, return_sequence=True)
-        
-        # ===== CREATE PADDING MASK =====
-        pad_mask = (x[:, 0, :] != -1.0) # [B, T]
-        
-        y_expanded = y.unsqueeze(1).expand(B, T)
-        logits_flat = logits_seq.reshape(B * T, -1)
-        y_flat = y_expanded.reshape(B * T)
-        pad_mask_flat = pad_mask.reshape(B * T)
-        
-        # ===== MASKED LOSS =====
-        n_valid = pad_mask_flat.sum()
-        if n_valid > 0:
-            logits_valid = logits_flat[pad_mask_flat]
-            y_valid = y_flat[pad_mask_flat]
-            loss = criterion(logits_valid, y_valid)
-        else:
-            loss = torch.tensor(0.0, device=device)
-        
-        # ===== ACCURACY ON FINAL VALID TIMESTEP =====
-        last_valid_idx = pad_mask.long().sum(dim=1) - 1
-        last_valid_idx = torch.clamp(last_valid_idx, min=0, max=T-1)
-        batch_indices = torch.arange(B, device=device)
-        pred = logits_seq[batch_indices, last_valid_idx, :].argmax(dim=1)
-        correct = (pred == y).sum()
-        # ============================================
-
-        # Note: We scale loss by B (y.numel()) for averaging
-        loss_sum += loss * y.numel()
-        correct_sum += correct
-        count_sum += y.numel()
-
-    reduce_tensor(loss_sum)
-    reduce_tensor(correct_sum)
-    reduce_tensor(count_sum)
-
-    # Avg loss per *sample* (not per valid timestep, but consistent)
-    loss_avg = (loss_sum / count_sum).item() if count_sum.item() > 0 else 0.0
-    # Avg acc per sample
-    acc = (correct_sum / count_sum).item() if count_sum.item() > 0 else 0.0
-    return loss_avg, acc
-# --- END: CRITICAL FIX 2 ---
-
-
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--experiment_name", type=str, required=True)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser = argparse.ArgumentParser(description="Train microlensing classifier")
+    parser.add_argument("--data", required=True, help="Path to .npz dataset")
+    parser.add_argument("--experiment_name", default="experiment", help="Experiment name")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--val_split", type=float, default=0.15)
-    parser.add_argument("--test_split", type=float, default=0.15)
-    
-    parser.add_argument("--window_size", type=int, default=50,
-                       help='(No longer used for windowing) Kept for config compatibility')
-    # --- temporal_weight no longer used ---
-    parser.add_argument("--temporal_weight", type=float, default=0.0,
-                       help='(No longer used) Weight for temporal smoothness loss')
-    
     args = parser.parse_args()
-
-    rank, world_size, local_rank = setup_ddp()
-    device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
-    set_seeds(args.seed, rank)
-
-    if rank == 0:
-        rank0_print("=" * 76)
-        rank0_print("TIMEDISTRIBUTED CNN TRAINING (v6.1 - MASKED LOSS)")
-        rank0_print("=" * 76)
-        rank0_print(f"World size: {world_size} | Rank: {rank} | Local rank: {local_rank}")
-        rank0_print(f"Data: {args.data}")
-        rank0_print(f"Model: Causal TimeDistributedCNN (Simplified, No LSTM)")
-        rank0_print(f"Loss: MASKED CrossEntropyLoss (all valid timesteps)")
-        rank0_print("=" * 76)
     
-    # --- CHANGED: Load 3D data [N, 1, T] ---
-    X, y = load_data_with_shuffle(args.data)
-    n_classes = int(np.max(y) + 1)
+    # Set seeds
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
-    # --- START: CRITICAL FIX 3 - DATA VALIDATION (FROM USER) ---
-    if rank == 0:
-        rank0_print("\nValidating data...")
-        
-        # Check shape
-        if X.ndim != 3:
-            raise ValueError(f"Expected 3D data [N,C,T], got shape {X.shape}")
-        if X.shape[1] != 1:
-            raise ValueError(f"Expected C=1, got C={X.shape[1]}")
-        
-        # Check for padding
-        n_padded = (X == -1.0).sum()
-        pct_padded = 100 * n_padded / X.size
-        rank0_print(f"  Shape: {X.shape} ✓")
-        rank0_print(f"  Padded values: {n_padded:,} ({pct_padded:.1f}%)")
-        
-        # Check class balance
-        n_class0 = (y == 0).sum()
-        n_class1 = (y == 1).sum()
-        rank0_print(f"  Class 0 (PSPL): {n_class0:,}")
-        rank0_print(f"  Class 1 (Binary): {n_class1:,}")
-        rank0_print(f"  Balance: {100*n_class1/(n_class0+n_class1):.1f}% binary")
-        
-        # Check for NaN/Inf
-        if np.isnan(X).any():
-            raise ValueError("Data contains NaN values!")
-        if np.isinf(X).any():
-            raise ValueError("Data contains Inf values!")
-        
-        rank0_print("  ✓ Data validation passed\n")
-    # --- END: CRITICAL FIX 3 ---
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}\n")
     
-    # Split (X is now 3D)
-    test_size = args.test_split
-    val_size = args.val_split / (1.0 - test_size)
+    # ========================================================================
+    # Load Data
+    # ========================================================================
+    print("Loading data...")
+    data = np.load(args.data)
+    X, y = data['X'], data['y']
     
-    X_trainval, X_test, y_trainval, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=args.seed, stratify=y
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_trainval, y_trainval, test_size=val_size, random_state=args.seed, stratify=y_trainval
-    )
-    
-    # (Split balance check... no changes)
-    if rank == 0:
-        # ... (split balance check code)
-        pass
-
-    # --- Normalize 3D data (no changes) ---
-    if rank == 0:
-        rank0_print("Fitting scalers on 3D training data...")
-        scaler_params = fit_two_stage_scalers_rank0(X_train)
+    # CRITICAL: Apply permutation to shuffle data
+    if 'perm' in data:
+        print("✓ Applying permutation to shuffle data...")
+        perm = data['perm']
+        X = X[perm]
+        y = y[perm]
     else:
-        scaler_params = None
-    scaler_params = broadcast_object_from_rank0(scaler_params)
-
-    X_train = apply_two_stage_scalers(scaler_params, X_train)
-    X_val = apply_two_stage_scalers(scaler_params, X_val)
-    X_test = apply_two_stage_scalers(scaler_params, X_test)
-    rank0_print("✓ Data normalized.")
-    # --- END FIX ---
-
-    # Datasets (X is 3D and normalized)
-    train_ds = TimeSeriesDataset(X_train, y_train)
-    val_ds = TimeSeriesDataset(X_val, y_val)
-    test_ds = TimeSeriesDataset(X_test, y_test)
-
-    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
-    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
-    test_sampler = DistributedSampler(test_ds, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=(train_sampler is None),
-                             sampler=train_sampler, num_workers=args.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                           sampler=val_sampler, num_workers=args.num_workers, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
-                            sampler=test_sampler, num_workers=args.num_workers, pin_memory=True)
-
-    # --- START: MODEL INSTANTIATION (already fixed) ---
-    rank0_print("Creating Causal TimeDistributedCNN (Simplified, No LSTM)...")
+        print("⚠️  No permutation found - shuffling manually...")
+        perm = np.random.permutation(len(X))
+        X, y = X[perm], y[perm]
+    
+    # Reshape to windowed format [N, T, F]
+    X = X.reshape(-1, 100, 10)
+    
+    print(f"\nData loaded:")
+    print(f"  Shape: {X.shape}")
+    print(f"  Class 0: {(y==0).sum()}, Class 1: {(y==1).sum()}")
+    
+    # Verify signal is present
+    pspl_mean = X[y == 0][:1000].mean()
+    binary_mean = X[y == 1][:1000].mean()
+    print(f"\n  PSPL mean flux:   {pspl_mean:.4f}")
+    print(f"  Binary mean flux: {binary_mean:.4f}")
+    print(f"  Difference:       {abs(binary_mean - pspl_mean):.4f} ({100*abs(binary_mean - pspl_mean)/pspl_mean:.1f}%)")
+    
+    # ========================================================================
+    # Split Data
+    # ========================================================================
+    print(f"\nSplitting data...")
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.4, random_state=args.seed, stratify=y
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.5, random_state=args.seed, stratify=y_temp
+    )
+    
+    print(f"  Train: {X_train.shape} (Class 0: {(y_train==0).sum()}, Class 1: {(y_train==1).sum()})")
+    print(f"  Val:   {X_val.shape} (Class 0: {(y_val==0).sum()}, Class 1: {(y_val==1).sum()})")
+    print(f"  Test:  {X_test.shape} (Class 0: {(y_test==0).sum()}, Class 1: {(y_test==1).sum()})")
+    
+    # ========================================================================
+    # Create Datasets and DataLoaders
+    # ========================================================================
+    train_ds = SimpleDataset(X_train, y_train)
+    val_ds = SimpleDataset(X_val, y_val)
+    test_ds = SimpleDataset(X_test, y_test)
+    
+    # IMPORTANT: num_workers=0 to avoid data loading issues
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, 
+                             shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size,
+                           shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size,
+                            shuffle=False, num_workers=0)
+    
+    # ========================================================================
+    # Create Model
+    # ========================================================================
+    print("\nCreating model...")
     model = TimeDistributedCNN(
-        in_channels=X.shape[1], # Should be 1
-        n_classes=n_classes,
+        in_channels=10,  # 10 features per timestep
+        n_classes=2,
         dropout=0.3
     ).to(device)
-    # --- END: MODEL INSTANTIATION FIX ---
     
-    if world_size > 1:
-        model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
-
-    # --- Use reduction='mean' for loss ---
-    criterion = nn.CrossEntropyLoss(reduction='mean').to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
-
-    # Experiment dir
-    if rank == 0:
-        exp_dir = make_experiment_dir("..", args.experiment_name)
-    else:
-        exp_dir = None
-    exp_dir = broadcast_object_from_rank0(exp_dir)
-
-    if rank == 0:
-        (Path(exp_dir) / "evaluation").mkdir(parents=True, exist_ok=True)
-        with open(os.path.join(exp_dir, "config.json"), "w") as f:
-            config_dict = vars(args).copy()
-            # --- START: CONFIG STRING (already fixed) ---
-            config_dict['model_type'] = 'TimeDistributed_CausalCNN_Simplified'
-            config_dict['loss_function'] = 'CrossEntropyLoss_Masked' # <-- Updated
-            # --- END: CONFIG STRING FIX ---
-            config_dict['dropout'] = 0.3 # Save dropout
-            json.dump(config_dict, f, indent=2)
-        save_scalers_rank0(scaler_params, exp_dir)
-
-    # Training
-    best_val_acc = -1.0
-    best_epoch = -1
-    start_time = time.time()
-
-    for epoch in range(1, args.epochs + 1):
-        if world_size > 1:
-            train_sampler.set_epoch(epoch)
+    print(f"Model architecture:\n{model}\n")
+    
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    
+    # ========================================================================
+    # Create Experiment Directory
+    # ========================================================================
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = Path(f"../results/{args.experiment_name}_{timestamp}")
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save config
+    config = vars(args).copy()
+    config['device'] = str(device)
+    config['model'] = 'TimeDistributedCNN'
+    config['preprocessing'] = 'None (raw data)'
+    with open(exp_dir / "config.json", "w") as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"✓ Experiment directory: {exp_dir}\n")
+    
+    # ========================================================================
+    # Training Loop
+    # ========================================================================
+    print("Training...")
+    print("="*80)
+    
+    best_val_acc = 0.0
+    best_epoch = 0
+    
+    for epoch in range(args.epochs):
+        # ====================================================================
+        # Train
+        # ====================================================================
         model.train()
-
-        loss_sum = torch.tensor(0.0, device=device)
-        correct_sum = torch.tensor(0.0, device=device)
-        count_sum = torch.tensor(0.0, device=device)
-
-        # --- Use simplified training step ---
-        for batch_idx, batch in enumerate(train_loader): # Added batch_idx
-            loss, correct, count = step_timedistributed(
-                model, batch, device, criterion, scaler, optimizer
-            )
-            loss_sum += loss * count # loss is avg, count is B
-            correct_sum += correct
-            count_sum += torch.tensor(count, device=device)
-
-            # Add gradient check after first batch of first epoch
-            if epoch == 1 and batch_idx == 0 and rank == 0:
-                total_norm = 0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                total_norm = total_norm ** 0.5
-                rank0_print(f"  --> First batch gradient norm: {total_norm:.6f}")
-                if total_norm < 1e-7:
-                    rank0_print("  --> ⚠️ WARNING: Very small gradients! Model may not learn.")
-
-        reduce_tensor(loss_sum)
-        reduce_tensor(correct_sum)
-        reduce_tensor(count_sum)
-
-        train_loss = (loss_sum / count_sum).item()
-        train_acc = (correct_sum / count_sum).item()
-
-        # --- Validation now uses the aligned 'evaluate' function ---
-        val_loss, val_acc = evaluate(model, val_loader, device, criterion)
-
-        if rank == 0:
-            epoch_time = time.time() - start_time
-            rank0_print(
-                f"Epoch {epoch:03d} | train loss {train_loss:.4f} acc {train_acc:.4f} | "
-                f"val loss {val_loss:.4f} acc {val_acc:.4f} | time {epoch_time:.1f}s"
-            )
-
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_epoch = epoch
-                torch.save(
-                    (model.module if isinstance(model, DDP) else model).state_dict(),
-                    os.path.join(exp_dir, "best_model.pt"),
-                )
-
-        if is_dist():
-            dist.barrier()
-
-    # Final eval on test set
-    if rank == 0:
-        best_path = os.path.join(exp_dir, "best_model.pt")
-        state_dict = torch.load(best_path, map_location="cpu")
-    else:
-        state_dict = None
-    state_dict = broadcast_object_from_rank0(state_dict)
-    (model.module if isinstance(model, DDP) else model).load_state_dict(state_dict)
-
-    # --- Test set uses aligned 'evaluate' function ---
-    test_loss, test_acc = evaluate(model, test_loader, device, criterion)
-
-    if rank == 0:
-        summary = {
-            "final_test_loss": float(test_loss),
-            "final_test_acc": float(test_acc),
-            "best_val_acc": float(best_val_acc),
-            "best_epoch": int(best_epoch),
-            "model_type": 'TimeDistributed_CausalCNN_Simplified',
-            "loss_function": 'CrossEntropyLoss_Masked',
-            "results_dir": exp_dir,
-        }
-        with open(os.path.join(exp_dir, "summary.json"), "w") as f:
-            json.dump(summary, f, indent=2)
-
-        rank0_print("\n" + "=" * 80)
-        rank0_print("FINAL EVALUATION (Loss: Masked, Acc: LastValidStep)")
-        rank0_print("=" * 80)
-        rank0_print(f"Test  | loss {test_loss:.4f} acc {test_acc:.4f}")
-        rank0_print(f"Best  | val acc {best_val_acc:.4f} (epoch {best_epoch})")
-        rank0_print(f"\n✓ Training complete! Results: {exp_dir}")
-
-    if is_dist():
-        time.sleep(1.0)
-        dist.barrier()
-        dist.destroy_process_group()
+        train_correct, train_total = 0, 0
+        
+        for x, y_batch in train_loader:
+            x, y_batch = x.to(device), y_batch.to(device)
+            
+            optimizer.zero_grad()
+            
+            # CRITICAL: Use return_sequence=False to get global pooling
+            logits, _ = model(x, return_sequence=False)
+            
+            loss = criterion(logits, y_batch)
+            loss.backward()
+            optimizer.step()
+            
+            pred = logits.argmax(dim=1)
+            train_correct += (pred == y_batch).sum().item()
+            train_total += len(y_batch)
+        
+        train_acc = train_correct / train_total
+        
+        # ====================================================================
+        # Validate
+        # ====================================================================
+        model.eval()
+        val_correct, val_total = 0, 0
+        
+        with torch.no_grad():
+            for x, y_batch in val_loader:
+                x, y_batch = x.to(device), y_batch.to(device)
+                
+                logits, _ = model(x, return_sequence=False)
+                
+                pred = logits.argmax(dim=1)
+                val_correct += (pred == y_batch).sum().item()
+                val_total += len(y_batch)
+        
+        val_acc = val_correct / val_total
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), exp_dir / "best_model.pt")
+        
+        print(f"Epoch {epoch+1:2d}/{args.epochs} | "
+              f"Train: {train_acc:.4f} | "
+              f"Val: {val_acc:.4f} | "
+              f"Best: {best_val_acc:.4f} @ Epoch {best_epoch}")
+        
+        # Early stopping if we reach very high accuracy
+        if val_acc > 0.995:
+            print(f"\n✓ Reached {val_acc:.2%} - stopping early!")
+            break
+    
+    print("="*80)
+    
+    # ========================================================================
+    # Test Evaluation
+    # ========================================================================
+    print("\nEvaluating on test set...")
+    
+    # Load best model
+    model.load_state_dict(torch.load(exp_dir / "best_model.pt"))
+    model.eval()
+    
+    test_correct, test_total = 0, 0
+    test_loss = 0.0
+    
+    with torch.no_grad():
+        for x, y_batch in test_loader:
+            x, y_batch = x.to(device), y_batch.to(device)
+            
+            logits, _ = model(x, return_sequence=False)
+            loss = criterion(logits, y_batch)
+            
+            pred = logits.argmax(dim=1)
+            test_correct += (pred == y_batch).sum().item()
+            test_total += len(y_batch)
+            test_loss += loss.item() * len(y_batch)
+    
+    test_acc = test_correct / test_total
+    test_loss = test_loss / test_total
+    
+    # ========================================================================
+    # Save Results
+    # ========================================================================
+    results = {
+        "best_epoch": best_epoch,
+        "best_val_acc": float(best_val_acc),
+        "test_acc": float(test_acc),
+        "test_loss": float(test_loss)
+    }
+    
+    with open(exp_dir / "results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"\n{'='*80}")
+    print(f"FINAL RESULTS:")
+    print(f"{'='*80}")
+    print(f"  Best Val Accuracy:  {best_val_acc:.4f} ({best_val_acc:.2%}) @ Epoch {best_epoch}")
+    print(f"  Test Accuracy:      {test_acc:.4f} ({test_acc:.2%})")
+    print(f"  Test Loss:          {test_loss:.4f}")
+    print(f"{'='*80}")
+    print(f"\n✓ Results saved to: {exp_dir}")
 
 
 if __name__ == "__main__":

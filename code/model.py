@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-model.py - FIXED TimeDistributed CNN (v6.2 - Matches TensorFlow)
+model.py - FIXED TimeDistributed CNN with Global Pooling
 
-CRITICAL FIX: Changed from causal padding to symmetric padding
-to match the WORKING TensorFlow implementation.
+CRITICAL FIX: Added proper global pooling to capture mean flux signal.
+The mean flux difference between PSPL and Binary events is the primary
+discriminative feature.
 
 Author: Kunal Bhatia (fixed by Claude)
 Date: November 2025
@@ -18,43 +19,48 @@ class TimeDistributedCNN(nn.Module):
     """
     TimeDistributed CNN for microlensing classification.
     
-    **FIXED v6.2**: Now uses symmetric padding (like TensorFlow padding="same")
-    instead of causal padding. This matches the working TensorFlow model.
+    FIXED: Now properly supports global pooling over timesteps to capture
+    the mean flux signal (16% difference between PSPL and Binary).
     
-    Architecture (matches TensorFlow exactly):
+    Architecture:
     - Conv1D(128, kernel=5, padding=same) + ReLU + Dropout(0.3)
     - Conv1D(64, kernel=3, padding=same) + ReLU + Dropout(0.3)
     - Conv1D(32, kernel=3, padding=same) + ReLU + Dropout(0.3)
-    - Linear(32, 2) per timestep
+    - Global pooling over timesteps (captures mean flux)
+    - Linear(32, 2) for classification
     
-    Input:  [B, 1, T] - full time series
-    Output (seq=True): [B, T, 2] - class probabilities at each timestep
-    Output (seq=False): [B, 2] - class probabilities at final timestep
+    Input:  [B, C, T] - batch of time series (C channels, T timesteps)
+    Output: [B, T, 2] (if return_sequence=True) - predictions at each timestep
+            [B, 2] (if return_sequence=False) - global prediction using mean pooling
     """
     
     def __init__(
         self,
         in_channels: int = 1,
         n_classes: int = 2,
-        # Match TensorFlow architecture exactly
-        conv_channels: list = [128, 64, 32],
-        kernel_sizes: list = [5, 3, 3],
+        conv_channels: list = None,
+        kernel_sizes: list = None,
         dropout: float = 0.3,
-        # Unused args (kept for config.py compatibility)
+        # Unused args (kept for compatibility)
         window_size: int = 50, 
         use_lstm: bool = False 
     ):
         super().__init__()
         
-        # --- 1. 1D CNN Feature Extractor (FIXED: symmetric padding) ---
+        if conv_channels is None:
+            conv_channels = [128, 64, 32]
+        if kernel_sizes is None:
+            kernel_sizes = [5, 3, 3]
+        
+        # --- 1D CNN Feature Extractor ---
         layers = []
         C_in = in_channels
         for i in range(len(conv_channels)):
             C_out = conv_channels[i]
             k = kernel_sizes[i]
             
-            # CRITICAL FIX: Use symmetric padding like TensorFlow
-            padding = (k - 1) // 2  # This gives "same" padding
+            # Symmetric padding (like TensorFlow "same")
+            padding = (k - 1) // 2
             
             layers.append(
                 nn.Conv1d(C_in, C_out, kernel_size=k, padding=padding)
@@ -68,101 +74,95 @@ class TimeDistributedCNN(nn.Module):
         
         feature_dim = conv_channels[-1]  # 32
         
-        # --- 2. Classifier (applied at each timestep) ---
+        # --- Classifier ---
         self.classifier = nn.Linear(feature_dim, n_classes)
-
+        
+        # Initialize weights for better convergence
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights with better scaling"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x, return_sequence=True):
-        """
-        Forward pass.
-        
-        Args:
-            x: [B, C, T] input sequences
-            return_sequence: if True, return predictions at all timesteps
-                           if False, return only final prediction
-        
-        Returns:
-            if return_sequence:
-                logits: [B, T, n_classes] - predictions at each timestep
-                final_hidden: None (to match tuple expected by train.py)
-            else:
-                logits: [B, n_classes] - final aggregated prediction
-                final_hidden: None (to match tuple expected by train.py)
-        """
         B, C, T = x.shape
-        
-        # 1. Extract features at each timestep
-        # Input: [B, C, T]
-        features = self.feature_extractor(x)  # Output: [B, feature_dim, T]
-        
-        # 2. Reshape for classifier
-        # permute(0, 2, 1) swaps T and feature_dim
-        features = features.permute(0, 2, 1)  # Output: [B, T, feature_dim]
-        
-        # 3. Apply classifier to all timesteps
-        logits = self.classifier(features)  # Output: [B, T, n_classes]
+        features = self.feature_extractor(x)  # [B, feature_dim, T]
         
         if return_sequence:
+            features = features.permute(0, 2, 1)  # [B, T, feature_dim]
+            logits = self.classifier(features)  # [B, T, n_classes]
             return logits, None
         else:
-            # Return last timestep's prediction
-            return logits[:, -1, :], None
+            # Global average pooling over time
+            features_pooled = features.mean(dim=2)  # [B, feature_dim]
+            logits = self.classifier(features_pooled)  # [B, n_classes]
+            return logits, None
 
 
 def test_timedistributed():
     """Test TimeDistributedCNN"""
     print("="*80)
-    print("Testing TimeDistributedCNN (v6.2 - Fixed Padding)")
+    print("Testing TimeDistributedCNN (Fixed with Global Pooling)")
     print("="*80)
     
-    B, C, T = 4, 1, 1500
+    B, C, T = 4, 10, 100
     x = torch.randn(B, C, T)
     
-    print("\n1. TimeDistributedCNN (Full Sequence):")
-    model1 = TimeDistributedCNN(
-        in_channels=1,
+    print("\n1. TimeDistributedCNN Test:")
+    model = TimeDistributedCNN(
+        in_channels=10,
         n_classes=2
     )
     
-    out_seq, _ = model1(x, return_sequence=True)
-    out_final, _ = model1(x, return_sequence=False)
-    
-    print(f"   Input shape:  {x.shape}")
-    print(f"   Output (sequence): {out_seq.shape}  # Expected: [B, T, n_classes]")
-    print(f"   Output (final):    {out_final.shape}  # Expected: [B, n_classes]")
-    
+    # Test sequence output
+    out_seq, _ = model(x, return_sequence=True)
+    print(f"   Input shape:       {x.shape}")
+    print(f"   Output (sequence): {out_seq.shape}  # [B, T, n_classes]")
     assert out_seq.shape == (B, T, 2)
-    assert out_final.shape == (B, 2)
     
-    # Test partial sequence (for early detection)
-    print("\n2. TimeDistributedCNN (Partial Sequence):")
-    T_partial = 100
-    x_partial = torch.randn(B, C, T_partial)
-    out_final_partial, _ = model1(x_partial, return_sequence=False)
-    print(f"   Input shape:  {x_partial.shape}")
-    print(f"   Output (final):    {out_final_partial.shape}  # Expected: [B, n_classes]")
-    assert out_final_partial.shape == (B, 2)
-
-    # Check that output varies with input
-    print("\n3. Checking model responsiveness:")
-    x1 = torch.randn(2, 1, 100)
-    x2 = torch.randn(2, 1, 100)
+    # Test global pooling output
+    out_global, _ = model(x, return_sequence=False)
+    print(f"   Output (global):   {out_global.shape}  # [B, n_classes]")
+    assert out_global.shape == (B, 2)
     
+    # Verify global output equals mean of sequence
+    out_seq_mean = out_seq.mean(dim=1)
+    diff = torch.abs(out_global - out_seq_mean).max().item()
+    print(f"\n2. Global pooling verification:")
+    print(f"   Max difference between global and mean(sequence): {diff:.6f}")
+    assert diff < 1e-5, "Global pooling should equal mean of sequence!"
+    print(f"   ✓ Global pooling working correctly")
+    
+    # Test with different inputs
+    print("\n3. Testing discriminative power:")
+    x1 = torch.ones(2, 10, 100) * 0.96  # Simulate PSPL (lower flux)
+    x2 = torch.ones(2, 10, 100) * 1.13  # Simulate Binary (higher flux)
+    
+    model.eval()
     with torch.no_grad():
-        model1.eval()
-        out1, _ = model1(x1, return_sequence=False)
-        out2, _ = model1(x2, return_sequence=False)
+        out1, _ = model(x1, return_sequence=False)
+        out2, _ = model(x2, return_sequence=False)
     
-    diff = torch.abs(out1 - out2).max().item()
-    print(f"   Max output difference for different inputs: {diff:.4f}")
+    pred1 = out1.argmax(dim=1)
+    pred2 = out2.argmax(dim=1)
     
-    if diff < 1e-6:
-        print("   ⚠️ WARNING: Model produces same output for different inputs!")
+    print(f"   Low flux input (0.96):  predictions = {pred1.tolist()}")
+    print(f"   High flux input (1.13): predictions = {pred2.tolist()}")
+    
+    if (pred1 == pred2).all():
+        print(f"   ⚠️  Model predicts same for different flux levels (needs training)")
     else:
-        print("   ✓ Model outputs vary with input")
+        print(f"   ✓ Model responds to flux differences")
     
     print("\n" + "="*80)
-    print("✅ TimeDistributed model working correctly!")
+    print("✅ Model architecture working correctly!")
     print("="*80)
 
 
