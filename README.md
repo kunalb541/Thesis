@@ -33,7 +33,6 @@ This project implements an automated classification system for binary gravitatio
 - 📊 **Enhanced Visualizations**: Three-panel plots matching original notebook exactly
 - 🔬 **Decision-Time Analysis**: Clamped probabilities after confident predictions
 - 📈 **Complete Metrics**: Classification report, ROC curves, confusion matrices
-- 🐛 **DDP Debugging**: Comprehensive troubleshooting guide for distributed training
 - 🎯 **Score Improvements**: Detailed accuracy analysis and performance metrics
 
 ---
@@ -385,7 +384,6 @@ Thesis/
 │   ├── SETUP_GUIDE.md        # Installation & DDP setup
 │   ├── RESEARCH_GUIDE.md     # Experimental workflow
 │   ├── QUICK_REFERENCE.md    # Command cheatsheet
-│   └── DDP_DEBUG_GUIDE.md    # DDP troubleshooting
 │
 └── README.md
 ```
@@ -509,8 +507,6 @@ export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 - **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**: Complete installation + DDP setup
 - **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Systematic experiments
 - **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)**: Command cheatsheet
-- **[DDP_DEBUG_GUIDE.md](docs/DDP_DEBUG_GUIDE.md)**: DDP troubleshooting
-
 ---
 
 ## Citation
