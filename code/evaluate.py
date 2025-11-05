@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.5)
+Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.6)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.5 - Fixed Path import
+Version: 5.6 - Fixed Path import, added input validation
 """
 
 import torch
@@ -48,9 +48,13 @@ class MicrolensingDataset(Dataset):
 def get_latest_experiment(experiment_name, results_dir='../results'):
     """Find latest experiment directory by timestamp suffix"""
     results_path = Path(results_dir)
+    if not results_path.exists():
+        raise ValueError(f"Results directory does not exist: {results_path.resolve()}")
+    
     matching = sorted(results_path.glob(f"{experiment_name}_*"))
     if not matching:
         raise ValueError(f"No experiments found matching: {experiment_name} in {results_path.resolve()}")
+    
     print(f"Found {len(matching)} matching experiments, using latest: {matching[-1].name}")
     return matching[-1]
 
@@ -264,6 +268,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--confidence_threshold", type=float, default=0.8)
     args = parser.parse_args()
+
+    # Input validation
+    if not Path(args.data).exists():
+        raise FileNotFoundError(f"Data file not found: {args.data}")
+    if args.confidence_threshold < 0 or args.confidence_threshold > 1:
+        raise ValueError(f"Confidence threshold must be in [0, 1], got {args.confidence_threshold}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("="*80)

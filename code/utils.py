@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Utility functions for data loading and preprocessing - FIXED VERSION (v5.4)
+Utility functions for data loading and preprocessing - FIXED VERSION (v5.6)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.4 - Added missing Path import
+Version: 5.6 - Enhanced validation, better error messages
 """
 
 import json
@@ -53,9 +53,18 @@ def two_stage_normalize(X_train, X_val, X_test, pad_value=-1.0):
     -------
     X_train_scaled, X_val_scaled, X_test_scaled, scaler_standard, scaler_minmax
     """
-    # Get original shapes
+    # Validate inputs
     if X_train.ndim != 3 or X_val.ndim != 3 or X_test.ndim != 3:
-        raise ValueError(f"All inputs must be 3D [N, C, T] arrays.")
+        raise ValueError(f"All inputs must be 3D [N, C, T] arrays. "
+                        f"Got shapes: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
+    
+    if X_train.shape[1] != X_val.shape[1] or X_train.shape[1] != X_test.shape[1]:
+        raise ValueError(f"Channel mismatch: train={X_train.shape[1]}, "
+                        f"val={X_val.shape[1]}, test={X_test.shape[1]}")
+    
+    if X_train.shape[2] != X_val.shape[2] or X_train.shape[2] != X_test.shape[2]:
+        raise ValueError(f"Sequence length mismatch: train={X_train.shape[2]}, "
+                        f"val={X_val.shape[2]}, test={X_test.shape[2]}")
     
     N_train, C, T = X_train.shape
     N_val = X_val.shape[0]
@@ -122,7 +131,6 @@ def two_stage_normalize(X_train, X_val, X_test, pad_value=-1.0):
 def save_scalers(scaler_standard, scaler_minmax, output_dir):
     """
     Save scalers for later use during evaluation.
-    This is now just a wrapper for the DDP-safe function in train.py
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -136,20 +144,32 @@ def save_scalers(scaler_standard, scaler_minmax, output_dir):
 
 def load_scalers(model_dir):
     """
-    Load saved scalers from training directory
+    Load saved scalers from training directory with validation
     """
     model_dir = Path(model_dir)
     scaler_std_path = model_dir / "scaler_standard.pkl"
     scaler_mm_path  = model_dir / "scaler_minmax.pkl"
+    
     if not scaler_std_path.exists():
         raise FileNotFoundError(f"StandardScaler not found: {scaler_std_path}")
     if not scaler_mm_path.exists():
         raise FileNotFoundError(f"MinMaxScaler not found: {scaler_mm_path}")
+    
     with open(scaler_std_path, 'rb') as f:
         scaler_standard = pickle.load(f)
     with open(scaler_mm_path, 'rb') as f:
         scaler_minmax = pickle.load(f)
+    
+    # Validate scalers
+    if not hasattr(scaler_standard, 'mean_'):
+        raise ValueError("StandardScaler is not fitted (missing mean_ attribute)")
+    if not hasattr(scaler_minmax, 'min_'):
+        raise ValueError("MinMaxScaler is not fitted (missing min_ attribute)")
+    
     print(f"✓ Loaded scalers from {model_dir}")
+    print(f"  StandardScaler: {len(scaler_standard.mean_)} features")
+    print(f"  MinMaxScaler: {len(scaler_minmax.min_)} features")
+    
     return scaler_standard, scaler_minmax
 
 
@@ -172,20 +192,22 @@ def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
     if X is None:
         raise ValueError("X is None.")
     if X.ndim != 3:
-        raise ValueError(f"Expected 3D array [N, C, T], got {X.shape}")
+        raise ValueError(f"Expected 3D array [N, C, T], got shape {X.shape}")
 
     X = np.asarray(X, dtype=np.float32, order="C")
     N, C, T = X.shape
     F_flat = C * T
     
-    # Check scaler features against flattened features
-    if getattr(scaler_standard, "mean_", None) is None:
-        raise ValueError("Standard scaler is not fitted (mean_ missing).")
+    # Validate scaler compatibility
+    if not hasattr(scaler_standard, "mean_"):
+        raise ValueError("StandardScaler is not fitted (mean_ missing).")
+    
     F_scaler = scaler_standard.mean_.shape[0]
     if F_scaler != F_flat:
         raise ValueError(
-            f"Feature mismatch: scaler has {F_scaler} features, "
-            f"X has [N, {C}, {T}] = {F_flat} features."
+            f"Feature dimension mismatch: scaler was fitted on {F_scaler} features, "
+            f"but X has [{N}, {C}, {T}] = {F_flat} features. "
+            f"Did you use the same data shape during training?"
         )
 
     # Flatten to [N, F]
@@ -210,18 +232,33 @@ def apply_scalers_to_data(X, scaler_standard, scaler_minmax, pad_value=-1.0):
     nonpad = X_scaled_flat[~pad_mask]
     if nonpad.size:
         print(f"✓ Applied scalers. Data range (non-padded): [{nonpad.min():.3f}, {nonpad.max():.3f}]")
+    else:
+        print("⚠ Warning: All data is padded!")
 
     return X_scaled.astype(np.float32, copy=False)
 
 
 def load_npz_dataset(path, apply_perm=False, normalize=False):
     """
-    Load dataset from .npz file
+    Load dataset from .npz file with validation
     ALWAYS returns 3D data: [N, C, T]
     """
-    data = np.load(path, allow_pickle=False)
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset file not found: {path}")
+    
+    try:
+        data = np.load(path, allow_pickle=False)
+    except Exception as e:
+        raise ValueError(f"Failed to load NPZ file: {e}")
 
-    X = data['X'] # [N, T]
+    # Validate required fields
+    required_fields = ['X', 'y', 'timestamps', 'meta_json']
+    missing = [f for f in required_fields if f not in data.files]
+    if missing:
+        raise ValueError(f"Missing required fields in NPZ: {missing}")
+
+    X = data['X']
     y = data['y']
     timestamps = data['timestamps']
 
@@ -230,6 +267,8 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
 
     if apply_perm and 'perm' in data.files:
         perm = data['perm']
+        if len(perm) != len(X):
+            raise ValueError(f"Permutation length {len(perm)} doesn't match data length {len(X)}")
         X = X[perm]
         y = y[perm]
 
@@ -241,11 +280,15 @@ def load_npz_dataset(path, apply_perm=False, normalize=False):
     # ALWAYS return 3D data
     if X.ndim == 2:
         X = X[:, None, :]  # [N, T] -> [N, 1, T]
+    elif X.ndim != 3:
+        raise ValueError(f"Expected 2D or 3D X array, got {X.ndim}D with shape {X.shape}")
     
     if normalize:
         raise ValueError("normalize=True is deprecated. "
-                         "Load raw data, split, "
-                         "then use normalization functions.")
+                         "Load raw data, split, then use two_stage_normalize().")
+
+    print(f"✓ Loaded dataset: {X.shape}, {len(y)} labels")
+    print(f"  PSPL: {np.sum(y == 0)}, Binary: {np.sum(y == 1)}")
 
     return X, y, timestamps, meta
 

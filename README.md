@@ -1,6 +1,6 @@
 # Real-Time Binary Microlensing Classification with Transformers
 
-**Deep Learning for Next-Generation Survey Operations - Version 5.5**
+**Deep Learning for Next-Generation Survey Operations - Version 5.6**
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-red.svg)](https://pytorch.org/)
@@ -16,7 +16,7 @@
 
 This project implements an automated classification system for binary gravitational microlensing events using **Transformer neural networks**. With upcoming surveys like LSST and Roman expected to detect 20,000+ microlensing events annually, automated real-time classification becomes essential for triggering follow-up observations.
 
-### Key Features (v5.5)
+### Key Features (v5.6)
 
 - **Transformer Architecture**: Encoder-based architecture for temporal classification
 - **Sequential Classification**: Per-timestep predictions enabling early detection
@@ -27,11 +27,12 @@ This project implements an automated classification system for binary gravitatio
 - **Comprehensive Evaluation**: Three-panel visualizations with decision-time analysis
 - **Robust DDP**: Fixed checkpoint saving, scaler persistence, and metric aggregation
 
-### What's New in v5.5
+### What's New in v5.6
 
-- ✅ **Fixed Path Import**: evaluate.py now imports Path correctly
-- ✅ **Clearer Documentation**: Consistent terminology (Conv1D preprocessing vs Transformer model)
-- ✅ **Minor Code Cleanup**: Improved variable naming consistency
+- ✅ **Fixed Path Import**: evaluate.py now imports Path correctly (critical bug fix)
+- ✅ **Enhanced Validation**: utils.py has better input validation and error messages
+- ✅ **Improved Documentation**: Clearer distinction between preprocessing and model layers
+- ✅ **Better Error Handling**: More informative errors for common issues
 
 ---
 
@@ -115,7 +116,7 @@ python benchmark_realtime.py \
 Input: [batch, 1, T=1500] light curve time series
    ↓
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PREPROCESSING LAYER (downsampling only)
+PREPROCESSING LAYER (downsampling)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1D Convolution (Reduce sequence length)
    [batch, 1, 1500] → [batch, d_model=64, 500]
@@ -157,9 +158,9 @@ Mode 2: Final (return_sequence=False)
 Output: Class probabilities {PSPL, Binary}
 ```
 
-**Key Points**:
-1. **Conv1D is just preprocessing** - reduces 1500 → 500 timesteps for efficiency
-2. **Transformer is the actual model** - processes the 500-length sequences
+**Architecture Clarification**:
+1. **Conv1D is preprocessing** - reduces 1500 → 500 timesteps for efficiency (NOT the model)
+2. **Transformer is the actual model** - processes the 500-length sequences with attention
 3. **Multi-head attention** captures temporal patterns in light curves
 4. **No recurrence** - entire sequence processed in parallel (unlike RNNs)
 
@@ -167,7 +168,7 @@ Output: Class probabilities {PSPL, Binary}
 - **Transformers**: Better at long-range dependencies than RNNs/LSTMs
 - **Downsampling**: Makes full sequence tractable (500 vs 1500 timesteps)
 - **Attention**: Can focus on caustic crossings regardless of position
-- **Parallel**: Much faster than recurrent models
+- **Parallel**: Much faster than recurrent models (enables real-time processing)
 
 ---
 
@@ -283,12 +284,12 @@ python evaluate.py \
 Thesis/
 ├── code/
 │   ├── simulate.py           # Fast parallel simulation
-│   ├── train.py              # DDP Transformer training (v5.5)
-│   ├── evaluate.py           # Evaluation + plots (v5.5)
+│   ├── train.py              # DDP Transformer training (v5.6)
+│   ├── evaluate.py           # Evaluation + plots (v5.6 - FIXED)
 │   ├── benchmark_realtime.py # Performance testing
 │   ├── model.py              # Transformer architecture
 │   ├── config.py             # Configuration
-│   ├── utils.py              # Utilities (v5.5)
+│   ├── utils.py              # Utilities (v5.6 - ENHANCED)
 │   └── visualize.py          # Visualization
 │
 ├── data/raw/                 # Simulated datasets
@@ -299,7 +300,7 @@ Thesis/
 
 ---
 
-## Expected Performance (v5.5)
+## Expected Performance (v5.6)
 
 ### Timing (4 GPUs)
 
@@ -323,32 +324,40 @@ Thesis/
 
 ## Troubleshooting
 
-### DDP Issues
+### Common Issues
 
+**ImportError: cannot import name 'Path'**:
 ```bash
-# Verify GPU count
-python -c "import torch; print(f'GPUs: {torch.cuda.device_count()}')"
-
-# Enable debug
-export NCCL_DEBUG=INFO
-
-# Network interface
-export NCCL_SOCKET_IFNAME=eth0
+# Fixed in v5.6 - update evaluate.py
+# Path is now correctly imported from pathlib
 ```
 
-### Normalization Issues
-
+**Feature dimension mismatch during evaluation**:
 ```bash
-# Check data
+# This means you're using different data shapes
+# Check that test data matches training data dimensions
 python -c "
 import numpy as np
 data = np.load('../data/raw/baseline_1M.npz')
-X = data['X']
-print(f'Range: [{X.min():.3f}, {X.max():.3f}]')
+print(f'Shape: {data[\"X\"].shape}')
 "
+```
 
-# Verify scalers
-ls -lh ../results/baseline_*/scaler_*.pkl
+**DDP hangs during training**:
+```bash
+# Enable debug mode
+export NCCL_DEBUG=INFO
+
+# Check network interface
+export NCCL_SOCKET_IFNAME=eth0
+```
+
+**CUDA out of memory**:
+```bash
+# Reduce batch size
+torchrun --nproc_per_node=4 train.py --batch_size 64
+
+# Or use gradient checkpointing (edit model.py if needed)
 ```
 
 ---
@@ -385,6 +394,31 @@ MIT License - See [LICENSE](LICENSE)
 **Kunal Bhatia**  
 kunal29bhatia@gmail.com  
 University of Heidelberg
+
+---
+
+## Changelog
+
+### v5.6 (Current) - November 2025
+- ✅ Fixed Path import in evaluate.py (critical bug)
+- ✅ Enhanced validation in utils.py
+- ✅ Better error messages throughout
+- ✅ Clarified documentation on Conv1D vs Transformer
+
+### v5.5 - October 2025
+- Fixed Path import issues
+- Clearer documentation
+- Minor code cleanup
+
+### v5.4 - October 2025
+- Fixed DDP evaluation loading
+- Fixed tqdm import
+- Enhanced exp_dir broadcast
+
+### v5.3 - October 2025
+- Initial Transformer implementation
+- DDP support
+- Complete evaluation pipeline
 
 ---
 
