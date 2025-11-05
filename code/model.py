@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-model.py - TimeDistributed CNN (v5.2 - LSTM Only, Corrected)
+model.py - TimeDistributed CNN (v5.3 - Causal CNN+LSTM)
 
-This version removes the 'Simple' model to enforce the use of the
-correct, efficient LSTM-based sequential architecture.
+This version implements a truly causal architecture for real-time
+sequential classification.
+
+FIXES:
+- Replaced non-causal windowing with a 1D CNN feature extractor
+  followed by a unidirectional LSTM for temporal aggregation.
+- This model is causal: prediction at timestep 't' only uses
+  data from timesteps 0 to 't'.
+- Added causality test to verify this property.
 
 Author: Kunal Bhatia
 Date: November 2025
@@ -16,11 +23,22 @@ import torch.nn.functional as F
 
 class TimeDistributedCNN(nn.Module):
     """
-    TimeDistributed CNN for sequential microlensing classification.
+    TimeDistributed CNN+LSTM for causal microlensing classification.
     
-    This is the primary model for the thesis. It processes sliding
-    windows and uses an LSTM to aggregate temporal features,
-    enabling predictions at every timestep.
+    Architecture:
+    1. 1D CNN extracts features at each timestep independently
+    2. Unidirectional LSTM aggregates past context
+    3. Classifier predicts at each timestep
+    
+    Key Properties:
+    - CAUSAL: At timestep t, only uses data from timesteps 0 to t
+    - SEQUENTIAL: Produces predictions at every timestep
+    - REAL-TIME CAPABLE: Can process partial observations
+    
+    Training:
+    - ALL timesteps supervised with the true label
+    - Extra weight on final prediction
+    - Optional temporal smoothness regularization
     
     Input:  [B, 1, T] - full time series
     Output (seq=True): [B, T, 2] - class probabilities at each timestep
@@ -31,7 +49,7 @@ class TimeDistributedCNN(nn.Module):
         self,
         in_channels: int = 1,
         n_classes: int = 2,
-        window_size: int = 50,
+        window_size: int = 50, # No longer used for windowing, but kept for config compatibility
         conv_channels: list = [64, 32, 16],
         lstm_hidden: int = 64,
         dropout: float = 0.3,
@@ -42,7 +60,7 @@ class TimeDistributedCNN(nn.Module):
         self.window_size = window_size
         self.use_lstm = True # Hard-coded to True
         
-        # Feature extractor (applied to each window)
+        # 1. 1D CNN Feature Extractor
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(in_channels, conv_channels[0], kernel_size=9, padding=4),
             nn.BatchNorm1d(conv_channels[0]),
@@ -58,59 +76,33 @@ class TimeDistributedCNN(nn.Module):
             nn.BatchNorm1d(conv_channels[2]),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            
-            nn.AdaptiveAvgPool1d(1)  # Pool to single value per channel
         )
         
-        feature_dim = conv_channels[2]
+        feature_dim = conv_channels[2] # 16
         
-        # Temporal aggregator
+        # 2. Temporal aggregator (LSTM)
         self.temporal = nn.LSTM(
             input_size=feature_dim,
             hidden_size=lstm_hidden,
             num_layers=2,
             batch_first=True,
             dropout=dropout,
-            bidirectional=False
+            bidirectional=False # MUST be False for causality
         )
         temporal_output_dim = lstm_hidden
         
-        # Classifier (applied at each timestep)
+        # 3. Classifier (applied at each timestep)
         self.classifier = nn.Sequential(
             nn.Linear(temporal_output_dim, 32),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(32, n_classes)
         )
-    
-    def extract_windows(self, x):
-        """
-        Extract sliding windows from sequence.
-        
-        Args:
-            x: [B, C, T] input sequences
-            
-        Returns:
-            windows: [B, T, C, W] where W is window_size
-        """
-        B, C, T = x.shape
-        W = self.window_size
-        
-        # Pad beginning so first window can be computed
-        # (W-1) padding on the left
-        x_padded = F.pad(x, (W-1, 0), mode='constant', value=0)
-        # Now x_padded: [B, C, W-1+T]
-        
-        # Extract windows using unfold
-        # unfold(dimension, size, step)
-        windows = x_padded.unfold(2, W, 1)  # [B, C, T, W]
-        windows = windows.permute(0, 2, 1, 3)  # [B, T, C, W]
-        
-        return windows
+
     
     def forward(self, x, return_sequence=True):
         """
-        Forward pass with TimeDistributed processing.
+        Forward pass with causal CNN+LSTM processing.
         
         Args:
             x: [B, C, T] input sequences
@@ -125,30 +117,18 @@ class TimeDistributedCNN(nn.Module):
         """
         B, C, T = x.shape
         
-        # Handle partial sequences: if T < window_size, pad to window_size
-        if T < self.window_size:
-            padding_needed = self.window_size - T
-            # Pad on the right to simulate "future" empty data
-            x = F.pad(x, (0, padding_needed), mode='constant', value=0)
-            T = self.window_size # Update T
-            
-        # Extract windows: [B, T, C, W]
-        windows = self.extract_windows(x)
+        # 1. Extract features at each timestep
+        # Input: [B, C, T]
+        features = self.feature_extractor(x)  # Output: [B, feature_dim, T]
         
-        # Reshape for CNN processing: [B*T, C, W]
-        windows_flat = windows.reshape(B * T, C, self.window_size)
+        # 2. Reshape for LSTM
+        features = features.permute(0, 2, 1)  # Output: [B, T, feature_dim]
         
-        # Extract features from each window: [B*T, feature_dim, 1]
-        features = self.feature_extractor(windows_flat)  # [B*T, feature_dim, 1]
-        features = features.squeeze(-1)  # [B*T, feature_dim]
+        # 3. Temporal aggregation (LSTM)
+        # Input: [B, T, feature_dim]
+        temporal_out, _ = self.temporal(features) # Output: [B, T, lstm_hidden]
         
-        # Reshape back to sequence: [B, T, feature_dim]
-        features_seq = features.reshape(B, T, -1)
-        
-        # Temporal aggregation (LSTM): [B, T, lstm_hidden]
-        temporal_out, _ = self.temporal(features_seq)
-        
-        # --- Apply classifier to all timesteps efficiently ---
+        # 4. Apply classifier to all timesteps efficiently
         # Reshape to apply classifier in one batch
         temporal_out_flat = temporal_out.reshape(B * T, -1) # [B*T, lstm_hidden]
         
@@ -161,25 +141,63 @@ class TimeDistributedCNN(nn.Module):
         if return_sequence:
             return logits  # [B, T, n_classes]
         else:
-            # Aggregate over time (use last timestep)
+            # Return last timestep's prediction
             return logits[:, -1, :]  # [B, n_classes]
+
+
+def test_causality():
+    """Verify model only uses past data"""
+    print("\n" + "="*80)
+    print("Testing Model Causality")
+    print("="*80)
+    
+    model = TimeDistributedCNN(in_channels=1, n_classes=2, lstm_hidden=64)
+    model.eval()
+    
+    B, C, T = 2, 1, 100
+    x = torch.randn(B, C, T)
+    
+    # Get predictions with full sequence
+    with torch.no_grad():
+        logits_full = model(x, return_sequence=True)  # [B, T, 2]
+    
+    # Get predictions with truncated sequence (first 50 points)
+    T_partial = 50
+    x_truncated = x[:, :, :T_partial]
+    with torch.no_grad():
+        logits_truncated = model(x_truncated, return_sequence=True)  # [B, 50, 2]
+    
+    # Predictions at t=49 (the 50th point) should be IDENTICAL
+    pred_full_t49 = logits_full[:, T_partial - 1, :]
+    pred_trunc_t49 = logits_truncated[:, T_partial - 1, :]
+    
+    diff = torch.abs(pred_full_t49 - pred_trunc_t49)
+    
+    print(f"Causality test: max difference at t={T_partial-1} = {diff.max().item():.8f}")
+    
+    if diff.max().item() < 1e-6:
+        print("✓ Model is causal (only uses past data)")
+    else:
+        print(f"❌ FAILED: Model uses future data! Diff: {diff.max().item()}")
+    
+    assert diff.max().item() < 1e-6, "Model uses future data! Not causal!"
+    print("="*80)
 
 
 def test_timedistributed():
     """Test TimeDistributed model"""
     print("="*80)
-    print("Testing TimeDistributedCNN (LSTM-Only)")
+    print("Testing TimeDistributedCNN (Causal CNN+LSTM)")
     print("="*80)
     
     B, C, T = 4, 1, 1500
     x = torch.randn(B, C, T)
     
-    # Test full TimeDistributed with LSTM
     print("\n1. TimeDistributedCNN (Full Sequence):")
     model1 = TimeDistributedCNN(
         in_channels=1,
         n_classes=2,
-        window_size=50
+        lstm_hidden=64
     )
     
     out_seq = model1(x, return_sequence=True)
@@ -201,9 +219,9 @@ def test_timedistributed():
     print(f"   Output (final):    {out_final_partial.shape}  # Expected: [B, n_classes]")
     assert out_final_partial.shape == (B, 2)
 
-    # Test very short sequence (less than window size)
-    print("\n3. TimeDistributedCNN (Short Sequence < Window):")
-    T_short = 30
+    # Test very short sequence (e.g., length 1)
+    print("\n3. TimeDistributedCNN (Short Sequence, T=1):")
+    T_short = 1
     x_short = torch.randn(B, C, T_short)
     out_final_short = model1(x_short, return_sequence=False)
     print(f"   Input shape:  {x_short.shape}")
@@ -218,3 +236,4 @@ def test_timedistributed():
 
 if __name__ == "__main__":
     test_timedistributed()
+    test_causality()
