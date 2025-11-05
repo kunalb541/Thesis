@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.6)
+Complete Evaluation Script with Notebook-Style Visualizations (Fixed v5.6.1)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 5.6 - Fixed Path import, added input validation
+Version: 5.6.1 - Fixed downsample_factor access in plots
 """
 
 import torch
@@ -57,6 +57,14 @@ def get_latest_experiment(experiment_name, results_dir='../results'):
     
     print(f"Found {len(matching)} matching experiments, using latest: {matching[-1].name}")
     return matching[-1]
+
+
+def get_model_downsample_factor(model):
+    """Safely get downsample_factor from model (handles DDP wrapper)"""
+    if hasattr(model, 'module'):
+        return model.module.downsample_factor
+    else:
+        return model.downsample_factor
 
 
 @torch.no_grad()
@@ -148,7 +156,8 @@ def plot_three_panel_sample(
     if decision_made:
         probs_clamped[decision_time_idx-1:] = probs_seq[decision_time_idx-1]
 
-    downsample_factor = model.module.downsample_factor if hasattr(model, 'module') else model.downsample_factor
+    # FIXED: Use helper function to safely get downsample_factor
+    downsample_factor = get_model_downsample_factor(model)
     decision_orig_idx = min(decision_time_idx * downsample_factor, T_orig - 1)
     decision_timestamp = timestamps[decision_orig_idx]
 
@@ -352,7 +361,8 @@ def main():
         model, X_test_normalized, device, args.confidence_threshold, args.batch_size
     )
 
-    downsample_factor = model.module.downsample_factor if hasattr(model, 'module') else model.downsample_factor
+    # FIXED: Use helper function
+    downsample_factor = get_model_downsample_factor(model)
     T_down = X_test_normalized.shape[2] // downsample_factor
     plot_decision_time_distribution(decision_times, T_down, eval_dir / "decision_time_distribution.png")
 

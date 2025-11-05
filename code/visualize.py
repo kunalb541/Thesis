@@ -19,6 +19,7 @@ import torch
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+# Replace the plot_three_panel_sample function (lines ~30-130) with:
 
 def plot_three_panel_sample(
     model,
@@ -37,18 +38,6 @@ def plot_three_panel_sample(
     1. Original Data (with decision line)
     2. CNN Input View (normalized, with decision line)
     3. Class Probabilities Over Time (with clamping)
-    
-    Args:
-        model: Trained Transformer model
-        X_original: Original unnormalized data [1, T]
-        X_normalized: Normalized data [1, 1, T] ready for model
-        y_true: True label (0=PSPL, 1=Binary)
-        sample_idx: Sample index for title
-        timestamps: Original timestamps
-        device: torch device
-        output_path: Where to save the plot
-        confidence_threshold: Threshold for decision making
-        pad_value: Padding value (-1.0)
     """
     model.eval()
     
@@ -83,8 +72,12 @@ def plot_three_panel_sample(
             probs_clamped[t, predicted_class] = decision_prob
             probs_clamped[t, 1 - predicted_class] = 1.0 - decision_prob
     
-    # Map decision time to original timestamps
-    downsample_factor = model.downsample_factor
+    # FIXED: Safely get downsample_factor
+    if hasattr(model, 'module'):
+        downsample_factor = model.module.downsample_factor
+    else:
+        downsample_factor = model.downsample_factor
+        
     decision_orig_idx = min(decision_time_idx * downsample_factor, T_orig - 1)
     decision_timestamp = timestamps[decision_orig_idx]
     
@@ -100,11 +93,8 @@ def plot_three_panel_sample(
              f"Predicted: {pred_label_str} "
              f"(Decision at step {decision_time_idx})")
     
-    # ========================================================================
     # Panel 1: Original Data
-    # ========================================================================
     ax1 = axes[0]
-    
     original_data = X_original[0]  # [T]
     non_pad = original_data != pad_value
     
@@ -112,7 +102,6 @@ def plot_three_panel_sample(
                 color='darkcyan', alpha=0.7, s=30,
                 label='Original magnitude')
     
-    # Decision line
     ax1.axvline(x=decision_timestamp, color='red', linestyle='--',
                 linewidth=2, label=f'Decision time ≈ {decision_timestamp:.1f}')
     
@@ -120,13 +109,10 @@ def plot_three_panel_sample(
     ax1.set_xlabel('Time', fontsize=11)
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
-    ax1.invert_yaxis()  # Magnitudes are inverted
+    ax1.invert_yaxis()
     
-    # ========================================================================
-    # Panel 2: CNN Input View (Normalized)
-    # ========================================================================
+    # Panel 2: CNN Input View
     ax2 = axes[1]
-    
     cnn_data = X_normalized[0, 0, :]  # [T]
     cnn_timesteps = np.arange(1, T_orig + 1)
     non_pad_cnn = cnn_data != pad_value
@@ -135,7 +121,6 @@ def plot_three_panel_sample(
                 color='darkcyan', alpha=0.7, s=30,
                 label='Normalized flux [0,1], pads=-1.0')
     
-    # Decision line
     ax2.axvline(x=decision_time_idx, color='red', linestyle='--',
                 linewidth=2, label=f'Decision (step {decision_time_idx})')
     
@@ -144,28 +129,23 @@ def plot_three_panel_sample(
     ax2.legend(loc='upper right')
     ax2.grid(True, alpha=0.3)
     
-    # ========================================================================
-    # Panel 3: Class Probabilities Over Time
-    # ========================================================================
+    # Panel 3: Probabilities
     ax3 = axes[2]
-    
     prob_timesteps = np.arange(1, T_down + 1)
     
-    # Plot probabilities
     ax3.plot(prob_timesteps, probs_clamped[:, 0],
              label='P(PSPL)', color='#1f77b4', linewidth=2, alpha=0.8)
     ax3.plot(prob_timesteps, probs_clamped[:, 1],
              label='P(Binary)', color='#ff7f0e', linewidth=2, alpha=0.8)
     
-    # Decision line
     ax3.axvline(x=decision_time_idx, color='red', linestyle='--',
                 linewidth=2, label=f'Decision (step {decision_time_idx})')
     
+    ax3.set_ylim([-0.05, 1.05])
+    ax3.legend(loc='upper right')
     ax3.set_title(f"3. Class Probabilities Over Time (Clamped after decision)\n{title}",
                   fontsize=12, fontweight='bold')
     ax3.set_xlabel(f'Downsampled Timestep (1 to {T_down})', fontsize=11)
-    ax3.set_ylim([-0.05, 1.05])
-    ax3.legend(loc='upper right')
     ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
