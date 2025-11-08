@@ -1,4 +1,4 @@
-# Real-Time Binary Microlensing Detection with Streaming Transformers
+# Real-Time Binary Microlensing Detection with Transformers
 
 **MSc Thesis Project - From Light Curves to Labels: Machine Learning in Microlensing**
 
