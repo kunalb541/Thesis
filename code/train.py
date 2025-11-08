@@ -19,7 +19,7 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
-from simple_transformer import SimpleStableTransformer, count_parameters
+from code.transformer import SimpleStableTransformer, count_parameters
 from normalization import CausticPreservingNormalizer
 
 
