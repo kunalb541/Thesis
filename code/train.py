@@ -8,6 +8,24 @@ Version: 3.0 - Full DDP with stability fixes
 """
 
 import os
+import warnings
+
+# Suppress all warnings
+warnings.filterwarnings("ignore")
+
+# Optional: disable specific PyTorch warnings (recommended)
+os.environ["PYTHONWARNINGS"] = "ignore"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # for transformers
+os.environ["CUDA_LAUNCH_BLOCKING"] = "0"        # avoids debug spam
+os.environ["NCCL_DEBUG"] = "WARN"               # reduces NCCL verbosity
+os.environ["OMP_NUM_THREADS"] = "1"             # avoid excessive threading warnings
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"        # if TensorFlow is indirectly used
+
+# Suppress tqdm warnings
+from tqdm import tqdm
+tqdm.disable = lambda *a, **k: None  # disables tqdm warnings, not progress bars
+
+# Now import the rest
 import json
 import argparse
 import numpy as np
@@ -19,12 +37,9 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
-from tqdm import tqdm
-import warnings
 
 from transformer import SimpleStableTransformer, count_parameters
 from normalization import CausticPreservingNormalizer
-
 
 def setup_distributed():
     """
@@ -161,9 +176,7 @@ def safe_loss_and_backward(model, outputs, targets, criterion, optimizer,
         # Standard training
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        
-        if grad_norm > max_grad_norm * 2:
-            return None, None
+    
         
         optimizer.step()
     
@@ -342,80 +355,63 @@ def main():
         print(f"Mixed precision: {args.amp}")
     
     # Load data (only on rank 0 for efficiency)
+    # Load and preprocess data - ALL RANKS DO THIS INDEPENDENTLY (MUCH FASTER!)
     if rank == 0:
         print(f"\nLoading data from {args.data}...")
-        data = np.load(args.data)
-        X = data['X']
-        y = data['y']
-        
-        if X.ndim == 2:
-            X = X[:, np.newaxis, :]
-        
-        if args.quick:
+    
+    # All ranks load the data file independently (from shared filesystem)
+    data = np.load(args.data)
+    X = data['X']
+    y = data['y']
+    
+    if X.ndim == 2:
+        X = X[:, np.newaxis, :]
+    
+    if args.quick:
+        if rank == 0:
             print("⚡ Quick mode: Using 1000 samples")
-            indices = np.random.choice(len(X), min(1000, len(X)), replace=False)
-            X = X[indices]
-            y = y[indices]
-        
+        # Use same seed for all ranks to get same indices
+        np.random.seed(42)
+        indices = np.random.choice(len(X), min(1000, len(X)), replace=False)
+        X = X[indices]
+        y = y[indices]
+    
+    if rank == 0:
         print(f"Data shape: {X.shape}")
         print(f"Class distribution: {np.bincount(y)}")
-        
-        # Split data
-        X_train, X_temp, y_train, y_temp = train_test_split(
-            X, y, test_size=0.3, stratify=y, random_state=42
-        )
-        
-        X_val, X_test, y_val, y_test = train_test_split(
-            X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
-        )
-        
-        print(f"Splits - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
-        
-        # Normalize
-        print("\nApplying normalization...")
-        normalizer = CausticPreservingNormalizer(pad_value=-1.0)
-        normalizer.fit(X_train)
-        
-        X_train_norm = normalizer.transform(X_train).squeeze(1)
-        X_val_norm = normalizer.transform(X_val).squeeze(1)
-        X_test_norm = normalizer.transform(X_test).squeeze(1)
-        
-        # Clip for safety
-        X_train_norm = np.clip(X_train_norm, -5, 5)
-        X_val_norm = np.clip(X_val_norm, -5, 5)
-        X_test_norm = np.clip(X_test_norm, -5, 5)
-    else:
-        # Other ranks initialize empty
-        X_train_norm = X_val_norm = X_test_norm = None
-        y_train = y_val = y_test = None
-        normalizer = None
     
-    # Broadcast data to all processes if distributed
+    # All ranks do identical splits (deterministic with same seed)
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.3, stratify=y, random_state=42
+    )
+    
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
+    )
+    
+    if rank == 0:
+        print(f"Splits - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+    
+    # All ranks normalize (normalizer is deterministic)
+    if rank == 0:
+        print("\nApplying normalization...")
+    normalizer = CausticPreservingNormalizer(pad_value=-1.0)
+    normalizer.fit(X_train)
+    
+    X_train_norm = normalizer.transform(X_train).squeeze(1)
+    X_val_norm = normalizer.transform(X_val).squeeze(1)
+    X_test_norm = normalizer.transform(X_test).squeeze(1)
+    
+    # Clip for safety
+    X_train_norm = np.clip(X_train_norm, -5, 5)
+    X_val_norm = np.clip(X_val_norm, -5, 5)
+    X_test_norm = np.clip(X_test_norm, -5, 5)
+    
+    # Synchronize all ranks before proceeding
     if is_distributed:
-        # Determine sizes first
+        dist.barrier()
         if rank == 0:
-            sizes = torch.tensor([len(X_train_norm), len(X_val_norm), len(X_test_norm)], 
-                               dtype=torch.long)
-        else:
-            sizes = torch.zeros(3, dtype=torch.long)
-        
-        dist.broadcast(sizes, src=0)
-        
-        # Allocate arrays on other ranks
-        if rank != 0:
-            X_train_norm = np.zeros((sizes[0], 1500), dtype=np.float32)
-            X_val_norm = np.zeros((sizes[1], 1500), dtype=np.float32)
-            X_test_norm = np.zeros((sizes[2], 1500), dtype=np.float32)
-            y_train = np.zeros(sizes[0], dtype=np.int64)
-            y_val = np.zeros(sizes[1], dtype=np.int64)
-            y_test = np.zeros(sizes[2], dtype=np.int64)
-        
-        # Broadcast data
-        for data_array in [X_train_norm, X_val_norm, X_test_norm, y_train, y_val, y_test]:
-            data_tensor = torch.from_numpy(data_array)
-            dist.broadcast(data_tensor, src=0)
-            if rank != 0:
-                data_array[:] = data_tensor.numpy()
+            print("✅ All ranks ready with data (loaded independently - no broadcast needed!)")
     
     # Create datasets
     train_dataset = MicrolensingDataset(X_train_norm, y_train)
@@ -451,7 +447,7 @@ def main():
     
     # Wrap with DDP if distributed
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,find_unused_parameters=True)
     
     if rank == 0:
         param_count = count_parameters(model.module if is_distributed else model)
