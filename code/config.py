@@ -6,7 +6,7 @@ Low u0 values are ESSENTIAL for binaries to ensure caustic features.
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 6.1 - Fixed with parameter validation
+Version: 7.0 - Stable training version
 """
 
 import math
@@ -175,37 +175,28 @@ BINARY_PARAM_SETS = {
 }
 
 # ============================================================================
-# STREAMING TRANSFORMER PARAMETERS
+# STABLE TRANSFORMER PARAMETERS
 # ============================================================================
 
-# Model architecture
-D_MODEL = 256            # Larger model for complex patterns
-NHEAD = 8               # More attention heads
-NUM_LAYERS = 6          # Deeper network
-DIM_FEEDFORWARD = 1024  # Wider FFN
-DROPOUT = 0.2           # Less dropout for larger model
-
-# Streaming configuration
-MAX_SEQ_LEN = 1500      # Maximum sequence length
-WINDOW_SIZE = 200       # Sliding window for attention
-CAUSAL_MASK = True      # Strictly causal attention
-
-# Multi-head outputs
-USE_MULTI_HEAD = True   # Binary + Anomaly + Caustic detection
+# Model architecture - optimized for stability
+D_MODEL = 64            # Smaller model for stability
+NHEAD = 4               # Fewer attention heads
+NUM_LAYERS = 3          # Shallower network
+DIM_FEEDFORWARD = 256   # Moderate FFN width
+DROPOUT = 0.2           # Increased dropout for regularization
 
 # ============================================================================
 # TRAINING PARAMETERS
 # ============================================================================
 
 # Batch configuration
-BATCH_SIZE = 32              # Per GPU (smaller for larger model)
-GRADIENT_ACCUMULATION = 8    # Effective batch = 256
-LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 1e-5
-WARMUP_STEPS = 1000
+BATCH_SIZE = 16              # Smaller batch for stability
+LEARNING_RATE = 5e-5         # Much smaller LR for stable training
+WEIGHT_DECAY = 1e-4
+WARMUP_EPOCHS = 5
 
 # Training schedule
-EPOCHS = 100
+EPOCHS = 50
 PATIENCE = 15
 MIN_DELTA = 0.001
 
@@ -214,43 +205,8 @@ TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 
-# Loss weights
-LOSS_WEIGHTS = {
-    'classification': 1.0,
-    'early_detection': 0.5,
-    'caustic_focal': 0.3,
-    'temporal_consistency': 0.1,
-}
-
-# ============================================================================
-# STREAMING INFERENCE
-# ============================================================================
-
-# Real-time parameters
-BUFFER_SIZE = 200           # Circular buffer size
-CONFIDENCE_THRESHOLD = 0.8  # Decision threshold
-CAUSTIC_THRESHOLD = 0.5     # Caustic detection threshold
-MAX_LATENCY_MS = 1.0        # Maximum acceptable latency
-
-# Alert triggers
-ALERT_ON_BINARY = True
-ALERT_ON_ANOMALY = True
-ALERT_ON_CAUSTIC = True
-
-# ============================================================================
-# DISTRIBUTED TRAINING
-# ============================================================================
-
-# DDP configuration
-DDP_BACKEND = 'nccl'        # Use NCCL for GPUs
-FIND_UNUSED_PARAMS = False  # All params should be used
-BROADCAST_BUFFERS = True    # Sync batch norm stats
-
-# Multi-node settings
-MASTER_PORT = 29500
-INIT_METHOD = 'env://'      # Use environment variables
-WORLD_SIZE = None           # Set dynamically
-RANK = None                 # Set dynamically
+# Gradient clipping
+MAX_GRAD_NORM = 5.0  # Aggressive clipping for stability
 
 # ============================================================================
 # PATHS
@@ -315,6 +271,3 @@ for name, params in BINARY_PARAM_SETS.items():
         validate_binary_params(params)
     except AssertionError as e:
         raise ValueError(f"Invalid parameters in {name}: {e}")
-
-# Validate buffer size vs window size
-assert BUFFER_SIZE >= WINDOW_SIZE, f"Buffer size ({BUFFER_SIZE}) must be >= window size ({WINDOW_SIZE})"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Improved Training Script with Gradient Stability
-Fixes large gradient and skip issues
+DDP-Enabled Training Script with Auto-Detection
+Automatically handles single GPU, multi-GPU, and multi-node setups
 
 Author: Kunal Bhatia
-Version: 2.0 - Fixed gradient explosion
+Version: 3.0 - Full DDP with stability fixes
 """
 
 import os
@@ -13,15 +13,70 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+import warnings
 
-# Import the fixed transformer
 from transformer import SimpleStableTransformer, count_parameters
 from normalization import CausticPreservingNormalizer
+
+
+def setup_distributed():
+    """
+    Setup distributed training with auto-detection
+    Returns: rank, local_rank, world_size, device, is_distributed
+    """
+    
+    # Check if we're in a distributed environment
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        # Torchrun or distributed launch detected
+        rank = int(os.environ['RANK'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        
+        # Initialize process group
+        dist.init_process_group(backend='nccl')
+        
+        # CUDA device for this process
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f'cuda:{local_rank}')
+        
+        if rank == 0:
+            print(f"🚀 Distributed training initialized")
+            print(f"   World size: {world_size}")
+            print(f"   Backend: nccl")
+            
+        return rank, local_rank, world_size, device, True
+    
+    elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        # Multiple GPUs detected but not launched with torchrun
+        print(f"⚠️ Detected {torch.cuda.device_count()} GPUs but not using distributed launch.")
+        print(f"   For multi-GPU training, use:")
+        print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} train_ddp.py ...")
+        print(f"   Falling back to single GPU (cuda:0)")
+        
+        return 0, 0, 1, torch.device('cuda:0'), False
+    
+    elif torch.cuda.is_available():
+        # Single GPU
+        print(f"🖥️ Single GPU training on cuda:0")
+        return 0, 0, 1, torch.device('cuda:0'), False
+    
+    else:
+        # CPU only
+        print(f"💻 CPU training (no GPUs detected)")
+        return 0, 0, 1, torch.device('cpu'), False
+
+
+def cleanup_distributed():
+    """Clean up distributed process group"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 class MicrolensingDataset(Dataset):
@@ -36,8 +91,37 @@ class MicrolensingDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+def create_data_loader(dataset, batch_size, is_train=True, 
+                       is_distributed=False, num_workers=2):
+    """Create data loader with optional distributed sampler"""
+    
+    if is_distributed:
+        sampler = DistributedSampler(
+            dataset,
+            shuffle=is_train,
+            drop_last=is_train
+        )
+        # Don't shuffle when using DistributedSampler
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available()
+        )
+    else:
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=is_train,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=is_train
+        )
+
+
 def safe_loss_and_backward(model, outputs, targets, criterion, optimizer, 
-                          max_grad_norm=10.0, scaler=None):
+                          max_grad_norm=5.0, scaler=None):
     """Calculate loss and perform backward pass with stability checks"""
     
     binary_logits = outputs['binary']
@@ -50,7 +134,6 @@ def safe_loss_and_backward(model, outputs, targets, criterion, optimizer,
     
     # Check for NaN
     if torch.isnan(loss) or torch.isinf(loss):
-        print(f"⚠️ NaN/Inf loss detected: {loss.item()}")
         return None, None
     
     # Backward pass
@@ -59,11 +142,7 @@ def safe_loss_and_backward(model, outputs, targets, criterion, optimizer,
     if scaler is not None:
         # Mixed precision training
         scaler.scale(loss).backward()
-        
-        # Unscale gradients for clipping
         scaler.unscale_(optimizer)
-        
-        # Clip gradients
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         
         # Check if gradients are finite
@@ -77,16 +156,13 @@ def safe_loss_and_backward(model, outputs, targets, criterion, optimizer,
             scaler.step(optimizer)
             scaler.update()
         else:
-            print("⚠️ Non-finite gradients detected, skipping update")
             grad_norm = float('inf')
     else:
         # Standard training
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         
-        # Check gradient magnitude
         if grad_norm > max_grad_norm * 2:
-            print(f"⚠️ Very large gradient: {grad_norm:.2f}")
             return None, None
         
         optimizer.step()
@@ -95,9 +171,10 @@ def safe_loss_and_backward(model, outputs, targets, criterion, optimizer,
 
 
 def train_epoch(model, loader, criterion, optimizer, device, epoch, 
-                max_grad_norm=10.0, scaler=None):
-    """Train one epoch with improved stability"""
+                max_grad_norm=5.0, scaler=None, rank=0, world_size=1):
+    """Train one epoch with DDP support"""
     model.train()
+    
     total_loss = 0
     total_grad_norm = 0
     correct = 0
@@ -105,7 +182,11 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch,
     valid_batches = 0
     skipped = 0
     
-    pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
+    # Only show progress bar on rank 0
+    if rank == 0:
+        pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
+    else:
+        pbar = loader
     
     for batch_idx, (X, y) in enumerate(pbar):
         X, y = X.to(device), y.to(device)
@@ -114,7 +195,8 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch,
         try:
             outputs = model(X, return_all_timesteps=False)
         except RuntimeError as e:
-            print(f"⚠️ Forward pass error: {e}")
+            if rank == 0:
+                print(f"⚠️ Forward pass error: {e}")
             skipped += 1
             continue
         
@@ -137,8 +219,8 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch,
             correct += (preds == y).sum().item()
             total += len(y)
         
-        # Update progress bar
-        if batch_idx % 10 == 0 and total > 0:
+        # Update progress bar (rank 0 only)
+        if rank == 0 and batch_idx % 10 == 0 and total > 0:
             acc = correct / total
             avg_loss = total_loss / max(valid_batches, 1)
             avg_grad = total_grad_norm / max(valid_batches, 1)
@@ -150,27 +232,49 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch,
                 'skip': skipped
             })
     
+    # Gather statistics across all processes
+    if world_size > 1:
+        # Convert to tensors for all_reduce
+        stats = torch.tensor([total_loss, total_grad_norm, correct, total, valid_batches, skipped], 
+                            dtype=torch.float32, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        
+        total_loss = stats[0].item()
+        total_grad_norm = stats[1].item()
+        correct = int(stats[2].item())
+        total = int(stats[3].item())
+        valid_batches = int(stats[4].item())
+        skipped = int(stats[5].item())
+    
     avg_loss = total_loss / max(valid_batches, 1)
     accuracy = correct / max(total, 1)
     avg_grad_norm = total_grad_norm / max(valid_batches, 1)
     
-    if skipped > 0:
-        print(f"  Skipped {skipped}/{len(loader)} batches ({100*skipped/len(loader):.1f}%)")
-    print(f"  Average gradient norm: {avg_grad_norm:.2f}")
+    if rank == 0:
+        if skipped > 0:
+            print(f"  Skipped {skipped} batches ({100*skipped/(len(loader)*world_size):.1f}%)")
+        print(f"  Average gradient norm: {avg_grad_norm:.2f}")
     
     return avg_loss, accuracy
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
-    """Evaluate model"""
+def evaluate(model, loader, criterion, device, rank=0, world_size=1):
+    """Evaluate model with DDP support"""
     model.eval()
+    
     total_loss = 0
     correct = 0
     total = 0
     valid_batches = 0
     
-    for X, y in tqdm(loader, desc="Evaluating"):
+    # Only show progress on rank 0
+    if rank == 0:
+        pbar = tqdm(loader, desc="Evaluating")
+    else:
+        pbar = loader
+    
+    for X, y in pbar:
         X, y = X.to(device), y.to(device)
         
         outputs = model(X, return_all_timesteps=False)
@@ -187,6 +291,17 @@ def evaluate(model, loader, criterion, device):
         correct += (preds == y).sum().item()
         total += len(y)
     
+    # Gather statistics across all processes
+    if world_size > 1:
+        stats = torch.tensor([total_loss, correct, total, valid_batches], 
+                           dtype=torch.float32, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        
+        total_loss = stats[0].item()
+        correct = int(stats[1].item())
+        total = int(stats[2].item())
+        valid_batches = int(stats[3].item())
+    
     avg_loss = total_loss / max(valid_batches, 1)
     accuracy = correct / max(total, 1)
     
@@ -194,102 +309,137 @@ def evaluate(model, loader, criterion, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Stable Transformer')
+    parser = argparse.ArgumentParser(description='Train Stable Transformer with DDP')
     parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', type=str, default='stable', help='Experiment name')
+    parser.add_argument('--experiment_name', type=str, default='ddp', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=16)  # Smaller batch for stability
-    parser.add_argument('--lr', type=float, default=5e-5)  # Much smaller LR
-    parser.add_argument('--d_model', type=int, default=64, help='Model dimension')
-    parser.add_argument('--num_layers', type=int, default=3, help='Number of layers')
-    parser.add_argument('--warmup_epochs', type=int, default=5, help='Warmup epochs')
-    parser.add_argument('--quick', action='store_true', help='Quick test with 1000 samples')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size per GPU')
+    parser.add_argument('--lr', type=float, default=5e-5)
+    parser.add_argument('--d_model', type=int, default=64)
+    parser.add_argument('--num_layers', type=int, default=3)
+    parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--quick', action='store_true', help='Quick test')
     parser.add_argument('--amp', action='store_true', help='Use mixed precision')
-    parser.add_argument('--grad_clip', type=float, default=5.0, help='Gradient clipping')
+    parser.add_argument('--grad_clip', type=float, default=5.0)
+    parser.add_argument('--num_workers', type=int, default=2, help='DataLoader workers')
     
     args = parser.parse_args()
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Setup distributed training
+    rank, local_rank, world_size, device, is_distributed = setup_distributed()
     
-    print("="*60)
-    print("STABLE TRANSFORMER TRAINING v2.0")
-    print("="*60)
-    print(f"Device: {device}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"Learning rate: {args.lr}")
-    print(f"Gradient clipping: {args.grad_clip}")
-    print(f"Mixed precision: {args.amp}")
-    print(f"Model: d_model={args.d_model}, layers={args.num_layers}")
+    # Only print on rank 0
+    if rank == 0:
+        print("="*60)
+        print("STABLE TRANSFORMER TRAINING WITH DDP v3.0")
+        print("="*60)
+        print(f"Device: {device}")
+        print(f"World size: {world_size}")
+        print(f"Distributed: {is_distributed}")
+        print(f"Batch size per GPU: {args.batch_size}")
+        print(f"Total batch size: {args.batch_size * world_size}")
+        print(f"Learning rate: {args.lr}")
+        print(f"Mixed precision: {args.amp}")
     
-    # Load data
-    print(f"\nLoading data from {args.data}...")
-    data = np.load(args.data)
-    X = data['X']
-    y = data['y']
+    # Load data (only on rank 0 for efficiency)
+    if rank == 0:
+        print(f"\nLoading data from {args.data}...")
+        data = np.load(args.data)
+        X = data['X']
+        y = data['y']
+        
+        if X.ndim == 2:
+            X = X[:, np.newaxis, :]
+        
+        if args.quick:
+            print("⚡ Quick mode: Using 1000 samples")
+            indices = np.random.choice(len(X), min(1000, len(X)), replace=False)
+            X = X[indices]
+            y = y[indices]
+        
+        print(f"Data shape: {X.shape}")
+        print(f"Class distribution: {np.bincount(y)}")
+        
+        # Split data
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            X, y, test_size=0.3, stratify=y, random_state=42
+        )
+        
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
+        )
+        
+        print(f"Splits - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+        
+        # Normalize
+        print("\nApplying normalization...")
+        normalizer = CausticPreservingNormalizer(pad_value=-1.0)
+        normalizer.fit(X_train)
+        
+        X_train_norm = normalizer.transform(X_train).squeeze(1)
+        X_val_norm = normalizer.transform(X_val).squeeze(1)
+        X_test_norm = normalizer.transform(X_test).squeeze(1)
+        
+        # Clip for safety
+        X_train_norm = np.clip(X_train_norm, -5, 5)
+        X_val_norm = np.clip(X_val_norm, -5, 5)
+        X_test_norm = np.clip(X_test_norm, -5, 5)
+    else:
+        # Other ranks initialize empty
+        X_train_norm = X_val_norm = X_test_norm = None
+        y_train = y_val = y_test = None
+        normalizer = None
     
-    if X.ndim == 2:
-        X = X[:, np.newaxis, :]
-    
-    # Quick mode
-    if args.quick:
-        print("⚡ Quick mode: Using 1000 samples")
-        indices = np.random.choice(len(X), min(1000, len(X)), replace=False)
-        X = X[indices]
-        y = y[indices]
-    
-    print(f"Data shape: {X.shape}")
-    print(f"Class distribution: {np.bincount(y)}")
-    
-    # Split data
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.3, stratify=y, random_state=42
-    )
-    
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
-    )
-    
-    print(f"Splits - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
-    
-    # Normalize with robust statistics
-    print("\nApplying caustic-preserving normalization...")
-    normalizer = CausticPreservingNormalizer(pad_value=-1.0)
-    normalizer.fit(X_train)
-    
-    X_train_norm = normalizer.transform(X_train).squeeze(1)
-    X_val_norm = normalizer.transform(X_val).squeeze(1)
-    X_test_norm = normalizer.transform(X_test).squeeze(1)
-    
-    # Additional clipping for safety
-    X_train_norm = np.clip(X_train_norm, -5, 5)
-    X_val_norm = np.clip(X_val_norm, -5, 5)
-    X_test_norm = np.clip(X_test_norm, -5, 5)
-    
-    # Verify normalization
-    valid_mask = X_train_norm != -1.0
-    if valid_mask.any():
-        print(f"Normalized range: [{X_train_norm[valid_mask].min():.3f}, {X_train_norm[valid_mask].max():.3f}]")
+    # Broadcast data to all processes if distributed
+    if is_distributed:
+        # Determine sizes first
+        if rank == 0:
+            sizes = torch.tensor([len(X_train_norm), len(X_val_norm), len(X_test_norm)], 
+                               dtype=torch.long)
+        else:
+            sizes = torch.zeros(3, dtype=torch.long)
+        
+        dist.broadcast(sizes, src=0)
+        
+        # Allocate arrays on other ranks
+        if rank != 0:
+            X_train_norm = np.zeros((sizes[0], 1500), dtype=np.float32)
+            X_val_norm = np.zeros((sizes[1], 1500), dtype=np.float32)
+            X_test_norm = np.zeros((sizes[2], 1500), dtype=np.float32)
+            y_train = np.zeros(sizes[0], dtype=np.int64)
+            y_val = np.zeros(sizes[1], dtype=np.int64)
+            y_test = np.zeros(sizes[2], dtype=np.int64)
+        
+        # Broadcast data
+        for data_array in [X_train_norm, X_val_norm, X_test_norm, y_train, y_val, y_test]:
+            data_tensor = torch.from_numpy(data_array)
+            dist.broadcast(data_tensor, src=0)
+            if rank != 0:
+                data_array[:] = data_tensor.numpy()
     
     # Create datasets
     train_dataset = MicrolensingDataset(X_train_norm, y_train)
     val_dataset = MicrolensingDataset(X_val_norm, y_val)
     test_dataset = MicrolensingDataset(X_test_norm, y_test)
     
-    train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size,
-        shuffle=True, num_workers=2, pin_memory=True
+    # Create data loaders with distributed samplers
+    train_loader = create_data_loader(
+        train_dataset, args.batch_size, is_train=True,
+        is_distributed=is_distributed, num_workers=args.num_workers
     )
-    val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size * 2,
-        shuffle=False, num_workers=2, pin_memory=True
+    val_loader = create_data_loader(
+        val_dataset, args.batch_size * 2, is_train=False,
+        is_distributed=is_distributed, num_workers=args.num_workers
     )
-    test_loader = DataLoader(
-        test_dataset, batch_size=args.batch_size * 2,
-        shuffle=False, num_workers=2, pin_memory=True
+    test_loader = create_data_loader(
+        test_dataset, args.batch_size * 2, is_train=False,
+        is_distributed=is_distributed, num_workers=args.num_workers
     )
     
     # Create model
-    print("\nCreating Stable Transformer...")
+    if rank == 0:
+        print("\nCreating Stable Transformer...")
+    
     model = SimpleStableTransformer(
         n_points=1500,
         d_model=args.d_model,
@@ -299,7 +449,13 @@ def main():
         dropout=0.2
     ).to(device)
     
-    print(f"Model: {count_parameters(model):,} parameters")
+    # Wrap with DDP if distributed
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    
+    if rank == 0:
+        param_count = count_parameters(model.module if is_distributed else model)
+        print(f"Model: {param_count:,} parameters")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -307,11 +463,10 @@ def main():
         model.parameters(),
         lr=args.lr,
         weight_decay=1e-4,
-        eps=1e-8,
-        betas=(0.9, 0.999)
+        eps=1e-8
     )
     
-    # Learning rate schedule with warmup
+    # Learning rate schedule
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
             return (epoch + 1) / args.warmup_epochs
@@ -323,122 +478,150 @@ def main():
     # Mixed precision scaler
     scaler = torch.cuda.amp.GradScaler() if args.amp and torch.cuda.is_available() else None
     
-    # Create experiment directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = Path("../results") / f"{args.experiment_name}_{timestamp}"
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"\nExperiment directory: {exp_dir}")
-    
-    # Save configuration
-    config = {
-        'data': args.data,
-        'epochs': args.epochs,
-        'batch_size': args.batch_size,
-        'lr': args.lr,
-        'd_model': args.d_model,
-        'num_layers': args.num_layers,
-        'grad_clip': args.grad_clip,
-        'amp': args.amp,
-        'n_train': len(X_train),
-        'n_val': len(X_val),
-        'n_test': len(X_test)
-    }
-    
-    with open(exp_dir / 'config.json', 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    # Save normalizer
-    normalizer.save(exp_dir / 'normalizer.pkl')
+    # Create experiment directory (rank 0 only)
+    if rank == 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_dir = Path("../results") / f"{args.experiment_name}_{timestamp}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"\nExperiment directory: {exp_dir}")
+        
+        # Save configuration
+        config = {
+            'data': args.data,
+            'epochs': args.epochs,
+            'batch_size_per_gpu': args.batch_size,
+            'total_batch_size': args.batch_size * world_size,
+            'lr': args.lr,
+            'd_model': args.d_model,
+            'num_layers': args.num_layers,
+            'grad_clip': args.grad_clip,
+            'amp': args.amp,
+            'world_size': world_size,
+            'n_train': len(X_train_norm),
+            'n_val': len(X_val_norm),
+            'n_test': len(X_test_norm)
+        }
+        
+        with open(exp_dir / 'config.json', 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        # Save normalizer
+        normalizer.save(exp_dir / 'normalizer.pkl')
+    else:
+        exp_dir = None
     
     # Training loop
     best_val_acc = 0
     patience_counter = 0
     max_patience = 15
     
-    print("\n" + "="*60)
-    print("STARTING TRAINING")
-    print("="*60)
+    if rank == 0:
+        print("\n" + "="*60)
+        print("STARTING TRAINING")
+        print("="*60)
     
     for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch+1}/{args.epochs}")
-        print("-"*40)
+        # Set epoch for distributed sampler
+        if is_distributed:
+            train_loader.sampler.set_epoch(epoch)
+        
+        if rank == 0:
+            print(f"\nEpoch {epoch+1}/{args.epochs}")
+            print("-"*40)
         
         # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, device, epoch,
-            max_grad_norm=args.grad_clip, scaler=scaler
+            max_grad_norm=args.grad_clip, scaler=scaler, 
+            rank=rank, world_size=world_size
         )
         
         # Validate
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+        val_loss, val_acc = evaluate(
+            model, val_loader, criterion, device,
+            rank=rank, world_size=world_size
+        )
         
         # Update scheduler
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} ({train_acc*100:.2f}%)")
-        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ({val_acc*100:.2f}%)")
-        print(f"Learning Rate: {current_lr:.6f}")
-        
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            patience_counter = 0
+        if rank == 0:
+            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} ({train_acc*100:.2f}%)")
+            print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ({val_acc*100:.2f}%)")
+            print(f"Learning Rate: {current_lr:.6f}")
             
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss,
-                'train_acc': train_acc,
-                'train_loss': train_loss
-            }, exp_dir / 'best_model.pt')
+            # Save best model
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                
+                # Save model (unwrap DDP if needed)
+                model_to_save = model.module if is_distributed else model
+                
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model_to_save.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_acc': val_acc,
+                    'val_loss': val_loss,
+                    'train_acc': train_acc,
+                    'train_loss': train_loss
+                }, exp_dir / 'best_model.pt')
+                
+                print(f"✓ Saved best model (val_acc: {val_acc:.4f})")
+            else:
+                patience_counter += 1
             
-            print(f"✓ Saved best model (val_acc: {val_acc:.4f})")
-        else:
-            patience_counter += 1
-        
-        # Early stopping
-        if patience_counter >= max_patience:
-            print(f"\nEarly stopping triggered after {epoch+1} epochs")
-            break
+            # Early stopping
+            if patience_counter >= max_patience:
+                print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                break
     
     # Final evaluation
-    print("\n" + "="*60)
-    print("FINAL EVALUATION")
-    print("="*60)
+    if rank == 0:
+        print("\n" + "="*60)
+        print("FINAL EVALUATION")
+        print("="*60)
+        
+        if (exp_dir / 'best_model.pt').exists():
+            checkpoint = torch.load(exp_dir / 'best_model.pt', map_location=device)
+            model_to_load = model.module if is_distributed else model
+            model_to_load.load_state_dict(checkpoint['model_state_dict'])
+            
+            test_loss, test_acc = evaluate(
+                model, test_loader, criterion, device,
+                rank=rank, world_size=world_size
+            )
+            
+            results = {
+                'test_loss': test_loss,
+                'test_acc': test_acc,
+                'best_val_acc': best_val_acc,
+                'final_epoch': epoch + 1,
+                'model_params': param_count,
+                'world_size': world_size
+            }
+            
+            with open(exp_dir / 'results.json', 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            print(f"Test Loss: {test_loss:.4f}")
+            print(f"Test Accuracy: {test_acc:.4f} ({test_acc*100:.2f}%)")
+            print(f"Best Val Accuracy: {best_val_acc:.4f} ({best_val_acc*100:.2f}%)")
+            
+            if test_acc > 0.65:
+                print("\n✅ SUCCESS! Model achieved good performance")
+            elif test_acc > 0.55:
+                print("\n⚠️ Model performance is moderate")
+            else:
+                print("\n❌ Model performance is poor")
+            
+            print(f"\n📁 Results saved to: {exp_dir}")
     
-    if (exp_dir / 'best_model.pt').exists():
-        checkpoint = torch.load(exp_dir / 'best_model.pt')
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
-        test_loss, test_acc = evaluate(model, test_loader, criterion, device)
-        
-        results = {
-            'test_loss': test_loss,
-            'test_acc': test_acc,
-            'best_val_acc': best_val_acc,
-            'final_epoch': epoch + 1,
-            'model_params': count_parameters(model)
-        }
-        
-        with open(exp_dir / 'results.json', 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        print(f"Test Loss: {test_loss:.4f}")
-        print(f"Test Accuracy: {test_acc:.4f} ({test_acc*100:.2f}%)")
-        print(f"Best Val Accuracy: {best_val_acc:.4f} ({best_val_acc*100:.2f}%)")
-        
-        if test_acc > 0.65:
-            print("\n✅ SUCCESS! Model achieved good performance")
-        elif test_acc > 0.55:
-            print("\n⚠️ Model performance is moderate")
-        else:
-            print("\n❌ Model performance is poor - check data and hyperparameters")
-        
-        print(f"\n📁 Results saved to: {exp_dir}")
+    # Cleanup
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
