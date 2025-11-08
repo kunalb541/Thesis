@@ -2,7 +2,7 @@
 """
 Fixed Binary Microlensing Simulation with Guaranteed Caustic Crossings
 
-Version: 6.0 - Production-ready with validation
+Version: 6.1 - Fixed with fallback tracking
 Author: Kunal Bhatia
 """
 
@@ -34,6 +34,7 @@ class SimulationStats:
     n_binary_attempts: int = 0
     n_binary_success: int = 0
     n_binary_failed: int = 0
+    n_binary_fallback: int = 0
     max_magnifications: List[float] = None
     caustic_fractions: List[float] = None
     
@@ -86,7 +87,8 @@ def generate_pspl_event(
     
     params = {
         't0': t0, 'u0': u0, 'tE': tE, 'baseline': baseline,
-        'max_magnification': magnification.max()
+        'max_magnification': magnification.max(),
+        'event_type': 'pspl'
     }
     
     return flux.astype(np.float32), params
@@ -111,8 +113,11 @@ def generate_binary_event(
         np.random.seed(seed)
     
     if not VBM_AVAILABLE:
-        # Fall back to PSPL but warn
+        # Fall back to PSPL but warn and mark
         flux, params = generate_pspl_event(timestamps, seed)
+        params['is_fallback'] = True
+        params['actual_class'] = 'pspl'
+        params['event_type'] = 'binary_fallback'
         return flux, params, False
     
     # Try multiple times to get a good caustic crossing
@@ -182,7 +187,10 @@ def generate_binary_event(
                     'rho': rho, 't0': t0, 'tE': tE, 'baseline': baseline,
                     'max_magnification': max_mag,
                     'n_caustic_points': n_caustic,
-                    'attempt': attempt + 1
+                    'attempt': attempt + 1,
+                    'event_type': 'binary',
+                    'is_fallback': False,
+                    'actual_class': 'binary'
                 }
                 
                 return flux.astype(np.float32), params, True
@@ -194,6 +202,10 @@ def generate_binary_event(
     # All attempts failed - fall back to PSPL
     print(f"WARNING: Could not generate caustic crossing, using PSPL fallback")
     flux, params = generate_pspl_event(timestamps, seed)
+    params['is_fallback'] = True
+    params['actual_class'] = 'pspl'
+    params['event_type'] = 'binary_fallback'
+    params['binary_attempts'] = max_attempts
     return flux, params, False
 
 
@@ -217,7 +229,8 @@ def generate_dataset(
     n_binary: int,
     binary_params: Dict,
     num_workers: int = 4,
-    seed: int = 42
+    seed: int = 42,
+    filter_fallbacks: bool = True
 ) -> Dict:
     """Generate complete dataset with validation"""
     
@@ -247,7 +260,7 @@ def generate_dataset(
         worker_args.append((idx, timestamps, 'binary', binary_params, seed + idx if seed else None))
     
     # Parallel processing
-    all_params = {'pspl': [], 'binary': []}
+    all_params = {'pspl': [], 'binary': [], 'binary_fallback': []}
     stats = SimulationStats()
     
     with mp.Pool(num_workers) as pool:
@@ -258,7 +271,7 @@ def generate_dataset(
         ))
     
     # Process results
-    binary_failures = 0
+    fallback_indices = []
     for idx, flux, params, success in results:
         X[idx] = flux
         
@@ -266,15 +279,30 @@ def generate_dataset(
             y[idx] = 0  # PSPL
             all_params['pspl'].append(params)
         else:
-            y[idx] = 1  # Binary
-            all_params['binary'].append(params)
+            if params.get('is_fallback', False):
+                # Binary that fell back to PSPL
+                fallback_indices.append(idx)
+                all_params['binary_fallback'].append(params)
+                stats.n_binary_fallback += 1
+                y[idx] = 0 if filter_fallbacks else 1  # Mark as PSPL if filtering
+            else:
+                y[idx] = 1  # Binary
+                all_params['binary'].append(params)
             
             if success and 'max_magnification' in params:
                 stats.max_magnifications.append(params['max_magnification'])
                 stats.n_binary_success += 1
             else:
-                binary_failures += 1
                 stats.n_binary_failed += 1
+    
+    # Filter out fallbacks if requested
+    if filter_fallbacks and len(fallback_indices) > 0:
+        print(f"\nFiltering {len(fallback_indices)} fallback events...")
+        keep_mask = np.ones(N, dtype=bool)
+        keep_mask[fallback_indices] = False
+        X = X[keep_mask]
+        y = y[keep_mask]
+        N = len(y)
     
     # Shuffle data
     perm = np.random.permutation(N)
@@ -290,6 +318,7 @@ def generate_dataset(
         max_mags = np.array(stats.max_magnifications)
         print(f"Binary Events Generated: {stats.n_binary_success}/{n_binary}")
         print(f"Binary Generation Failures: {stats.n_binary_failed}")
+        print(f"Binary Fallbacks (PSPL): {stats.n_binary_fallback}")
         print(f"Max Magnification Statistics:")
         print(f"  Mean: {max_mags.mean():.1f}")
         print(f"  Median: {np.median(max_mags):.1f}")
@@ -325,6 +354,8 @@ def generate_dataset(
             'binary_params': binary_params,
             'vbm_available': VBM_AVAILABLE,
             'seed': seed,
+            'filter_fallbacks': filter_fallbacks,
+            'n_fallbacks': stats.n_binary_fallback,
             'config': {
                 'MIN_BINARY_MAGNIFICATION': CFG.MIN_BINARY_MAGNIFICATION,
                 'MAG_ERROR_STD': CFG.MAG_ERROR_STD,
@@ -355,6 +386,8 @@ def save_dataset(dataset: Dict, output_path: str):
     if dataset['params']:
         save_dict['params_pspl_json'] = json.dumps(dataset['params']['pspl'])
         save_dict['params_binary_json'] = json.dumps(dataset['params']['binary'])
+        if dataset['params']['binary_fallback']:
+            save_dict['params_binary_fallback_json'] = json.dumps(dataset['params']['binary_fallback'])
     
     np.savez_compressed(output_path, **save_dict)
     print(f"\nDataset saved to: {output_path}")
@@ -371,6 +404,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--save_params', action='store_true', help='Save event parameters')
+    parser.add_argument('--keep_fallbacks', action='store_true', help='Keep fallback events as binaries')
     
     args = parser.parse_args()
     
@@ -378,13 +412,14 @@ def main():
     binary_params = CFG.BINARY_PARAM_SETS[args.binary_params]
     
     print("="*60)
-    print("BINARY MICROLENSING SIMULATION v6.0")
+    print("BINARY MICROLENSING SIMULATION v6.1")
     print("="*60)
     print(f"Configuration:")
     print(f"  PSPL events: {args.n_pspl}")
     print(f"  Binary events: {args.n_binary}")
     print(f"  Binary set: {args.binary_params}")
     print(f"  Workers: {args.num_workers}")
+    print(f"  Filter fallbacks: {not args.keep_fallbacks}")
     print(f"  VBMicrolensing: {'Available' if VBM_AVAILABLE else 'NOT AVAILABLE'}")
     
     if not VBM_AVAILABLE:
@@ -400,7 +435,8 @@ def main():
         n_binary=args.n_binary,
         binary_params=binary_params,
         num_workers=args.num_workers,
-        seed=args.seed
+        seed=args.seed,
+        filter_fallbacks=not args.keep_fallbacks
     )
     
     # Save dataset

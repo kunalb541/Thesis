@@ -6,7 +6,7 @@ Low u0 values are ESSENTIAL for binaries to ensure caustic features.
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 6.0 - Production-ready with streaming support
+Version: 6.1 - Fixed with parameter validation
 """
 
 import math
@@ -166,7 +166,7 @@ BINARY_STELLAR = {
 }
 
 BINARY_PARAM_SETS = {
-    'critical': BINARY_CRITICAL,  # NEW: Force caustic crossings
+    'critical': BINARY_CRITICAL,
     'baseline': BINARY_BASELINE,
     'distinct': BINARY_DISTINCT,
     'overlapping': BINARY_OVERLAPPING,
@@ -291,3 +291,30 @@ DEBUG_MODE = False
 VERBOSE = True
 SAVE_INTERMEDIATE = False
 PROFILE_PERFORMANCE = False
+
+# ============================================================================
+# PARAMETER VALIDATION
+# ============================================================================
+
+def validate_binary_params(params: dict) -> None:
+    """Validate binary parameter ranges are physically meaningful"""
+    assert params['u0_min'] < params['u0_max'], f"u0_min must be < u0_max"
+    assert params['s_min'] < params['s_max'], f"s_min must be < s_max"
+    assert params['q_min'] < params['q_max'], f"q_min must be < q_max"
+    assert params['rho_min'] < params['rho_max'], f"rho_min must be < rho_max"
+    assert params['t0_min'] < params['t0_max'], f"t0_min must be < t0_max"
+    assert params['tE_min'] < params['tE_max'], f"tE_min must be < tE_max"
+    assert params['u0_min'] > 0, f"u0_min must be > 0"
+    assert params['q_min'] > 0, f"q_min must be > 0"
+    assert params['rho_min'] > 0, f"rho_min must be > 0"
+    assert params['tE_min'] > 0, f"tE_min must be > 0"
+
+# Validate all parameter sets on module load
+for name, params in BINARY_PARAM_SETS.items():
+    try:
+        validate_binary_params(params)
+    except AssertionError as e:
+        raise ValueError(f"Invalid parameters in {name}: {e}")
+
+# Validate buffer size vs window size
+assert BUFFER_SIZE >= WINDOW_SIZE, f"Buffer size ({BUFFER_SIZE}) must be >= window size ({WINDOW_SIZE})"

@@ -2,11 +2,10 @@
 """
 Multi-Node Distributed Training for Streaming Transformer
 
-Supports flexible n nodes × m GPUs configuration.
-Optimized for large-scale training with proper DDP setup.
+Fixed version with proper normalization to prevent data leakage.
 
 Author: Kunal Bhatia
-Version: 6.0
+Version: 6.1
 """
 
 import os
@@ -28,7 +27,7 @@ from tqdm import tqdm
 
 import config as CFG
 from streaming_transformer import StreamingTransformer, count_parameters
-from normalization import CausticPreservingNormalizer, normalize_dataset
+from normalization import CausticPreservingNormalizer
 from streaming_losses import CombinedLoss
 
 
@@ -98,8 +97,8 @@ def cleanup_ddp():
         dist.destroy_process_group()
 
 
-def load_data(data_path, rank, world_size):
-    """Load and prepare dataset"""
+def load_and_normalize_data(data_path, rank, world_size):
+    """Load data and apply normalization with proper DDP handling"""
     
     is_main = (rank == 0)
     
@@ -119,7 +118,7 @@ def load_data(data_path, rank, world_size):
         
         print(f"Data shape: {X.shape}, Labels: {y.shape}")
         
-        # Create splits
+        # Create splits BEFORE normalization
         X_train, X_temp, y_train, y_temp = train_test_split(
             X, y, test_size=(1 - CFG.TRAIN_RATIO), 
             stratify=y, random_state=CFG.SEED
@@ -132,15 +131,43 @@ def load_data(data_path, rank, world_size):
         )
         
         print(f"Split sizes - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+        
+        # Apply normalization AFTER splitting
+        print("\nApplying caustic-preserving normalization...")
+        normalizer = CausticPreservingNormalizer(pad_value=CFG.PAD_VALUE)
+        
+        # Fit ONLY on training data
+        normalizer.fit(X_train)
+        
+        # Transform all splits
+        X_train_norm = normalizer.transform(X_train)
+        X_val_norm = normalizer.transform(X_val)
+        X_test_norm = normalizer.transform(X_test)
+        
+        # Remove channel dimension for transformer
+        X_train_norm = X_train_norm.squeeze(1)
+        X_val_norm = X_val_norm.squeeze(1)
+        X_test_norm = X_test_norm.squeeze(1)
+        
+        # Prepare normalizer parameters for broadcast
+        norm_params = {
+            'baseline_median': normalizer.baseline_median,
+            'baseline_mad': normalizer.baseline_mad,
+            'flux_min': normalizer.flux_min,
+            'flux_max': normalizer.flux_max,
+            'pad_value': normalizer.pad_value,
+            'is_fitted': normalizer.is_fitted
+        }
     
     # Broadcast data to all processes if distributed
     if world_size > 1:
         if is_main:
             data_dict = {
-                'X_train': X_train, 'y_train': y_train,
-                'X_val': X_val, 'y_val': y_val,
-                'X_test': X_test, 'y_test': y_test,
-                'timestamps': timestamps, 'meta': meta
+                'X_train': X_train_norm, 'y_train': y_train,
+                'X_val': X_val_norm, 'y_val': y_val,
+                'X_test': X_test_norm, 'y_test': y_test,
+                'timestamps': timestamps, 'meta': meta,
+                'norm_params': norm_params
             }
         else:
             data_dict = None
@@ -151,12 +178,35 @@ def load_data(data_path, rank, world_size):
         data_dict = data_list[0]
         
         # Unpack
-        X_train, y_train = data_dict['X_train'], data_dict['y_train']
-        X_val, y_val = data_dict['X_val'], data_dict['y_val']
-        X_test, y_test = data_dict['X_test'], data_dict['y_test']
-        timestamps, meta = data_dict['timestamps'], data_dict['meta']
+        X_train_norm = data_dict['X_train']
+        y_train = data_dict['y_train']
+        X_val_norm = data_dict['X_val']
+        y_val = data_dict['y_val']
+        X_test_norm = data_dict['X_test']
+        y_test = data_dict['y_test']
+        timestamps = data_dict['timestamps']
+        meta = data_dict['meta']
+        norm_params = data_dict['norm_params']
+        
+        # Recreate normalizer on all ranks
+        if not is_main:
+            normalizer = CausticPreservingNormalizer()
+            normalizer.baseline_median = norm_params['baseline_median']
+            normalizer.baseline_mad = norm_params['baseline_mad']
+            normalizer.flux_min = norm_params['flux_min']
+            normalizer.flux_max = norm_params['flux_max']
+            normalizer.pad_value = norm_params['pad_value']
+            normalizer.is_fitted = norm_params['is_fitted']
+    else:
+        X_train_norm = X_train_norm
+        y_train = y_train
+        X_val_norm = X_val_norm
+        y_val = y_val
+        X_test_norm = X_test_norm
+        y_test = y_test
     
-    return X_train, y_train, X_val, y_val, X_test, y_test, timestamps, meta
+    return (X_train_norm, y_train, X_val_norm, y_val, X_test_norm, y_test, 
+            timestamps, meta, normalizer)
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
@@ -261,30 +311,18 @@ def main():
     
     if is_main:
         print("="*60)
-        print("MULTI-NODE DDP TRAINING")
+        print("MULTI-NODE DDP TRAINING v6.1")
         print("="*60)
         print(f"World size: {world_size}")
         print(f"Device: {device}")
         print(f"Batch size per GPU: {args.batch_size}")
         print(f"Effective batch size: {args.batch_size * world_size}")
     
-    # Load data
-    X_train, y_train, X_val, y_val, X_test, y_test, timestamps, meta = load_data(
+    # Load and normalize data
+    (X_train, y_train, X_val, y_val, X_test, y_test, 
+     timestamps, meta, normalizer) = load_and_normalize_data(
         args.data, rank, world_size
     )
-    
-    # Normalize data
-    if is_main:
-        print("\nApplying caustic-preserving normalization...")
-    
-    X_train, X_val, X_test, normalizer = normalize_dataset(
-        X_train, X_val, X_test, pad_value=CFG.PAD_VALUE
-    )
-    
-    # Remove channel dimension for transformer
-    X_train = X_train.squeeze(1)
-    X_val = X_val.squeeze(1)
-    X_test = X_test.squeeze(1)
     
     # Create datasets
     train_dataset = MicrolensingDataset(X_train, y_train)
@@ -426,6 +464,10 @@ def main():
                 print(f"\nEarly stopping triggered (patience: {CFG.PATIENCE})")
                 break
     
+    # Synchronize before test evaluation
+    if is_ddp:
+        dist.barrier()
+    
     # Final evaluation on test set
     if is_main:
         print("\n" + "="*60)
@@ -435,10 +477,6 @@ def main():
         # Load best model
         checkpoint = torch.load(exp_dir / 'best_model.pt', map_location=device)
         (model.module if is_ddp else model).load_state_dict(checkpoint['model_state_dict'])
-    
-    # Synchronize before test evaluation
-    if is_ddp:
-        dist.barrier()
     
     test_loss, test_acc = evaluate(model, test_loader, criterion, device)
     
