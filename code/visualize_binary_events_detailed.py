@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, '/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/code')
 
-from transformer import SimpleStableTransformer
+from transformer import MaskedMicrolensingTransformer
 from scipy.signal import find_peaks
 
 plt.style.use('seaborn-v0_8-paper')
