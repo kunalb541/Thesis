@@ -3,9 +3,10 @@
 Comprehensive Model Evaluation for Binary Microlensing Classification
 
 Generates all metrics, plots, and analyses needed for thesis.
+Updated to work with SimpleStableTransformer.
 
 Author: Kunal Bhatia
-Version: 6.2 - Complete evaluation suite
+Version: 7.0 - Updated for new transformer
 """
 
 import os
@@ -23,7 +24,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 
-from streaming_transformer import StreamingTransformer
+from transformer import SimpleStableTransformer
 from normalization import CausticPreservingNormalizer
 import config as CFG
 
@@ -36,10 +37,18 @@ class ModelEvaluator:
         
         # Load model
         print(f"Loading model from {model_path}...")
-        self.model = StreamingTransformer().to(self.device)
+        self.model = SimpleStableTransformer(
+            n_points=1500,
+            d_model=64,  # Should match training
+            nhead=4,
+            num_layers=3,
+            dim_ff=256,
+            dropout=0.2
+        ).to(self.device)
+        
         checkpoint = torch.load(model_path, map_location=self.device)
         
-        # Handle DDP checkpoint
+        # Handle checkpoint structure
         state_dict = checkpoint['model_state_dict']
         if any(key.startswith('module.') for key in state_dict.keys()):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}

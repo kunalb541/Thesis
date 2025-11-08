@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple Training Script for Stable Transformer
-Uses the SimpleStableTransformer to avoid NaN issues
+Improved Training Script with Gradient Stability
+Fixes large gradient and skip issues
 
 Author: Kunal Bhatia
-Version: 1.0
+Version: 2.0 - Fixed gradient explosion
 """
 
 import os
@@ -19,7 +19,8 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
-from code.transformer import SimpleStableTransformer, count_parameters
+# Import the fixed transformer
+from transformer import SimpleStableTransformer, count_parameters
 from normalization import CausticPreservingNormalizer
 
 
@@ -35,33 +36,73 @@ class MicrolensingDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-def safe_loss(outputs, targets, criterion):
-    """Calculate loss with NaN checking"""
-    binary_logits = outputs['binary']
+def safe_loss_and_backward(model, outputs, targets, criterion, optimizer, 
+                          max_grad_norm=10.0, scaler=None):
+    """Calculate loss and perform backward pass with stability checks"""
     
-    # Check for NaN in logits
-    if torch.isnan(binary_logits).any():
-        print("⚠️ NaN in logits!")
-        return None
+    binary_logits = outputs['binary']
     
     # Clamp logits for stability
     binary_logits = torch.clamp(binary_logits, min=-10, max=10)
     
+    # Calculate loss
     loss = criterion(binary_logits, targets)
     
-    if torch.isnan(loss):
-        print("⚠️ NaN in loss!")
-        return None
+    # Check for NaN
+    if torch.isnan(loss) or torch.isinf(loss):
+        print(f"⚠️ NaN/Inf loss detected: {loss.item()}")
+        return None, None
     
-    return loss
+    # Backward pass
+    optimizer.zero_grad()
+    
+    if scaler is not None:
+        # Mixed precision training
+        scaler.scale(loss).backward()
+        
+        # Unscale gradients for clipping
+        scaler.unscale_(optimizer)
+        
+        # Clip gradients
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
+        # Check if gradients are finite
+        grad_finite = all(
+            torch.isfinite(p.grad).all() 
+            for p in model.parameters() 
+            if p.grad is not None
+        )
+        
+        if grad_finite:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            print("⚠️ Non-finite gradients detected, skipping update")
+            grad_norm = float('inf')
+    else:
+        # Standard training
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
+        # Check gradient magnitude
+        if grad_norm > max_grad_norm * 2:
+            print(f"⚠️ Very large gradient: {grad_norm:.2f}")
+            return None, None
+        
+        optimizer.step()
+    
+    return loss.item(), grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
 
 
-def train_epoch(model, loader, criterion, optimizer, device, epoch, max_grad_norm=100):
-    """Train one epoch with stability checks"""
+def train_epoch(model, loader, criterion, optimizer, device, epoch, 
+                max_grad_norm=10.0, scaler=None):
+    """Train one epoch with improved stability"""
     model.train()
     total_loss = 0
+    total_grad_norm = 0
     correct = 0
     total = 0
+    valid_batches = 0
     skipped = 0
     
     pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
@@ -70,51 +111,52 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, max_grad_nor
         X, y = X.to(device), y.to(device)
         
         # Forward pass
-        outputs = model(X, return_all_timesteps=False)
-        
-        # Calculate loss safely
-        loss = safe_loss(outputs, y, criterion)
-        
-        if loss is None:
+        try:
+            outputs = model(X, return_all_timesteps=False)
+        except RuntimeError as e:
+            print(f"⚠️ Forward pass error: {e}")
             skipped += 1
             continue
         
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
+        # Backward pass with safety
+        loss_val, grad_norm = safe_loss_and_backward(
+            model, outputs, y, criterion, optimizer, max_grad_norm, scaler
+        )
         
-        # Aggressive gradient clipping
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-        
-        # Check gradient norm
-        if grad_norm > 10:
-            print(f"⚠️ Large gradient: {grad_norm:.2f}")
+        if loss_val is None:
             skipped += 1
             continue
         
-        optimizer.step()
+        # Update metrics
+        total_loss += loss_val
+        total_grad_norm += grad_norm
+        valid_batches += 1
         
-        # Metrics
-        total_loss += loss.item()
         with torch.no_grad():
             preds = outputs['binary'].argmax(dim=1)
             correct += (preds == y).sum().item()
             total += len(y)
         
-        # Update progress
-        if batch_idx % 10 == 0:
-            acc = correct / total if total > 0 else 0
+        # Update progress bar
+        if batch_idx % 10 == 0 and total > 0:
+            acc = correct / total
+            avg_loss = total_loss / max(valid_batches, 1)
+            avg_grad = total_grad_norm / max(valid_batches, 1)
+            
             pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{100*acc:.2f}%',
+                'loss': f'{loss_val:.4f}',
+                'acc': f'{100*acc:.1f}%',
+                'grad': f'{grad_norm:.1f}',
                 'skip': skipped
             })
     
-    avg_loss = total_loss / max(len(loader) - skipped, 1)
+    avg_loss = total_loss / max(valid_batches, 1)
     accuracy = correct / max(total, 1)
+    avg_grad_norm = total_grad_norm / max(valid_batches, 1)
     
     if skipped > 0:
-        print(f"  Skipped {skipped} batches due to NaN/large gradients")
+        print(f"  Skipped {skipped}/{len(loader)} batches ({100*skipped/len(loader):.1f}%)")
+    print(f"  Average gradient norm: {avg_grad_norm:.2f}")
     
     return avg_loss, accuracy
 
@@ -128,13 +170,16 @@ def evaluate(model, loader, criterion, device):
     total = 0
     valid_batches = 0
     
-    for X, y in loader:
+    for X, y in tqdm(loader, desc="Evaluating"):
         X, y = X.to(device), y.to(device)
         
         outputs = model(X, return_all_timesteps=False)
-        loss = safe_loss(outputs, y, criterion)
         
-        if loss is not None:
+        # Calculate loss
+        logits = torch.clamp(outputs['binary'], min=-10, max=10)
+        loss = criterion(logits, y)
+        
+        if not torch.isnan(loss):
             total_loss += loss.item()
             valid_batches += 1
         
@@ -149,25 +194,31 @@ def evaluate(model, loader, criterion, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train SimpleStableTransformer')
+    parser = argparse.ArgumentParser(description='Train Stable Transformer')
     parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--epochs', type=int, default=30)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--experiment_name', type=str, default='stable', help='Experiment name')
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=16)  # Smaller batch for stability
+    parser.add_argument('--lr', type=float, default=5e-5)  # Much smaller LR
     parser.add_argument('--d_model', type=int, default=64, help='Model dimension')
     parser.add_argument('--num_layers', type=int, default=3, help='Number of layers')
+    parser.add_argument('--warmup_epochs', type=int, default=5, help='Warmup epochs')
     parser.add_argument('--quick', action='store_true', help='Quick test with 1000 samples')
+    parser.add_argument('--amp', action='store_true', help='Use mixed precision')
+    parser.add_argument('--grad_clip', type=float, default=5.0, help='Gradient clipping')
     
     args = parser.parse_args()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     print("="*60)
-    print("SIMPLE STABLE TRANSFORMER TRAINING")
+    print("STABLE TRANSFORMER TRAINING v2.0")
     print("="*60)
     print(f"Device: {device}")
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.lr}")
+    print(f"Gradient clipping: {args.grad_clip}")
+    print(f"Mixed precision: {args.amp}")
     print(f"Model: d_model={args.d_model}, layers={args.num_layers}")
     
     # Load data
@@ -189,11 +240,6 @@ def main():
     print(f"Data shape: {X.shape}")
     print(f"Class distribution: {np.bincount(y)}")
     
-    # Check for NaN in data
-    if np.isnan(X).any():
-        print("❌ ERROR: Input data contains NaN!")
-        return
-    
     # Split data
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=0.3, stratify=y, random_state=42
@@ -205,8 +251,8 @@ def main():
     
     print(f"Splits - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
     
-    # Normalize
-    print("\nApplying normalization...")
+    # Normalize with robust statistics
+    print("\nApplying caustic-preserving normalization...")
     normalizer = CausticPreservingNormalizer(pad_value=-1.0)
     normalizer.fit(X_train)
     
@@ -214,20 +260,15 @@ def main():
     X_val_norm = normalizer.transform(X_val).squeeze(1)
     X_test_norm = normalizer.transform(X_test).squeeze(1)
     
+    # Additional clipping for safety
+    X_train_norm = np.clip(X_train_norm, -5, 5)
+    X_val_norm = np.clip(X_val_norm, -5, 5)
+    X_test_norm = np.clip(X_test_norm, -5, 5)
+    
     # Verify normalization
     valid_mask = X_train_norm != -1.0
     if valid_mask.any():
-        data_min = X_train_norm[valid_mask].min()
-        data_max = X_train_norm[valid_mask].max()
-        print(f"Normalized range: [{data_min:.3f}, {data_max:.3f}]")
-        
-        if data_min < -10 or data_max > 10:
-            print("⚠️ Warning: Large values after normalization")
-            # Clip for safety
-            X_train_norm = np.clip(X_train_norm, -5, 5)
-            X_val_norm = np.clip(X_val_norm, -5, 5)
-            X_test_norm = np.clip(X_test_norm, -5, 5)
-            print("  Clipped to [-5, 5] for stability")
+        print(f"Normalized range: [{X_train_norm[valid_mask].min():.3f}, {X_train_norm[valid_mask].max():.3f}]")
     
     # Create datasets
     train_dataset = MicrolensingDataset(X_train_norm, y_train)
@@ -248,68 +289,85 @@ def main():
     )
     
     # Create model
-    print("\nCreating SimpleStableTransformer...")
+    print("\nCreating Stable Transformer...")
     model = SimpleStableTransformer(
         n_points=1500,
         d_model=args.d_model,
         nhead=4,
         num_layers=args.num_layers,
         dim_ff=args.d_model * 4,
-        dropout=0.1
+        dropout=0.2
     ).to(device)
     
     print(f"Model: {count_parameters(model):,} parameters")
-    
-    # Test model first
-    print("\nTesting model initialization...")
-    with torch.no_grad():
-        test_batch = next(iter(train_loader))
-        test_X, test_y = test_batch[0][:2].to(device), test_batch[1][:2].to(device)
-        test_out = model(test_X, return_all_timesteps=False)
-        
-        print("Test output shapes:")
-        for key, val in test_out.items():
-            print(f"  {key}: {val.shape}, NaN={torch.isnan(val).any()}")
-        
-        if any(torch.isnan(val).any() for val in test_out.values()):
-            print("❌ Model produces NaN at initialization!")
-            return
-        else:
-            print("✅ Model initialization OK")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
-        weight_decay=1e-5,
-        eps=1e-8
+        weight_decay=1e-4,
+        eps=1e-8,
+        betas=(0.9, 0.999)
     )
     
-    # Learning rate schedule
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6
-    )
+    # Learning rate schedule with warmup
+    def lr_lambda(epoch):
+        if epoch < args.warmup_epochs:
+            return (epoch + 1) / args.warmup_epochs
+        else:
+            return 0.5 * (1 + np.cos(np.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # Mixed precision scaler
+    scaler = torch.cuda.amp.GradScaler() if args.amp and torch.cuda.is_available() else None
     
     # Create experiment directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = Path("../results") / f"simple_{timestamp}"
+    exp_dir = Path("../results") / f"{args.experiment_name}_{timestamp}"
     exp_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\nExperiment directory: {exp_dir}")
     
-    # Training
+    # Save configuration
+    config = {
+        'data': args.data,
+        'epochs': args.epochs,
+        'batch_size': args.batch_size,
+        'lr': args.lr,
+        'd_model': args.d_model,
+        'num_layers': args.num_layers,
+        'grad_clip': args.grad_clip,
+        'amp': args.amp,
+        'n_train': len(X_train),
+        'n_val': len(X_val),
+        'n_test': len(X_test)
+    }
+    
+    with open(exp_dir / 'config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    # Save normalizer
+    normalizer.save(exp_dir / 'normalizer.pkl')
+    
+    # Training loop
     best_val_acc = 0
     patience_counter = 0
+    max_patience = 15
+    
+    print("\n" + "="*60)
+    print("STARTING TRAINING")
+    print("="*60)
     
     for epoch in range(args.epochs):
-        print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1}/{args.epochs}")
-        print(f"{'='*60}")
+        print(f"\nEpoch {epoch+1}/{args.epochs}")
+        print("-"*40)
         
         # Train
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device, epoch
+            model, train_loader, criterion, optimizer, device, epoch,
+            max_grad_norm=args.grad_clip, scaler=scaler
         )
         
         # Validate
@@ -319,9 +377,9 @@ def main():
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-        print(f"LR: {current_lr:.6f}")
+        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} ({train_acc*100:.2f}%)")
+        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ({val_acc*100:.2f}%)")
+        print(f"Learning Rate: {current_lr:.6f}")
         
         # Save best model
         if val_acc > best_val_acc:
@@ -332,7 +390,10 @@ def main():
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+                'train_acc': train_acc,
+                'train_loss': train_loss
             }, exp_dir / 'best_model.pt')
             
             print(f"✓ Saved best model (val_acc: {val_acc:.4f})")
@@ -340,13 +401,8 @@ def main():
             patience_counter += 1
         
         # Early stopping
-        if patience_counter >= 10:
-            print("Early stopping!")
-            break
-        
-        # Check for training failure
-        if train_acc < 0.52 and epoch > 5:
-            print("⚠️ Model not learning (accuracy near random)")
+        if patience_counter >= max_patience:
+            print(f"\nEarly stopping triggered after {epoch+1} epochs")
             break
     
     # Final evaluation
@@ -359,13 +415,30 @@ def main():
         model.load_state_dict(checkpoint['model_state_dict'])
         
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+        
+        results = {
+            'test_loss': test_loss,
+            'test_acc': test_acc,
+            'best_val_acc': best_val_acc,
+            'final_epoch': epoch + 1,
+            'model_params': count_parameters(model)
+        }
+        
+        with open(exp_dir / 'results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+        
         print(f"Test Loss: {test_loss:.4f}")
         print(f"Test Accuracy: {test_acc:.4f} ({test_acc*100:.2f}%)")
+        print(f"Best Val Accuracy: {best_val_acc:.4f} ({best_val_acc*100:.2f}%)")
         
-        if test_acc > 0.6:
-            print("\n✅ SUCCESS! Model learned successfully")
+        if test_acc > 0.65:
+            print("\n✅ SUCCESS! Model achieved good performance")
+        elif test_acc > 0.55:
+            print("\n⚠️ Model performance is moderate")
         else:
-            print("\n⚠️ Model performance is low")
+            print("\n❌ Model performance is poor - check data and hyperparameters")
+        
+        print(f"\n📁 Results saved to: {exp_dir}")
 
 
 if __name__ == "__main__":

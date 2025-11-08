@@ -4,9 +4,10 @@ Impact Parameter (u0) Dependency Analysis
 
 Demonstrates the physical detection limit at u0 > 0.3.
 Critical for thesis research question #4.
+Updated for SimpleStableTransformer.
 
 Author: Kunal Bhatia
-Version: 6.2
+Version: 7.0
 """
 
 import numpy as np
@@ -20,7 +21,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from streaming_transformer import StreamingTransformer
+from transformer import SimpleStableTransformer
 from normalization import CausticPreservingNormalizer
 import config as CFG
 
@@ -30,9 +31,17 @@ def load_model_and_data(model_path: str, normalizer_path: str, data_path: str, d
     
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     
-    # Load model
+    # Load model - use same config as training
     print(f"Loading model from {model_path}...")
-    model = StreamingTransformer().to(device)
+    model = SimpleStableTransformer(
+        n_points=1500,
+        d_model=64,
+        nhead=4,
+        num_layers=3,
+        dim_ff=256,
+        dropout=0.2
+    ).to(device)
+    
     checkpoint = torch.load(model_path, map_location=device)
     
     state_dict = checkpoint['model_state_dict']
@@ -66,7 +75,7 @@ def load_model_and_data(model_path: str, normalizer_path: str, data_path: str, d
     if params is None:
         print("WARNING: No parameter data found. Cannot perform u0 analysis.")
         print("Re-generate dataset with --save_params flag.")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     
     return model, normalizer, X, y, params, device
 
