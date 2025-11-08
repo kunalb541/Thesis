@@ -5,7 +5,7 @@ Multi-Node Distributed Training for Streaming Transformer
 Fixed version with proper normalization to prevent data leakage.
 
 Author: Kunal Bhatia
-Version: 6.1
+Version: 6.2 - Fixed SLURM environment detection
 """
 
 import os
@@ -53,13 +53,13 @@ def setup_ddp():
         rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    elif 'SLURM_PROCID' in os.environ:
-        # SLURM environment
+    elif 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS' in os.environ:
+        # SLURM environment - check that all required variables exist
         rank = int(os.environ['SLURM_PROCID'])
         world_size = int(os.environ['SLURM_NTASKS'])
         local_rank = int(os.environ.get('SLURM_LOCALID', 0))
     else:
-        # Single GPU mode
+        # Single GPU mode (including interactive SLURM sessions)
         rank = 0
         world_size = 1
         local_rank = 0
@@ -311,7 +311,7 @@ def main():
     
     if is_main:
         print("="*60)
-        print("MULTI-NODE DDP TRAINING v6.1")
+        print("MULTI-NODE DDP TRAINING v6.2")
         print("="*60)
         print(f"World size: {world_size}")
         print(f"Device: {device}")

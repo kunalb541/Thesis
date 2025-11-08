@@ -8,7 +8,7 @@ Includes:
 - Temporal consistency loss (smooth predictions)
 
 Author: Kunal Bhatia
-Version: 6.0
+Version: 6.1 - Fixed caustic_probs shape handling
 """
 
 import torch
@@ -105,7 +105,7 @@ class CausticFocalLoss(nn.Module):
         Args:
             logits: [batch, seq, 2] or [batch, 2]
             targets: [batch]
-            caustic_probs: [batch, seq] probability of caustic at each timestep
+            caustic_probs: [batch, seq] or [batch, seq, 1] probability of caustic at each timestep
         """
         if logits.dim() == 3:
             # Sequence predictions - use last timestep
@@ -118,10 +118,16 @@ class CausticFocalLoss(nn.Module):
         
         # Apply caustic weighting if provided
         if caustic_probs is not None:
-            # Use maximum caustic probability as weight
+            # Handle different input shapes
+            if caustic_probs.dim() == 3:
+                # [batch, seq, 1] -> squeeze last dim and take max over seq
+                caustic_probs = caustic_probs.squeeze(-1)
+            
             if caustic_probs.dim() == 2:
+                # [batch, seq] -> take max over sequence
                 caustic_weight = caustic_probs.max(dim=1)[0]
             else:
+                # [batch] -> use directly
                 caustic_weight = caustic_probs
             
             # Extra weight for binary events with high caustic probability
@@ -292,9 +298,16 @@ if __name__ == "__main__":
     
     print("\n2. Caustic Focal Loss")
     focal_loss = CausticFocalLoss()
-    caustic_probs = torch.rand(B, T)
-    loss = focal_loss(logits, targets, caustic_probs)
-    print(f"   Loss: {loss.item():.4f}")
+    
+    # Test with 2D caustic probs
+    caustic_probs_2d = torch.rand(B, T)
+    loss = focal_loss(logits, targets, caustic_probs_2d)
+    print(f"   Loss (2D): {loss.item():.4f}")
+    
+    # Test with 3D caustic probs
+    caustic_probs_3d = torch.rand(B, T, 1)
+    loss = focal_loss(logits, targets, caustic_probs_3d)
+    print(f"   Loss (3D): {loss.item():.4f}")
     
     print("\n3. Temporal Consistency Loss")
     consistency_loss = TemporalConsistencyLoss()
@@ -304,7 +317,7 @@ if __name__ == "__main__":
     print("\n4. Combined Loss")
     outputs = {
         'binary': logits,
-        'caustic': caustic_probs
+        'caustic': caustic_probs_3d
     }
     combined = CombinedLoss()
     loss = combined(outputs, targets, inputs)

@@ -2,7 +2,7 @@
 """
 Fixed Binary Microlensing Simulation with Guaranteed Caustic Crossings
 
-Version: 6.1 - Fixed with fallback tracking
+Version: 6.2 - Fixed JSON serialization for NumPy types
 Author: Kunal Bhatia
 """
 
@@ -186,7 +186,7 @@ def generate_binary_event(
                     's': s, 'q': q, 'u0': u0, 'alpha': alpha,
                     'rho': rho, 't0': t0, 'tE': tE, 'baseline': baseline,
                     'max_magnification': max_mag,
-                    'n_caustic_points': n_caustic,
+                    'n_caustic_points': int(n_caustic),  # Convert to Python int
                     'attempt': attempt + 1,
                     'event_type': 'binary',
                     'is_fallback': False,
@@ -367,6 +367,22 @@ def generate_dataset(
     return dataset
 
 
+def convert_numpy_types(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    else:
+        return obj
+
+
 def save_dataset(dataset: Dict, output_path: str):
     """Save dataset to NPZ file"""
     output_path = Path(output_path)
@@ -378,16 +394,16 @@ def save_dataset(dataset: Dict, output_path: str):
         'y': dataset['y'],
         'timestamps': dataset['timestamps'],
         'perm': dataset['perm'],
-        'meta_json': json.dumps(dataset['metadata']),
-        'stats_json': json.dumps(dataset['stats']),
+        'meta_json': json.dumps(convert_numpy_types(dataset['metadata'])),
+        'stats_json': json.dumps(convert_numpy_types(dataset['stats'])),
     }
     
     # Save parameters if requested
     if dataset['params']:
-        save_dict['params_pspl_json'] = json.dumps(dataset['params']['pspl'])
-        save_dict['params_binary_json'] = json.dumps(dataset['params']['binary'])
+        save_dict['params_pspl_json'] = json.dumps(convert_numpy_types(dataset['params']['pspl']))
+        save_dict['params_binary_json'] = json.dumps(convert_numpy_types(dataset['params']['binary']))
         if dataset['params']['binary_fallback']:
-            save_dict['params_binary_fallback_json'] = json.dumps(dataset['params']['binary_fallback'])
+            save_dict['params_binary_fallback_json'] = json.dumps(convert_numpy_types(dataset['params']['binary_fallback']))
     
     np.savez_compressed(output_path, **save_dict)
     print(f"\nDataset saved to: {output_path}")
@@ -412,7 +428,7 @@ def main():
     binary_params = CFG.BINARY_PARAM_SETS[args.binary_params]
     
     print("="*60)
-    print("BINARY MICROLENSING SIMULATION v6.1")
+    print("BINARY MICROLENSING SIMULATION v6.2")
     print("="*60)
     print(f"Configuration:")
     print(f"  PSPL events: {args.n_pspl}")

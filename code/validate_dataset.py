@@ -6,7 +6,7 @@ Validates that binary events have proper caustic crossings.
 Generates comprehensive reports and visualizations.
 
 Author: Kunal Bhatia
-Version: 6.0
+Version: 6.1 - Fixed JSON serialization
 """
 
 import numpy as np
@@ -75,25 +75,25 @@ def analyze_magnifications(dataset: Dict) -> Dict:
     pspl_max_mags = np.array(pspl_max_mags)
     binary_max_mags = np.array(binary_max_mags)
     
-    # Statistics
+    # Statistics - convert to native Python types for JSON serialization
     stats = {
         'pspl': {
-            'count': len(pspl_max_mags),
-            'mean': pspl_max_mags.mean(),
-            'median': np.median(pspl_max_mags),
-            'std': pspl_max_mags.std(),
-            'min': pspl_max_mags.min(),
-            'max': pspl_max_mags.max(),
-            'above_20': (pspl_max_mags > 20).sum()
+            'count': int(len(pspl_max_mags)),
+            'mean': float(pspl_max_mags.mean()),
+            'median': float(np.median(pspl_max_mags)),
+            'std': float(pspl_max_mags.std()),
+            'min': float(pspl_max_mags.min()),
+            'max': float(pspl_max_mags.max()),
+            'above_20': int((pspl_max_mags > 20).sum())
         },
         'binary': {
-            'count': len(binary_max_mags),
-            'mean': binary_max_mags.mean(),
-            'median': np.median(binary_max_mags),
-            'std': binary_max_mags.std(),
-            'min': binary_max_mags.min(),
-            'max': binary_max_mags.max(),
-            'above_20': (binary_max_mags > 20).sum()
+            'count': int(len(binary_max_mags)),
+            'mean': float(binary_max_mags.mean()),
+            'median': float(np.median(binary_max_mags)),
+            'std': float(binary_max_mags.std()),
+            'min': float(binary_max_mags.min()),
+            'max': float(binary_max_mags.max()),
+            'above_20': int((binary_max_mags > 20).sum())
         }
     }
     
@@ -261,7 +261,7 @@ def generate_report(
         'binary_validation': {
             'n_valid': n_valid,
             'n_invalid': n_invalid,
-            'valid_fraction': n_valid / (n_valid + n_invalid) if (n_valid + n_invalid) > 0 else 0
+            'valid_fraction': float(n_valid / (n_valid + n_invalid)) if (n_valid + n_invalid) > 0 else 0.0
         },
         'parameters': meta.get('binary_params', {})
     }
