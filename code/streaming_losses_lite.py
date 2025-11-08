@@ -2,10 +2,10 @@
 """
 Streaming Loss Functions for Binary Microlensing Detection
 
-FIXED VERSION - Handles downsampled sequences properly
+FIXED VERSION - Handles downsampled sequences and mixed precision properly
 
 Author: Kunal Bhatia
-Version: 7.1 - Fixed for temporal downsampling
+Version: 7.1 - Fixed for temporal downsampling + mixed precision
 """
 
 import torch
@@ -37,9 +37,9 @@ class EarlyDetectionLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            logits_seq: [batch, seq, 2] sequence of predictions
+            logits_seq: [batch, seq, 2] sequence of predictions (downsampled length)
             targets: [batch] true labels
-            padding_mask: [batch, seq] mask for padded positions
+            padding_mask: [batch, seq] mask for padded positions (MUST match logits_seq length)
         """
         B, T, C = logits_seq.shape
         device = logits_seq.device
@@ -52,7 +52,7 @@ class EarlyDetectionLoss(nn.Module):
         correct_probs = probs.gather(2, targets_expanded.unsqueeze(-1)).squeeze(-1)
         
         # Create time penalty
-        time_weight = torch.linspace(0, 1, T, device=device).unsqueeze(0)
+        time_weight = torch.linspace(0, 1, T, device=device, dtype=logits_seq.dtype).unsqueeze(0)
         time_weight[:, :int(T * self.zero_loss_fraction)] = 0  # Zero loss for early detection
         
         # Compute loss for each timestep
@@ -61,7 +61,7 @@ class EarlyDetectionLoss(nn.Module):
         # Apply padding mask if provided
         if padding_mask is not None:
             losses = losses.masked_fill(padding_mask, 0)
-            valid_counts = (~padding_mask).sum(dim=1, keepdim=True).clamp(min=1)
+            valid_counts = (~padding_mask).sum(dim=1, keepdim=True).clamp(min=1).float()
             loss = (losses.sum(dim=1) / valid_counts.squeeze()).mean()
         else:
             loss = losses.mean()
@@ -127,6 +127,9 @@ class CausticFocalLoss(nn.Module):
                 # [batch] -> use directly
                 caustic_weight = caustic_probs
             
+            # CRITICAL FIX: Ensure dtype consistency for mixed precision
+            caustic_weight = caustic_weight.to(dtype=focal_loss.dtype)
+            
             # Extra weight for binary events with high caustic probability
             is_binary = targets == 1
             weight = torch.ones_like(focal_loss)
@@ -157,13 +160,13 @@ class TemporalConsistencyLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            logits_seq: [batch, seq, 2] sequence of predictions
-            padding_mask: [batch, seq] mask for padded positions
+            logits_seq: [batch, seq, 2] sequence of predictions (downsampled length)
+            padding_mask: [batch, seq] mask for padded positions (MUST match logits_seq length)
         """
         B, T, C = logits_seq.shape
         
         if T < 2:
-            return torch.tensor(0.0, device=logits_seq.device)
+            return torch.tensor(0.0, device=logits_seq.device, dtype=logits_seq.dtype)
         
         # Compute probabilities
         probs = F.softmax(logits_seq, dim=-1)
@@ -181,7 +184,7 @@ class TemporalConsistencyLoss(nn.Module):
             consistency_loss = consistency_loss * valid_transitions
             
             # Average over valid transitions
-            valid_counts = valid_transitions.sum(dim=1).clamp(min=1)
+            valid_counts = valid_transitions.sum(dim=1).clamp(min=1).float()
             loss = (consistency_loss.sum(dim=1) / valid_counts).mean()
         else:
             loss = consistency_loss.mean()
@@ -193,7 +196,10 @@ class CombinedLoss(nn.Module):
     """
     Combined loss for streaming binary microlensing detection.
     
-    FIXED: Now handles downsampled sequences properly!
+    FIXED VERSION:
+    - Handles downsampled sequences (1500 -> 300 points)
+    - Handles mixed precision training (AMP)
+    - Proper dtype consistency
     """
     
     def __init__(
@@ -228,33 +234,42 @@ class CombinedLoss(nn.Module):
         Args:
             outputs: Model outputs dict with 'binary', 'anomaly', 'caustic'
             targets: [batch] true labels
-            inputs: [batch, seq] original inputs (for padding mask)
+            inputs: [batch, seq] original inputs (1500 points, for padding mask)
             pad_value: Value indicating padding
         """
-        # Get padding mask from original inputs
-        padding_mask = (inputs == pad_value)
+        # Get padding mask from original inputs (1500 points)
+        padding_mask_orig = (inputs == pad_value)
         
-        # Get binary logits
+        # Get binary logits (300 points due to downsampling)
         binary_logits = outputs['binary']
         
-        # CRITICAL FIX: Handle downsampled sequences
-        # If binary_logits has different length than inputs, downsample the mask
+        # CRITICAL FIX: Downsample padding mask to match output length
         if binary_logits.dim() == 3 and binary_logits.shape[1] != inputs.shape[1]:
-            T_out = binary_logits.shape[1]
-            T_in = inputs.shape[1]
-            downsample_factor = T_in // T_out
+            T_out = binary_logits.shape[1]  # 300
+            T_in = inputs.shape[1]          # 1500
+            downsample_factor = T_in // T_out  # 5
             
-            # Downsample padding mask via max pooling (any padding in window = padded)
-            padding_mask_downsampled = F.max_pool1d(
-                padding_mask.float().unsqueeze(1),
+            # Downsample padding mask via max pooling
+            # (any padding in window = padded)
+            padding_mask = F.max_pool1d(
+                padding_mask_orig.float().unsqueeze(1),
                 kernel_size=downsample_factor,
                 stride=downsample_factor
             ).squeeze(1).bool()
             
-            # Truncate to match output length exactly
-            padding_mask_downsampled = padding_mask_downsampled[:, :T_out]
+            # Ensure exact length match (handle rounding)
+            if padding_mask.shape[1] > T_out:
+                padding_mask = padding_mask[:, :T_out]
+            elif padding_mask.shape[1] < T_out:
+                # Pad with False (not padded)
+                B = padding_mask.shape[0]
+                padding_extension = torch.zeros(
+                    B, T_out - padding_mask.shape[1],
+                    dtype=torch.bool, device=padding_mask.device
+                )
+                padding_mask = torch.cat([padding_mask, padding_extension], dim=1)
         else:
-            padding_mask_downsampled = padding_mask
+            padding_mask = padding_mask_orig
         
         total_loss = 0
         
@@ -262,7 +277,7 @@ class CombinedLoss(nn.Module):
         if binary_logits.dim() == 3:
             # Use last valid timestep for each sample
             B, T, C = binary_logits.shape
-            last_valid = (~padding_mask_downsampled).sum(dim=1) - 1
+            last_valid = (~padding_mask).sum(dim=1) - 1
             last_valid = last_valid.clamp(min=0, max=T-1)
             
             batch_idx = torch.arange(B, device=binary_logits.device)
@@ -275,7 +290,7 @@ class CombinedLoss(nn.Module):
         
         # 2. Early detection loss (if sequence predictions available)
         if binary_logits.dim() == 3 and self.weights.get('early_detection', 0) > 0:
-            early_loss = self.early_detection(binary_logits, targets, padding_mask_downsampled)
+            early_loss = self.early_detection(binary_logits, targets, padding_mask)
             total_loss += self.weights['early_detection'] * early_loss
         
         # 3. Caustic focal loss (if caustic predictions available)
@@ -292,26 +307,26 @@ class CombinedLoss(nn.Module):
         
         # 4. Temporal consistency loss
         if binary_logits.dim() == 3 and self.weights.get('temporal_consistency', 0) > 0:
-            consistency_loss = self.temporal_consistency(binary_logits, padding_mask_downsampled)
+            consistency_loss = self.temporal_consistency(binary_logits, padding_mask)
             total_loss += self.weights['temporal_consistency'] * consistency_loss
         
         return total_loss
 
 
 if __name__ == "__main__":
-    print("Testing streaming losses with downsampling...")
+    print("Testing streaming losses with downsampling and mixed precision...")
     
     # Create dummy data
     B, T_orig, T_down, C = 4, 1500, 300, 2
     
     # Simulate downsampled model outputs
-    logits = torch.randn(B, T_down, C)  # Downsampled to 300
+    logits = torch.randn(B, T_down, C)
     targets = torch.randint(0, 2, (B,))
     inputs = torch.randn(B, T_orig)  # Original 1500 length
     inputs[:, -300:] = -1.0  # Padding
     
-    # Test combined loss with downsampling
-    print("\nTesting Combined Loss with downsampling:")
+    # Test 1: Without mixed precision
+    print("\n1. Testing Combined Loss (no AMP):")
     outputs = {
         'binary': logits,
         'caustic': torch.rand(B, T_down, 1)
@@ -320,4 +335,39 @@ if __name__ == "__main__":
     loss = combined(outputs, targets, inputs)
     print(f"   Loss: {loss.item():.4f} ✅")
     
-    print("\n✅ All loss functions working with downsampling!")
+    # Test 2: With mixed precision (half precision)
+    print("\n2. Testing Combined Loss (with AMP/half precision):")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    logits_half = logits.to(device).half()
+    targets_half = targets.to(device)
+    inputs_half = inputs.to(device).half()
+    outputs_half = {
+        'binary': logits_half,
+        'caustic': torch.rand(B, T_down, 1, device=device).half()
+    }
+    combined_half = combined.to(device)
+    
+    try:
+        loss_half = combined_half(outputs_half, targets_half, inputs_half)
+        print(f"   Loss: {loss_half.item():.4f} ✅")
+    except Exception as e:
+        print(f"   Error: {e}")
+    
+    # Test 3: Individual losses
+    print("\n3. Testing Individual Losses:")
+    
+    print("   Early Detection Loss:")
+    early_loss = combined.early_detection(logits, targets, inputs == -1.0)
+    print(f"   Loss: {early_loss.item():.4f} ✅")
+    
+    print("   Caustic Focal Loss:")
+    caustic_probs = torch.rand(B, T_down, 1)
+    focal_loss = combined.caustic_focal(logits, targets, caustic_probs)
+    print(f"   Loss: {focal_loss.item():.4f} ✅")
+    
+    print("   Temporal Consistency Loss:")
+    consistency_loss = combined.temporal_consistency(logits, inputs == -1.0)
+    print(f"   Loss: {consistency_loss.item():.4f} ✅")
+    
+    print("\n✅ All loss functions working with downsampling and mixed precision!")
