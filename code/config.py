@@ -1,220 +1,293 @@
 """
-Configuration for Microlensing Classification with Transformers
+Configuration for Real-Time Binary Microlensing Detection
 
-This file centralizes all hyperparameters and configuration settings.
-All experiments should reference this file to ensure reproducibility.
+CRITICAL: This config is optimized for detecting binary caustic crossings.
+Low u0 values are ESSENTIAL for binaries to ensure caustic features.
 
 Author: Kunal Bhatia
-University of Heidelberg
 Date: November 2025
-Version: 5.6.1 - Enhanced documentation
+Version: 6.0 - Production-ready with streaming support
 """
+
+import math
+
+# ============================================================================
+# CRITICAL DETECTION PARAMETERS
+# ============================================================================
+
+# MINIMUM magnification for valid binary detection
+MIN_BINARY_MAGNIFICATION = 20.0  # Binaries MUST have caustic spike > 20x
+
+# VBMicrolensing tolerance (critical for convergence)
+VBM_TOLERANCE = 1e-4
+
+# Maximum retry attempts for binary generation
+MAX_BINARY_ATTEMPTS = 10
 
 # ============================================================================
 # DATA PARAMETERS
 # ============================================================================
 
 # Sequence parameters
-N_POINTS = 1500  # Number of observation points per light curve
-TIME_MIN = 0     # Start time (days)
-TIME_MAX = 1000  # End time (days)
+N_POINTS = 1500  # Full temporal resolution (no downsampling in data!)
+TIME_MIN = -100  # Start before event for baseline
+TIME_MAX = 100   # End after event for baseline
 
-# Event parameters (shared between PSPL and Binary)
-# These define the ranges for random parameter sampling
+# PSPL parameters (Point Source Point Lens)
+PSPL_T0_MIN = -20.0
+PSPL_T0_MAX = 20.0
+PSPL_U0_MIN = 0.01   # Can be wider range for PSPL
+PSPL_U0_MAX = 1.0
+PSPL_TE_MIN = 10.0
+PSPL_TE_MAX = 150.0
 
-# t0: Time of maximum magnification (days)
-T0_MIN = 300.0
-T0_MAX = 700.0
-NORMALIZE_PER_EVENT = False 
-# u0: Impact parameter (minimum separation in Einstein radii)
-# CRITICAL PARAMETER: Low u0 = close approach = strong signal
-U0_MIN = 0.01
-U0_MAX = 1.0
+# Baseline magnitude range
+BASELINE_MIN = 19.0
+BASELINE_MAX = 22.0
 
-# tE: Einstein crossing time (days)
-# Typical duration of microlensing event
-TE_MIN = 10.0
-TE_MAX = 150.0
+# Observational noise
+MAG_ERROR_STD = 0.10      # Ground-based quality (LSST/OGLE)
+CADENCE_MASK_PROB = 0.20  # 20% missing observations
 
-# Baseline magnitude range (apparent magnitude at infinite separation)
-BASELINE_MIN = 19.0  # Bright sources
-BASELINE_MAX = 22.0  # Faint sources
-
-# Observational parameters
-# These simulate real survey conditions
-
-# MAG_ERROR_STD: Photometric measurement error (magnitudes)
-# 0.05 = space-based (Roman)
-# 0.10 = ground-based (LSST, OGLE)
-# 0.20 = poor conditions
-MAG_ERROR_STD = 0.10
-
-# CADENCE_MASK_PROB: Fraction of missing observations
-# 0.05 = intensive monitoring
-# 0.20 = typical survey (LSST)
-# 0.40 = sparse coverage
-CADENCE_MASK_PROB = 0.20
-
-# PAD_VALUE: Sentinel value for missing/padded data points
+# Padding and normalization
 PAD_VALUE = -1.0
+NORMALIZE_PER_EVENT = False  # Global normalization for consistency
 
 # ============================================================================
-# BINARY PARAMETERS
+# BINARY PARAMETERS - CRITICAL FOR DETECTION
 # ============================================================================
 
-# Binary lens parameters define the caustic topology
-# Different parameter sets explore different physical scenarios
+# CRITICAL BINARY CONFIGURATION (force caustic crossings)
+BINARY_CRITICAL = {
+    's_min': 0.7,        # Optimal for wide caustics
+    's_max': 1.5,        
+    'q_min': 0.01,       # Minimum for clear perturbation
+    'q_max': 0.5,        
+    'rho_min': 0.001,    # Small source = sharp features
+    'rho_max': 0.01,     
+    'alpha_min': 0,
+    'alpha_max': math.pi,
+    'u0_min': 0.001,     # CRITICAL: Force close approach
+    'u0_max': 0.05,      # CRITICAL: Maximum u0 for guaranteed caustics
+    't0_min': -20.0,
+    't0_max': 20.0,
+    'tE_min': 30.0,      # Longer events for clear caustics
+    'tE_max': 100.0,
+}
 
-# Baseline configuration (mixed population)
-# Represents realistic mixture of planetary and stellar binaries
+# Baseline (realistic mix)
 BINARY_BASELINE = {
-    's_min': 0.1,      # Minimum separation (Einstein radii)
-    's_max': 2.5,      # Maximum separation
-    'q_min': 0.1,      # Minimum mass ratio (companion/primary)
-    'q_max': 1.0,      # Maximum mass ratio
-    'rho_min': 0.01,   # Minimum source size (Einstein radii)
-    'rho_max': 0.1,    # Maximum source size
-    'alpha_min': 0,    # Minimum trajectory angle (radians)
-    'alpha_max': 3.14159,  # Maximum trajectory angle
+    's_min': 0.1,
+    's_max': 2.5,
+    'q_min': 0.001,
+    'q_max': 1.0,
+    'rho_min': 0.001,
+    'rho_max': 0.05,
+    'alpha_min': 0,
+    'alpha_max': 2 * math.pi,
+    'u0_min': 0.001,     # Still prefer close approach
+    'u0_max': 0.3,       # But allow some wider
+    't0_min': -20.0,
+    't0_max': 20.0,
+    'tE_min': 20.0,
+    'tE_max': 150.0,
 }
 
-# Distinct caustic crossings (clear signatures)
-# Optimized for maximum distinguishability from PSPL
+# Distinct (clear signatures)
 BINARY_DISTINCT = {
-    's_min': 0.8,      # Optimal separation range
-    's_max': 1.5,      # Wide, clear caustics
-    'q_min': 0.1,      # Moderate to high mass ratios
+    's_min': 0.8,
+    's_max': 1.3,
+    'q_min': 0.1,
     'q_max': 0.5,
-    'rho_min': 0.01,   # Small sources = sharp features
-    'rho_max': 0.05,
+    'rho_min': 0.001,
+    'rho_max': 0.02,
     'alpha_min': 0,
-    'alpha_max': 3.14159,
-    'u0_max': 0.15,    # Force close approaches
+    'alpha_max': math.pi,
+    'u0_min': 0.001,
+    'u0_max': 0.1,       # Force close approach
+    't0_min': -20.0,
+    't0_max': 20.0,
+    'tE_min': 30.0,
+    'tE_max': 100.0,
 }
 
-# Planetary systems
-# Low mass-ratio events (exoplanet detection)
-BINARY_PLANETARY = {
-    's_min': 0.5,      # Typical planet-star separations
+# Overlapping (includes hard cases)
+BINARY_OVERLAPPING = {
+    's_min': 0.1,
     's_max': 3.0,
-    'q_min': 0.0001,   # Jupiter/Sun ~ 0.001
-    'q_max': 0.01,     # Brown dwarfs
-    'rho_min': 0.0001, # Point-like planets
-    'rho_max': 0.05,
-    'alpha_min': 0,
-    'alpha_max': 3.14159,
-    'u0_min': 0.001,   # Allow both close and far events
-    'u0_max': 0.5,
-}
-
-# Stellar binaries
-# Equal or comparable-mass systems
-BINARY_STELLAR = {
-    's_min': 0.3,      # Close to wide binaries
-    's_max': 5.0,
-    'q_min': 0.3,      # M-dwarf/M-dwarf ~ 0.3-1.0
-    'q_max': 1.0,      # Equal mass
+    'q_min': 0.0001,
+    'q_max': 1.0,
     'rho_min': 0.001,
     'rho_max': 0.1,
     'alpha_min': 0,
-    'alpha_max': 3.14159,
-    'u0_min': 0.001,
-    'u0_max': 0.8,     # Include larger impact parameters
-    'tE_min': 20.0,    # Typically longer events
+    'alpha_max': 2 * math.pi,
+    'u0_min': 0.01,
+    'u0_max': 1.0,       # INCLUDES u0 > 0.3 (hard cases)
+    't0_min': -20.0,
+    't0_max': 20.0,
+    'tE_min': 10.0,
     'tE_max': 200.0,
 }
 
-# Dictionary for easy access in code
+# Planetary systems
+BINARY_PLANETARY = {
+    's_min': 0.5,
+    's_max': 2.0,
+    'q_min': 0.0001,
+    'q_max': 0.01,
+    'rho_min': 0.0001,
+    'rho_max': 0.01,
+    'alpha_min': 0,
+    'alpha_max': 2 * math.pi,
+    'u0_min': 0.001,
+    'u0_max': 0.2,
+    't0_min': -20.0,
+    't0_max': 20.0,
+    'tE_min': 20.0,
+    'tE_max': 100.0,
+}
+
+# Stellar binaries
+BINARY_STELLAR = {
+    's_min': 0.3,
+    's_max': 3.0,
+    'q_min': 0.3,
+    'q_max': 1.0,
+    'rho_min': 0.001,
+    'rho_max': 0.05,
+    'alpha_min': 0,
+    'alpha_max': 2 * math.pi,
+    'u0_min': 0.001,
+    'u0_max': 0.4,
+    't0_min': -20.0,
+    't0_max': 20.0,
+    'tE_min': 30.0,
+    'tE_max': 200.0,
+}
+
 BINARY_PARAM_SETS = {
+    'critical': BINARY_CRITICAL,  # NEW: Force caustic crossings
     'baseline': BINARY_BASELINE,
     'distinct': BINARY_DISTINCT,
+    'overlapping': BINARY_OVERLAPPING,
     'planetary': BINARY_PLANETARY,
     'stellar': BINARY_STELLAR,
 }
 
 # ============================================================================
-# MODEL PARAMETERS (TRANSFORMER)
+# STREAMING TRANSFORMER PARAMETERS
 # ============================================================================
 
-# Transformer architecture hyperparameters
-# These control model capacity and training behavior
+# Model architecture
+D_MODEL = 256            # Larger model for complex patterns
+NHEAD = 8               # More attention heads
+NUM_LAYERS = 6          # Deeper network
+DIM_FEEDFORWARD = 1024  # Wider FFN
+DROPOUT = 0.2           # Less dropout for larger model
 
-D_MODEL = 64              # Embedding dimension (64 or 128 typical)
-NHEAD = 4                 # Number of attention heads (must divide D_MODEL)
-NUM_LAYERS = 2            # Number of transformer encoder layers
-DIM_FEEDFORWARD = 256     # Hidden dimension in FFN (typically 4× d_model)
-DOWNSAMPLE_FACTOR = 3     # Sequence reduction factor (1500 → 500)
-DROPOUT = 0.3             # Dropout rate for regularization
+# Streaming configuration
+MAX_SEQ_LEN = 1500      # Maximum sequence length
+WINDOW_SIZE = 200       # Sliding window for attention
+CAUSAL_MASK = True      # Strictly causal attention
+
+# Multi-head outputs
+USE_MULTI_HEAD = True   # Binary + Anomaly + Caustic detection
 
 # ============================================================================
 # TRAINING PARAMETERS
 # ============================================================================
 
-BATCH_SIZE = 128          # Batch size per GPU (adjust for memory)
-LEARNING_RATE = 1e-4      # Adam learning rate
-EPOCHS = 50               # Maximum training epochs
-PATIENCE = 10             # Early stopping patience
+# Batch configuration
+BATCH_SIZE = 32              # Per GPU (smaller for larger model)
+GRADIENT_ACCUMULATION = 8    # Effective batch = 256
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-5
+WARMUP_STEPS = 1000
 
-# Data splits (must sum to 1.0)
-TRAIN_RATIO = 0.6         # 60% training
-VAL_RATIO = 0.2           # 20% validation
-TEST_RATIO = 0.2          # 20% test
+# Training schedule
+EPOCHS = 100
+PATIENCE = 15
+MIN_DELTA = 0.001
 
-# Random seed for reproducibility
-SEED = 42
+# Data splits
+TRAIN_RATIO = 0.7
+VAL_RATIO = 0.15
+TEST_RATIO = 0.15
+
+# Loss weights
+LOSS_WEIGHTS = {
+    'classification': 1.0,
+    'early_detection': 0.5,
+    'caustic_focal': 0.3,
+    'temporal_consistency': 0.1,
+}
 
 # ============================================================================
-# VISUALIZATION PARAMETERS
+# STREAMING INFERENCE
 # ============================================================================
 
-# Confidence threshold for decision-time analysis
-# Model must be ≥ this confident to make a classification
-CONFIDENCE_THRESHOLD = 0.8
+# Real-time parameters
+BUFFER_SIZE = 200           # Circular buffer size
+CONFIDENCE_THRESHOLD = 0.8  # Decision threshold
+CAUSTIC_THRESHOLD = 0.5     # Caustic detection threshold
+MAX_LATENCY_MS = 1.0        # Maximum acceptable latency
 
-# Number of sample plots to generate in evaluation
-N_SAMPLE_PLOTS = 12
+# Alert triggers
+ALERT_ON_BINARY = True
+ALERT_ON_ANOMALY = True
+ALERT_ON_CAUSTIC = True
+
+# ============================================================================
+# DISTRIBUTED TRAINING
+# ============================================================================
+
+# DDP configuration
+DDP_BACKEND = 'nccl'        # Use NCCL for GPUs
+FIND_UNUSED_PARAMS = False  # All params should be used
+BROADCAST_BUFFERS = True    # Sync batch norm stats
+
+# Multi-node settings
+MASTER_PORT = 29500
+INIT_METHOD = 'env://'      # Use environment variables
+WORLD_SIZE = None           # Set dynamically
+RANK = None                 # Set dynamically
 
 # ============================================================================
 # PATHS
 # ============================================================================
 
-DATA_DIR = "data"
-RESULTS_DIR = "results"
+DATA_DIR = "../data"
+RESULTS_DIR = "../results"
+CHECKPOINT_DIR = "../checkpoints"
+LOG_DIR = "../logs"
 
 # ============================================================================
-# NOTES ON PARAMETER SELECTION
+# VALIDATION THRESHOLDS
 # ============================================================================
 
-"""
-Key Parameter Relationships:
+# Data quality checks
+MIN_SAMPLES_PER_CLASS = 1000
+MAX_CLASS_IMBALANCE = 10.0
+MIN_NON_PAD_RATIO = 0.5
 
-1. Impact Parameter (u0) vs Detectability:
-   - u0 < 0.15: Binary caustic crossings likely → High accuracy
-   - u0 = 0.15-0.30: Marginal detections → Medium accuracy
-   - u0 > 0.30: Fundamentally PSPL-like → Low accuracy (physical limit)
+# Model performance thresholds
+MIN_TRAIN_ACCURACY = 0.6
+MIN_VAL_ACCURACY = 0.5
+MAX_LOSS = 10.0
 
-2. Separation (s) vs Caustic Size:
-   - s ~ 1.0: Maximum caustic area → Easiest to detect
-   - s < 0.5 or s > 2.0: Small caustics → Harder to detect
+# ============================================================================
+# RANDOM SEEDS
+# ============================================================================
 
-3. Mass Ratio (q) vs Perturbation Strength:
-   - q < 0.01: Planetary perturbations (subtle)
-   - q = 0.1-0.5: Moderate perturbations
-   - q ~ 1.0: Symmetric caustics (different topology)
+SEED = 42
+NUMPY_SEED = 42
+TORCH_SEED = 42
 
-4. Source Size (rho) vs Feature Sharpness:
-   - Small rho: Sharp spikes → Easier to detect
-   - Large rho: Smoothed features → Harder to detect
+# ============================================================================
+# DEBUG FLAGS
+# ============================================================================
 
-5. Photometric Error vs Accuracy:
-   - 0.05 mag (Roman): ~5% accuracy gain over ground-based
-   - 0.10 mag (LSST): Baseline performance
-   - 0.20 mag: ~5-10% accuracy loss
-
-6. Cadence vs Accuracy:
-   - 5% missing: ~5% accuracy gain
-   - 20% missing: Baseline
-   - 40% missing: ~10% accuracy loss
-
-These relationships guide experimental design and interpretation.
-"""
+DEBUG_MODE = False
+VERBOSE = True
+SAVE_INTERMEDIATE = False
+PROFILE_PERFORMANCE = False
