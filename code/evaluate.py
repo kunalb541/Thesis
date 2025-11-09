@@ -78,13 +78,33 @@ def load_model(model_path: str, device='cuda'):
     if 'pos_encoding' in state_dict:
         d_model = state_dict['pos_encoding'].shape[2]
     
-    num_layers = len([k for k in state_dict.keys() 
-                     if 'layers.' in k and '.norm.weight' in k])
+    # Count transformer layers by finding unique layer indices
+    layer_indices = set()
+    for key in state_dict.keys():
+        if key.startswith('layers.') and '.' in key[7:]:
+            # Extract layer number from 'layers.X.something'
+            layer_idx = key.split('.')[1]
+            if layer_idx.isdigit():
+                layer_indices.add(int(layer_idx))
+    
+    num_layers = len(layer_indices) if layer_indices else 0
+    
+    # Detect nhead from model dimensions
+    if num_layers > 0 and 'layers.0.attn.w_q.weight' in state_dict:
+        # For small models, nhead is typically d_model/16 or d_model/32
+        if d_model <= 64:
+            nhead = 4
+        elif d_model <= 128:
+            nhead = 8
+        else:
+            nhead = 8
+    else:
+        nhead = 8
     
     print(f"Detected architecture:")
     print(f"  d_model: {d_model}")
     print(f"  num_layers: {num_layers}")
-    print(f"  nhead: 8")  # From config
+    print(f"  nhead: {nhead}")
     
     # Create model
     model = MicrolensingTransformer(

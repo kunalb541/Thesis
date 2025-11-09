@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 """
-FIXED VERSION - Visualize High-Confidence Binary Classifications
-=================================================================
-- Auto-detects model architecture from checkpoint
-- Uses GPU if available (10x faster)
-- Handles metadata gracefully
-- Progress bars
-- Batch processing
+FIXED - Visualize High-Confidence Binary Classifications
+=========================================================
+Uses CORRECT MicrolensingTransformer architecture
+Matches training code exactly
 
-Usage:
-    python visualize_fixed.py \
-        --model_path ../results/critical_20gpu_working_20251108_135150/best_model.pt \
-        --data_path ../data/raw/test.npz \
-        --output_dir ./figures/
+Author: Kunal Bhatia
+Version: FIXED for thesis
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -25,12 +20,47 @@ import sys
 from tqdm import tqdm
 
 sys.path.insert(0, '/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/code')
-from transformer import MaskedMicrolensingTransformer
+from transformer import MicrolensingTransformer  # CORRECT import!
 
 # Set style
 plt.style.use('seaborn-v0_8-paper')
 sns.set_palette("husl")
 plt.rcParams['figure.dpi'] = 300
+
+
+class StableNormalizer:
+    """Same normalizer as training"""
+    
+    def __init__(self, pad_value=-1.0):
+        self.pad_value = pad_value
+        self.mean = 0.0
+        self.std = 1.0
+    
+    def fit(self, X):
+        valid_mask = (X != self.pad_value) & np.isfinite(X)
+        
+        if valid_mask.any():
+            valid_values = X[valid_mask]
+            self.mean = np.median(valid_values)
+            self.std = np.median(np.abs(valid_values - self.mean))
+            
+            if self.std < 1e-8:
+                self.std = 1.0
+            
+            self.mean = np.clip(self.mean, -100, 100)
+            self.std = np.clip(self.std, 0.01, 100)
+        
+        return self
+    
+    def transform(self, X):
+        X_norm = X.copy()
+        valid_mask = (X != self.pad_value) & np.isfinite(X)
+        
+        if valid_mask.any():
+            X_norm[valid_mask] = (X[valid_mask] - self.mean) / self.std
+            X_norm[valid_mask] = np.clip(X_norm[valid_mask], -10, 10)
+        
+        return np.nan_to_num(X_norm, nan=0.0, posinf=10.0, neginf=-10.0)
 
 
 class FixedVisualizer:
@@ -63,6 +93,11 @@ class FixedVisualizer:
         print("\n📊 Loading data...")
         self.X, self.y, self.meta = self._load_data(data_path, max_samples)
         
+        # Normalize data
+        print("\n🔄 Normalizing data...")
+        self.normalizer = StableNormalizer(pad_value=-1.0)
+        self.X_norm = self.normalizer.fit(self.X).transform(self.X)
+        
         # Get predictions
         print(f"\n🔮 Getting predictions for {len(self.X)} samples...")
         self.predictions, self.confidences = self._get_predictions()
@@ -76,19 +111,34 @@ class FixedVisualizer:
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         state_dict = checkpoint['model_state_dict']
         
-        # Auto-detect architecture from checkpoint
-        d_model = state_dict['input_proj.0.weight'].shape[0]
-        num_layers = len([k for k in state_dict.keys() if 'blocks.' in k and '.norm1.weight' in k])
+        # Auto-detect d_model from pos_encoding
+        if 'pos_encoding' in state_dict:
+            d_model = state_dict['pos_encoding'].shape[2]
+        # Method 2: Try from input_embed
+        elif 'input_embed.4.weight' in state_dict:
+            d_model = state_dict['input_embed.4.weight'].shape[0]
+        else:
+            # Fallback
+            d_model = 256
         
-        # nhead is harder to detect, try to infer from attention dimensions
-        # q_proj shape is [d_model, d_model], and d_model = nhead * d_k
-        # We know d_model, so we can try common values
-        possible_nheads = [2, 4, 8, 16]
-        nhead = 4  # default
-        for nh in possible_nheads:
-            if d_model % nh == 0:
-                nhead = nh
-                break
+        # Count transformer layers by finding unique layer indices
+        layer_indices = set()
+        for key in state_dict.keys():
+            if key.startswith('layers.') and '.' in key[7:]:
+                # Extract layer number from 'layers.X.something'
+                layer_idx = key.split('.')[1]
+                if layer_idx.isdigit():
+                    layer_indices.add(int(layer_idx))
+        
+        num_layers = len(layer_indices) if layer_indices else 6  # Fallback to 6
+        
+        # Detect nhead
+        if d_model <= 64:
+            nhead = 4
+        elif d_model <= 128:
+            nhead = 8
+        else:
+            nhead = 8
         
         print(f"   Detected architecture:")
         print(f"   - d_model: {d_model}")
@@ -96,14 +146,15 @@ class FixedVisualizer:
         print(f"   - nhead: {nhead}")
         print(f"   - dim_ff: {d_model * 4}")
         
-        # Create model
-        model = SimpleStableTransformer(
+        # Create model with CORRECT architecture
+        model = MicrolensingTransformer(
             n_points=1500,
             d_model=d_model,
             nhead=nhead,
             num_layers=num_layers,
-            dim_ff=d_model * 4,
-            dropout=0.2
+            dim_feedforward=d_model * 4,
+            dropout=0.1,
+            pad_value=-1.0
         )
         
         # Load weights
@@ -133,13 +184,9 @@ class FixedVisualizer:
             if 'meta_json' in data:
                 meta_raw = data['meta_json']
                 
-                # Handle different metadata formats
-                if meta_raw.ndim == 0:  # Scalar
-                    print("   ⚠️  Metadata is scalar, skipping")
-                elif len(meta_raw) == 0:  # Empty
-                    print("   ⚠️  Metadata is empty, skipping")
+                if meta_raw.ndim == 0 or len(meta_raw) == 0:
+                    print("   ⚠️  Metadata unavailable")
                 else:
-                    # Try to parse JSON
                     meta = []
                     for m in meta_raw:
                         try:
@@ -154,7 +201,6 @@ class FixedVisualizer:
                         print(f"   ✓ Loaded metadata for {len(meta)} events")
                     else:
                         meta = None
-                        print("   ⚠️  Metadata parse failed, skipping u₀ analysis")
         except Exception as e:
             print(f"   ⚠️  Error loading metadata: {e}")
             meta = None
@@ -182,16 +228,16 @@ class FixedVisualizer:
         batch_size = 128 if self.device.type == 'cuda' else 32
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(self.X), batch_size), desc="   Predicting"):
+            for i in tqdm(range(0, len(self.X_norm), batch_size), desc="   Predicting"):
                 # Get batch
-                batch_end = min(i + batch_size, len(self.X))
-                x_batch = torch.tensor(self.X[i:batch_end], dtype=torch.float32)
+                batch_end = min(i + batch_size, len(self.X_norm))
+                x_batch = torch.tensor(self.X_norm[i:batch_end], dtype=torch.float32)
                 x_batch = x_batch.to(self.device)
                 
                 # Forward pass
-                output = self.model(x_batch, return_all_timesteps=False)
+                output = self.model(x_batch, return_all=False)
                 logits = output['binary']
-                probs = torch.softmax(logits, dim=1)
+                probs = F.softmax(logits, dim=1)
                 
                 # Get predictions and confidence
                 preds = probs.argmax(dim=1).cpu().numpy()
@@ -273,7 +319,7 @@ class FixedVisualizer:
         fig, axes = plt.subplots(3, 3, figsize=(15, 10))
         axes = axes.flatten()
         
-        # Plot correct
+        # Plot correct (top 2 rows)
         n_correct = min(6, len(correct_high))
         for i in range(n_correct):
             idx = correct_high[i]
@@ -284,9 +330,9 @@ class FixedVisualizer:
                         color='green', fontweight='bold', fontsize=10)
             ax.grid(True, alpha=0.3)
             ax.set_xlabel('Time', fontsize=8)
-            ax.set_ylabel('Norm. Flux', fontsize=8)
+            ax.set_ylabel('Flux', fontsize=8)
         
-        # Plot incorrect
+        # Plot incorrect (bottom row)
         n_incorrect = min(3, len(incorrect_high))
         for i in range(n_incorrect):
             idx = incorrect_high[i]
@@ -298,7 +344,7 @@ class FixedVisualizer:
                         color='red', fontweight='bold', fontsize=9)
             ax.grid(True, alpha=0.3)
             ax.set_xlabel('Time', fontsize=8)
-            ax.set_ylabel('Norm. Flux', fontsize=8)
+            ax.set_ylabel('Flux', fontsize=8)
         
         # Hide unused
         for i in range(n_correct + n_incorrect, 9):
@@ -477,7 +523,7 @@ class FixedVisualizer:
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='Fixed visualization script')
+    parser = argparse.ArgumentParser(description='Visualize confident predictions')
     parser.add_argument('--model_path', type=str, required=True,
                        help='Path to model checkpoint')
     parser.add_argument('--data_path', type=str, required=True,
@@ -485,7 +531,7 @@ def main():
     parser.add_argument('--output_dir', type=str, default='./figures',
                        help='Output directory for figures')
     parser.add_argument('--max_samples', type=int, default=None,
-                       help='Max samples to use (None = all, useful for quick testing)')
+                       help='Max samples to use (None = all)')
     parser.add_argument('--no_cuda', action='store_true',
                        help='Disable CUDA even if available')
     
