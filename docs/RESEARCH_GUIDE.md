@@ -1,5 +1,7 @@
 # Research Guide - Systematic Benchmarking Methodology
 
+**Version 2.0 - Updated for Simplified Workflow**
+
 Complete experimental workflow for thesis research.
 
 ---
@@ -100,42 +102,42 @@ Observational:
   Points: 1500 per light curve
 ```
 
-**Commands**:
+**Commands** (3 steps):
 ```bash
 cd code
 
-# Generate
+# 1. Generate
 python simulate.py \
     --n_pspl 500000 --n_binary 500000 \
     --output ../data/raw/baseline_1M.npz \
     --binary_params baseline \
+    --save_params \
     --seed 42
 
-# Train
+# 2. Train
 python train.py \
     --data ../data/raw/baseline_1M.npz \
     --experiment_name baseline \
     --epochs 50
 
-# Evaluate
-python evaluate.py \
+# 3. Evaluate (includes u0 analysis automatically!)
+python ../evaluate.py \
     --experiment_name baseline \
-    --data ../data/raw/baseline_1M.npz \
-    --early_detection
+    --data ../data/raw/baseline_1M.npz
 ```
 
 **Expected Results**:
 - Test Accuracy: 70-75%
 - ROC AUC: 0.78-0.82
-- Early detection (50% observed): 68-72%
+- u0 dependency: Clear drop at u₀ > 0.3
 
 ---
 
-### Systematic Experiments
+## Systematic Experiments
 
 After baseline, run these experiments:
 
-#### 1. Cadence Experiments
+### 1. Cadence Experiments
 
 **Purpose**: Quantify impact of observation frequency
 
@@ -152,17 +154,23 @@ After baseline, run these experiments:
 ```bash
 for cadence in 0.05 0.20 0.30 0.40; do
     name=$(echo $cadence | sed 's/0\.//')
+    
+    # Generate
     python simulate.py --n_pspl 100000 --n_binary 100000 \
         --output ../data/raw/cadence_${name}.npz \
-        --cadence_mask_prob $cadence --seed 42
+        --cadence_mask_prob $cadence --save_params --seed 42
+    
+    # Train
     python train.py --data ../data/raw/cadence_${name}.npz \
         --experiment_name cadence_${name} --epochs 50
-    python evaluate.py --experiment_name cadence_${name} \
-        --data ../data/raw/cadence_${name}.npz --early_detection
+    
+    # Evaluate (u0 analysis automatic)
+    python ../evaluate.py --experiment_name cadence_${name} \
+        --data ../data/raw/cadence_${name}.npz
 done
 ```
 
-#### 2. Photometric Error Experiments
+### 2. Photometric Error Experiments
 
 **Purpose**: Test robustness to measurement precision
 
@@ -180,17 +188,20 @@ done
 ```bash
 for error in 0.05 0.10 0.20; do
     name=$(echo $error | sed 's/0\.//')
+    
     python simulate.py --n_pspl 100000 --n_binary 100000 \
         --output ../data/raw/error_${name}.npz \
-        --mag_error_std $error --seed 42
+        --mag_error_std $error --save_params --seed 42
+    
     python train.py --data ../data/raw/error_${name}.npz \
         --experiment_name error_${name} --epochs 50
-    python evaluate.py --experiment_name error_${name} \
-        --data ../data/raw/error_${name}.npz --early_detection
+    
+    python ../evaluate.py --experiment_name error_${name} \
+        --data ../data/raw/error_${name}.npz
 done
 ```
 
-#### 3. Binary Topology Experiments
+### 3. Binary Topology Experiments
 
 **Purpose**: Test performance across different caustic structures
 
@@ -202,38 +213,24 @@ done
 
 **Scientific Question**: Can we identify the physical detection limit (u₀ threshold)?
 
-**Key Analysis**: Plot accuracy vs. u₀ in bins. Expect performance drop at u₀ > 0.3.
+**Key Analysis**: u0 dependency plots (automatically generated) will show performance drop at u₀ > 0.3.
 
 **Commands**:
 ```bash
 for topo in distinct planetary stellar; do
     python simulate.py --n_pspl 100000 --n_binary 100000 \
         --output ../data/raw/${topo}.npz \
-        --binary_params ${topo} --seed 42
+        --binary_params ${topo} --save_params --seed 42
+    
     python train.py --data ../data/raw/${topo}.npz \
         --experiment_name ${topo} --epochs 50
-    python evaluate.py --experiment_name ${topo} \
-        --data ../data/raw/${topo}.npz --early_detection
+    
+    python ../evaluate.py --experiment_name ${topo} \
+        --data ../data/raw/${topo}.npz
 done
 ```
 
-#### 4. Early Detection Analysis
-
-**Purpose**: Test real-time classification capability
-
-Evaluate model performance with 10%, 25%, 50%, 67%, 83%, 100% of observations.
-
-**Scientific Question**: At what fraction can we trigger follow-up observations?
-
-**Expected Results**:
-```
-10% observed:  50-55% accuracy (too early)
-25% observed:  60-65% accuracy (marginal)
-50% observed:  68-72% accuracy (acceptable for high-priority targets)
-100% observed: 70-75% accuracy (baseline)
-```
-
-**Enabled automatically**: Use `--early_detection` flag in evaluate.py
+**Expected Finding**: Clear accuracy drop at u₀ > 0.3, proving this is a physical (not algorithmic) limit.
 
 ---
 
@@ -248,21 +245,28 @@ import json
 from pathlib import Path
 
 experiments = [
-    'baseline', 'cadence_dense', 'cadence_sparse', 
-    'error_low', 'error_high', 'distinct', 'planetary', 'stellar'
+    'baseline', 'cadence_05', 'cadence_20', 'cadence_30', 'cadence_40',
+    'error_05', 'error_10', 'error_20', 
+    'distinct', 'planetary', 'stellar'
 ]
 
-print(f'{'Experiment':<20} {'Test Acc':<12} {'ROC AUC':<10}')
-print('-' * 45)
+print(f'{'Experiment':<20} {'Test Acc':<12} {'ROC AUC':<10} {'u0 < 0.3':<10}')
+print('-' * 60)
 
 for exp in experiments:
     runs = sorted(Path('results').glob(f'{exp}_*'))
     if runs:
-        summary = runs[-1] / 'summary.json'
-        if summary.exists():
-            data = json.load(open(summary))
-            acc = data.get('final_test_acc', 0) * 100
-            print(f'{exp:<20} {acc:>10.2f}%')
+        eval_file = runs[-1] / 'evaluation' / 'evaluation_summary.json'
+        if eval_file.exists():
+            data = json.load(open(eval_file))
+            acc = data.get('metrics', {}).get('accuracy', 0) * 100
+            auc = data.get('metrics', {}).get('roc_auc', 0)
+            
+            # Check for u0 analysis
+            u0_available = data.get('has_u0_analysis', False)
+            u0_str = '✓' if u0_available else '✗'
+            
+            print(f'{exp:<20} {acc:>10.2f}%  {auc:>8.3f}  {u0_str:>8}')
 " > results_summary.txt
 
 cat results_summary.txt
@@ -283,9 +287,10 @@ for cad in cadences:
     exp = f'cadence_{cad:02d}'
     runs = sorted(Path('results').glob(f'{exp}_*'))
     if runs:
-        with open(runs[-1] / 'summary.json') as f:
+        eval_file = runs[-1] / 'evaluation' / 'evaluation_summary.json'
+        with open(eval_file) as f:
             data = json.load(f)
-        accuracies.append(data['final_test_acc'] * 100)
+        accuracies.append(data['metrics']['accuracy'] * 100)
 
 plt.figure(figsize=(10, 6))
 plt.plot(cadences, accuracies, 'o-', linewidth=2.5, markersize=10)
@@ -296,59 +301,32 @@ plt.grid(alpha=0.3)
 plt.savefig('figures/cadence_comparison.png', dpi=300, bbox_inches='tight')
 ```
 
-**Error Analysis**:
-```python
-errors = [0.05, 0.10, 0.20]
-accuracies = []
-
-for err in errors:
-    exp = f'error_{int(err*100):02d}'
-    runs = sorted(Path('results').glob(f'{exp}_*'))
-    if runs:
-        with open(runs[-1] / 'summary.json') as f:
-            data = json.load(f)
-        accuracies.append(data['final_test_acc'] * 100)
-
-plt.figure(figsize=(10, 6))
-plt.plot(errors, accuracies, 'o-', linewidth=2.5, markersize=10, color='red')
-plt.xlabel('Photometric Error (mag)', fontsize=12)
-plt.ylabel('Test Accuracy (%)', fontsize=12)
-plt.title('Performance vs. Photometric Quality', fontsize=14, fontweight='bold')
-plt.grid(alpha=0.3)
-plt.savefig('figures/error_comparison.png', dpi=300, bbox_inches='tight')
-```
-
 ### 3. Physical Interpretation
 
-**u₀ Dependency Analysis**:
+**u0 Dependency Analysis**:
 
-Extract binary event metadata and plot accuracy vs. u₀:
+The evaluation script now automatically generates `u0_dependency.png` for each experiment (if parameter data exists). This shows:
 
+- Accuracy as function of impact parameter u₀
+- Event distribution by u₀
+- Physical limit line at u₀ = 0.3
+
+**To extract u0 threshold data**:
 ```python
-import numpy as np
+import json
+from pathlib import Path
 
-# Load baseline results with metadata
-# Bin events by u0
-u0_bins = np.linspace(0, 1, 11)
-accuracies_by_u0 = []
+exp_dir = Path('results/baseline_TIMESTAMP')
+u0_report = exp_dir / 'evaluation' / 'u0_report.json'
 
-for i in range(len(u0_bins)-1):
-    u0_low, u0_high = u0_bins[i], u0_bins[i+1]
-    # Filter events in this bin
-    # Calculate accuracy for this subset
-    # ...
-
-plt.figure(figsize=(10, 6))
-plt.plot(u0_bin_centers, accuracies_by_u0, 'o-', linewidth=2.5)
-plt.axvline(x=0.3, color='red', linestyle='--', label='Physical limit (u₀ = 0.3)')
-plt.xlabel('Impact Parameter u₀', fontsize=12)
-plt.ylabel('Classification Accuracy (%)', fontsize=12)
-plt.title('Accuracy vs. Impact Parameter', fontsize=14, fontweight='bold')
-plt.legend()
-plt.savefig('figures/u0_dependency.png', dpi=300, bbox_inches='tight')
+if u0_report.exists():
+    with open(u0_report) as f:
+        data = json.load(f)
+    
+    print(f"Accuracy at u0=0.3: {data['accuracy_at_threshold']*100:.1f}%")
+    print(f"Events below threshold: {data['events_below_threshold']}")
+    print(f"Events above threshold: {data['events_above_threshold']}")
 ```
-
-**Expected Finding**: Clear performance drop at u₀ > 0.3, demonstrating fundamental physical limit.
 
 ---
 
@@ -362,9 +340,14 @@ Report:
 - Training/validation/test accuracy
 - ROC curve and AUC
 - Confusion matrix
-- Sample predictions (6-12 examples)
+- Confidence distribution
 
 **Key Message**: Demonstrate ~70-75% accuracy across realistic parameter distributions.
+
+**Figures Available**:
+- `roc_curve.png`
+- `confusion_matrix.png`
+- `confidence_distribution.png`
 
 #### 4.2 Observational Dependence
 
@@ -385,18 +368,17 @@ Report:
 - Planetary: 70-80% accuracy
 - Stellar: 60-75% accuracy
 
-**u₀ Dependency**:
-- Plot accuracy vs. impact parameter
+**u0 Dependency**:
+- Use automatically generated `u0_dependency.png` from each experiment
 - Demonstrate performance drop at u₀ > 0.3
 - Conclusion: "~20% of binary events fundamentally indistinguishable due to large impact parameter"
 
-#### 4.4 Early Detection Capability
+**Figures Available**:
+- `u0_dependency.png` (automatically generated)
+- Shows accuracy vs. u₀ with threshold line
+- Includes event distribution histogram
 
-- Plot: Accuracy vs. observation completeness
-- Finding: "50% of observations sufficient for ~70% accuracy"
-- Application: "Enable follow-up trigger decisions hours to days earlier than traditional fitting"
-
-#### 4.5 Real-Time Performance
+#### 4.4 Real-Time Performance
 
 - Inference latency: <1 ms per event
 - Throughput: 10,000+ events/second on single GPU
@@ -429,22 +411,23 @@ Your thesis will provide:
 - Environment setup
 - Generate baseline dataset (1M events)
 - Train baseline model
-- Full evaluation
+- Full evaluation (automatic u0 analysis)
 
 ### Phase 2: Systematic Experiments (Weeks 3-6)
 - Cadence experiments (4 configs)
 - Error experiments (3 configs)
 - Topology experiments (4 configs)
+- **Note**: Each experiment is 3 commands (Generate → Train → Evaluate)
 
 ### Phase 3: Analysis (Weeks 7-8)
 - Generate all comparison plots
-- u₀ dependency analysis
+- u0 dependency analysis (already done automatically!)
 - Statistical significance tests
 - Physical interpretation
 
 ### Phase 4: Writing (Weeks 9-12)
 - Introduction & Methods
-- Results chapter (figures & analysis)
+- Results chapter (figures auto-generated)
 - Discussion (physical interpretation)
 - Conclusions & future work
 
@@ -452,23 +435,24 @@ Your thesis will provide:
 
 ## Key Metrics to Report
 
-For each experiment:
+For each experiment, the evaluation script automatically provides:
 
-1. **Classification Metrics**:
+1. **Classification Metrics** (in `evaluation_summary.json`):
    - Accuracy, Precision, Recall, F1
    - ROC AUC
    - Confusion matrix
 
-2. **Early Detection**:
-   - Accuracy at 25%, 50%, 75% observation completeness
+2. **u0 Analysis** (in `u0_report.json`, if parameters available):
+   - Accuracy at threshold (u₀ = 0.3)
+   - Events below/above threshold
+   - Per-bin accuracies
+   - Full u0 distribution
 
-3. **Decision Time**:
-   - Average timesteps to confident classification
-   - Distribution of decision times
-
-4. **Real-Time Performance**:
-   - Inference latency (ms)
-   - Throughput (events/sec)
+3. **Visualizations**:
+   - ROC curve
+   - Confusion matrix
+   - Confidence distribution
+   - u0 dependency (if available)
 
 ---
 
@@ -478,17 +462,25 @@ For comparing experiments:
 
 ```python
 from scipy.stats import ttest_ind
+import json
+from pathlib import Path
 
-# Load predictions from two experiments
-acc1 = load_accuracies('baseline')
-acc2 = load_accuracies('cadence_dense')
+# Load accuracies from two experiments
+def load_accuracy(exp_name):
+    runs = sorted(Path('results').glob(f'{exp_name}_*'))
+    if runs:
+        eval_file = runs[-1] / 'evaluation' / 'evaluation_summary.json'
+        with open(eval_file) as f:
+            return json.load(f)['metrics']['accuracy']
+    return None
 
-# T-test
-t_stat, p_value = ttest_ind(acc1, acc2)
+acc1 = load_accuracy('baseline')
+acc2 = load_accuracy('cadence_05')
 
-print(f"Cadence improvement: {(acc2.mean() - acc1.mean())*100:.2f}%")
-print(f"p-value: {p_value:.4f}")
-print(f"Significant: {'Yes' if p_value < 0.05 else 'No'}")
+print(f"Baseline: {acc1*100:.2f}%")
+print(f"Dense cadence: {acc2*100:.2f}%")
+print(f"Difference: {(acc2-acc1)*100:.2f}%")
+print(f"Improvement: {((acc2-acc1)/acc1)*100:.1f}%")
 ```
 
 Report p-values for all comparisons in thesis.
@@ -519,14 +511,46 @@ Based on results, provide concrete guidance:
 All results are fully reproducible:
 
 1. **Fixed seeds**: Random seeds set in config.py
-2. **Saved configurations**: All parameters logged
-3. **Saved scalers**: Normalization preserved
+2. **Saved configurations**: All parameters logged in config.json
+3. **Saved normalizers**: Normalization preserved in normalizer.pkl
 4. **Exact versions**: requirements.txt pins all dependencies
+5. **Complete logs**: All evaluation outputs saved
 
 To reproduce: Use commands exactly as specified above with same data paths.
 
 ---
 
-You now have a complete experimental plan for your thesis! 🔬🔭
+## What's New in Version 2.0
+
+### Simplified Workflow
+
+**Old** (4 commands per experiment):
+1. Generate data
+2. Train model
+3. Evaluate model
+4. Analyze u0 dependency
+
+**New** (3 commands per experiment):
+1. Generate data (with `--save_params`)
+2. Train model
+3. Evaluate model (u0 analysis automatic!)
+
+### Benefits
+
+- ✅ Fewer commands to remember
+- ✅ u0 analysis always runs when it should
+- ✅ All outputs in one directory
+- ✅ Consistent workflow across all experiments
+
+### Important Notes
+
+- **Always use `--save_params`** when generating data for u0 analysis
+- u0 analysis runs automatically if parameters are available
+- Use `--no_u0` flag to skip u0 analysis if needed
+- All outputs now in `results/experiment_NAME/evaluation/`
+
+---
+
+You now have a complete, updated experimental plan for your thesis! 🔬🔭
 
 Follow this guide systematically, and you'll produce publication-quality results.

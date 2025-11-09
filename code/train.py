@@ -511,6 +511,12 @@ def main():
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
+        
+        import pickle
+        normalizer_path = exp_dir / 'normalizer.pkl'
+        with open(normalizer_path, 'wb') as f:
+            pickle.dump(normalizer, f)
+        print(f"💾 Normalizer saved to: {normalizer_path}")
     
     # Synchronize all processes
     if world_size > 1:

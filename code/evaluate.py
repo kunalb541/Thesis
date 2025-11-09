@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Comprehensive Model Evaluation with All Visualizations
-======================================================
-- Evaluates model performance
-- Generates ALL thesis figures in one run
-- Uses scatter plots (realistic observations)
-- Hides masked/padded data
-- Creates 12×12 example grids
-- DDP-compatible
+Comprehensive Model Evaluation + u0 Analysis
+============================================
+Combined script for complete model evaluation including:
+- Classification metrics (accuracy, precision, recall, F1, ROC-AUC)
+- Visualizations (ROC curve, confusion matrix, confidence distribution)
+- u0 dependency analysis (if parameter data available)
+- Early detection analysis (optional)
 
 Author: Kunal Bhatia
-Date: November 2025
+Version: 9.0 - Combined Evaluation + u0 Analysis
 """
 
 import torch
@@ -22,17 +21,17 @@ import seaborn as sns
 from pathlib import Path
 import json
 import argparse
+import pickle
 from tqdm import tqdm
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, roc_curve, confusion_matrix
 )
-from scipy.signal import find_peaks
-import sys
 
-# Add code directory to path
-sys.path.insert(0, '/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/code')
-from transformer import MicrolensingTransformer
+# Import from local code directory
+import sys
+sys.path.insert(0, 'code')
+from transformer import MicrolensingTransformer, count_parameters
 
 # Set plotting style
 plt.style.use('seaborn-v0_8-paper')
@@ -41,52 +40,18 @@ plt.rcParams['figure.dpi'] = 300
 plt.rcParams['font.size'] = 10
 
 
-class StableNormalizer:
-    """Robust normalizer matching training"""
-    
-    def __init__(self, pad_value=-1.0):
-        self.pad_value = pad_value
-        self.mean = 0.0
-        self.std = 1.0
-    
-    def fit(self, X):
-        valid_mask = (X != self.pad_value) & np.isfinite(X)
-        
-        if valid_mask.any():
-            valid_values = X[valid_mask]
-            self.mean = np.median(valid_values)
-            self.std = np.median(np.abs(valid_values - self.mean))
-            
-            if self.std < 1e-8:
-                self.std = 1.0
-            
-            self.mean = np.clip(self.mean, -100, 100)
-            self.std = np.clip(self.std, 0.01, 100)
-        
-        return self
-    
-    def transform(self, X):
-        X_norm = X.copy()
-        valid_mask = (X != self.pad_value) & np.isfinite(X)
-        
-        if valid_mask.any():
-            X_norm[valid_mask] = (X[valid_mask] - self.mean) / self.std
-            X_norm[valid_mask] = np.clip(X_norm[valid_mask], -10, 10)
-        
-        return np.nan_to_num(X_norm, nan=0.0, posinf=10.0, neginf=-10.0)
-
-
 class ComprehensiveEvaluator:
-    """Complete evaluation with all visualizations"""
+    """Complete evaluation with all visualizations and u0 analysis"""
     
-    def __init__(self, model_path, data_path, output_dir, device='cuda', batch_size=128):
+    def __init__(self, model_path, normalizer_path, data_path, output_dir, 
+                 device='cuda', batch_size=128):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.batch_size = batch_size
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n{'='*70}")
-        print(f"COMPREHENSIVE MODEL EVALUATION")
+        print(f"COMPREHENSIVE MODEL EVALUATION + u0 ANALYSIS")
         print(f"{'='*70}")
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
@@ -98,14 +63,18 @@ class ComprehensiveEvaluator:
         self.model.eval()
         print("✅ Model loaded successfully!")
         
+        # Load normalizer
+        print("\n📊 Loading normalizer...")
+        self.normalizer = self._load_normalizer(normalizer_path)
+        print("✅ Normalizer loaded successfully!")
+        
         # Load data
         print("\n📊 Loading data...")
-        self.X, self.y = self._load_data(data_path)
+        self.X, self.y, self.params = self._load_data(data_path)
         
         # Normalize
         print("\n🔄 Normalizing data...")
-        self.normalizer = StableNormalizer(pad_value=-1.0)
-        self.X_norm = self.normalizer.fit(self.X).transform(self.X)
+        self.X_norm = self.normalizer.transform(self.X)
         
         # Get predictions
         print(f"\n🔮 Getting predictions...")
@@ -117,53 +86,66 @@ class ComprehensiveEvaluator:
         self._print_summary()
     
     def _load_model(self, model_path):
-        """Load model with auto-detected architecture"""
+        """Load model with correct architecture from checkpoint"""
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-        state_dict = checkpoint['model_state_dict']
         
-        # Detect architecture
-        if 'pos_encoding' in state_dict:
-            d_model = state_dict['pos_encoding'].shape[2]
-        elif 'input_embed.4.weight' in state_dict:
-            d_model = state_dict['input_embed.4.weight'].shape[0]
+        # Load config from same directory
+        config_path = Path(model_path).parent / 'config.json'
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+            
+            d_model = config.get('d_model', 256)
+            nhead = config.get('nhead', 8)
+            num_layers = config.get('num_layers', 6)
+            dropout = config.get('dropout', 0.1)
+            
+            print(f"   Using config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
         else:
+            print("   Warning: config.json not found, using defaults")
             d_model = 256
-        
-        # Count layers
-        layer_indices = set()
-        for key in state_dict.keys():
-            if key.startswith('layers.'):
-                layer_idx = key.split('.')[1]
-                if layer_idx.isdigit():
-                    layer_indices.add(int(layer_idx))
-        
-        num_layers = len(layer_indices) if layer_indices else 6
-        
-        # Detect nhead
-        if d_model <= 64:
-            nhead = 4
-        elif d_model <= 128:
             nhead = 8
-        else:
-            nhead = 8
+            num_layers = 6
+            dropout = 0.1
         
-        print(f"   Architecture: d_model={d_model}, num_layers={num_layers}, nhead={nhead}")
-        
+        # Create model
         model = MicrolensingTransformer(
             n_points=1500,
             d_model=d_model,
             nhead=nhead,
             num_layers=num_layers,
             dim_feedforward=d_model * 4,
-            dropout=0.1,
+            dropout=dropout,
             pad_value=-1.0
         )
         
+        # Load state dict (handle DDP wrapping)
+        state_dict = checkpoint['model_state_dict']
+        if any(key.startswith('module.') for key in state_dict.keys()):
+            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        
         model.load_state_dict(state_dict)
+        print(f"   Parameters: {count_parameters(model):,}")
+        
         return model
     
+    def _load_normalizer(self, normalizer_path):
+        """Load normalizer saved during training"""
+        normalizer_path = Path(normalizer_path)
+        
+        if not normalizer_path.exists():
+            print(f"   Warning: Normalizer not found, creating default")
+            from train import StableNormalizer
+            return StableNormalizer(pad_value=-1.0)
+        
+        with open(normalizer_path, 'rb') as f:
+            normalizer = pickle.load(f)
+        
+        print(f"   Loaded: mean={normalizer.mean:.3f}, std={normalizer.std:.3f}")
+        return normalizer
+    
     def _load_data(self, data_path):
-        """Load test data"""
+        """Load test data and parameters"""
         data = np.load(data_path)
         X = data['X']
         y = data['y']
@@ -171,11 +153,24 @@ class ComprehensiveEvaluator:
         if X.ndim == 3:
             X = X.squeeze(1)
         
-        print(f"   Loaded {len(X)} events")
+        print(f"   Events: {len(X)}")
         print(f"   Binary: {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
         print(f"   PSPL:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
         
-        return X, y
+        # Load parameters if available (for u0 analysis)
+        params = None
+        if 'params_binary_json' in data:
+            params_binary = json.loads(str(data['params_binary_json']))
+            if 'params_pspl_json' in data:
+                params_pspl = json.loads(str(data['params_pspl_json']))
+                params = {'binary': params_binary, 'pspl': params_pspl}
+            else:
+                params = {'binary': params_binary}
+            print("   ✅ Parameter data found (u0 analysis enabled)")
+        else:
+            print("   ⚠️  No parameter data (u0 analysis disabled)")
+        
+        return X, y, params
     
     def _get_predictions(self):
         """Get model predictions"""
@@ -203,8 +198,6 @@ class ComprehensiveEvaluator:
     
     def _compute_metrics(self):
         """Compute all metrics"""
-        correct = self.predictions == self.y
-        
         tp = ((self.y == 1) & (self.predictions == 1)).sum()
         tn = ((self.y == 0) & (self.predictions == 0)).sum()
         fp = ((self.y == 0) & (self.predictions == 1)).sum()
@@ -273,7 +266,6 @@ class ComprehensiveEvaluator:
         ax.set_ylabel('True label', fontsize=12, fontweight='bold')
         ax.set_title('Confusion Matrix', fontsize=14, fontweight='bold')
         
-        # Add text annotations
         for i in range(2):
             for j in range(2):
                 text = ax.text(j, i, cm[i, j], ha="center", va="center",
@@ -293,7 +285,6 @@ class ComprehensiveEvaluator:
         
         fig, ax = plt.subplots(figsize=(12, 6))
         
-        # Plot correct vs incorrect
         bins = np.linspace(0.5, 1.0, 50)
         ax.hist(self.confidences[correct], bins=bins, alpha=0.7, color='green',
                label=f'Correct (n={correct.sum()})', edgecolor='black')
@@ -311,281 +302,123 @@ class ComprehensiveEvaluator:
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
-    def plot_calibration_curve(self):
-        """Plot calibration curve"""
-        correct = self.predictions == self.y
+    # ========== u0 ANALYSIS METHODS ==========
+    
+    def analyze_u0_dependency(self, n_bins=10, threshold=0.3):
+        """Analyze accuracy as function of u0"""
+        if self.params is None:
+            print("\n⚠️  Skipping u0 analysis (no parameter data)")
+            return None
         
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        print(f"\n{'='*70}")
+        print("u0 DEPENDENCY ANALYSIS")
+        print(f"{'='*70}")
         
-        # Calibration curve
-        ax = axes[0]
-        conf_bins = np.linspace(0.5, 1.0, 11)
-        accuracies, bin_centers, counts = [], [], []
+        binary_params = self.params['binary']
+        binary_mask = self.y == 1
         
-        for i in range(len(conf_bins)-1):
-            mask = (self.confidences >= conf_bins[i]) & (self.confidences < conf_bins[i+1])
-            if mask.sum() > 0:
-                accuracies.append(correct[mask].mean())
-                bin_centers.append((conf_bins[i] + conf_bins[i+1]) / 2)
-                counts.append(mask.sum())
+        # Get u0 values
+        u0_values = np.array([p['u0'] for p in binary_params])
         
-        if len(bin_centers) > 0:
-            bars = ax.bar(bin_centers, accuracies, width=0.04, alpha=0.7, edgecolor='black', linewidth=1.5)
-            for bar, cnt in zip(bars, counts):
-                bar.set_facecolor(plt.cm.Blues(0.3 + 0.7 * cnt / max(counts)))
+        # Bin by u0
+        u0_bins = np.linspace(u0_values.min(), u0_values.max(), n_bins + 1)
+        u0_centers = (u0_bins[:-1] + u0_bins[1:]) / 2
+        
+        accuracies = []
+        counts = []
+        
+        for i in range(n_bins):
+            u0_low, u0_high = u0_bins[i], u0_bins[i+1]
+            in_bin = (u0_values >= u0_low) & (u0_values < u0_high)
             
-            for bc, acc, cnt in zip(bin_centers, accuracies, counts):
-                ax.text(bc, acc + 0.02, f'n={cnt}', ha='center', fontsize=7)
+            if in_bin.sum() > 0:
+                bin_true = self.y[binary_mask][in_bin]
+                bin_pred = self.predictions[binary_mask][in_bin]
+                acc = accuracy_score(bin_true, bin_pred)
+                accuracies.append(acc)
+                counts.append(in_bin.sum())
+            else:
+                accuracies.append(np.nan)
+                counts.append(0)
         
-        ax.plot([0.5, 1.0], [0.5, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect Calibration')
-        ax.set_xlabel('Confidence Score', fontsize=11, fontweight='bold')
-        ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
-        ax.set_title('Model Calibration', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim([0.4, 1.05])
+        # Find accuracy at threshold
+        threshold_idx = np.argmin(np.abs(u0_centers - threshold))
+        acc_at_threshold = accuracies[threshold_idx] if not np.isnan(accuracies[threshold_idx]) else None
         
-        # Scatter plot
-        ax = axes[1]
-        n_plot = min(5000, len(correct))
-        idx = np.random.choice(len(correct), n_plot, replace=False)
-        jitter = np.random.normal(0, 0.01, size=n_plot)
+        # Count events
+        n_below = (u0_values < threshold).sum()
+        n_above = (u0_values >= threshold).sum()
         
-        ax.scatter(self.confidences[idx][correct[idx]] + jitter[correct[idx]],
-                  correct[idx][correct[idx]],
-                  alpha=0.3, s=5, color='green', label='Correct')
-        ax.scatter(self.confidences[idx][~correct[idx]] + jitter[~correct[idx]],
-                  correct[idx][~correct[idx]],
-                  alpha=0.3, s=5, color='red', label='Incorrect')
+        print(f"Physical Detection Threshold: u₀ = {threshold}")
+        print(f"Accuracy at threshold: {acc_at_threshold*100:.2f}%" if acc_at_threshold else "N/A")
+        print(f"\nEvent Distribution:")
+        print(f"  Below threshold (u₀ < {threshold}): {n_below} ({n_below/len(u0_values)*100:.1f}%)")
+        print(f"  Above threshold (u₀ ≥ {threshold}): {n_above} ({n_above/len(u0_values)*100:.1f}%)")
         
-        ax.set_xlabel('Confidence Score', fontsize=11, fontweight='bold')
-        ax.set_ylabel('Correctness')
-        ax.set_title('Confidence vs Correctness', fontweight='bold')
-        ax.set_yticks([0, 1])
-        ax.set_yticklabels(['Wrong', 'Correct'])
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        return {
+            'u0_bins': u0_bins.tolist(),
+            'u0_centers': u0_centers.tolist(),
+            'accuracies': accuracies,
+            'counts': counts,
+            'all_u0': u0_values.tolist(),
+            'threshold': threshold,
+            'accuracy_at_threshold': float(acc_at_threshold) if acc_at_threshold else None,
+            'events_below_threshold': int(n_below),
+            'events_above_threshold': int(n_above)
+        }
+    
+    def plot_u0_dependency(self, u0_results, threshold=0.3):
+        """Plot accuracy vs u0"""
+        if u0_results is None:
+            return
+        
+        u0_centers = u0_results['u0_centers']
+        accuracies = [a*100 if not np.isnan(a) else None for a in u0_results['accuracies']]
+        counts = u0_results['counts']
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        
+        # Accuracy plot
+        valid_indices = [i for i, a in enumerate(accuracies) if a is not None]
+        valid_u0 = [u0_centers[i] for i in valid_indices]
+        valid_acc = [accuracies[i] for i in valid_indices]
+        
+        ax1.plot(valid_u0, valid_acc, 'o-', linewidth=2.5, markersize=10, color='#2E86AB')
+        ax1.axvline(x=threshold, color='red', linestyle='--', linewidth=2,
+                   label=f'Physical Limit (u₀ = {threshold})')
+        ax1.axhline(y=70, color='gray', linestyle=':', alpha=0.5, label='Target (70%)')
+        
+        ax1.set_ylabel('Classification Accuracy (%)', fontsize=13)
+        ax1.set_title('Binary Classification Accuracy vs. Impact Parameter', 
+                     fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=11)
+        ax1.grid(alpha=0.3)
+        ax1.set_ylim([0, 105])
+        
+        # Add annotations
+        for u, a, c in zip(valid_u0, valid_acc, [counts[i] for i in valid_indices]):
+            ax1.annotate(f'{a:.1f}%\n(n={c})', 
+                        xy=(u, a), xytext=(0, 10), textcoords='offset points',
+                        ha='center', fontsize=8,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        
+        # Count histogram
+        ax2.bar(u0_centers, counts, width=(u0_centers[1]-u0_centers[0])*0.8, 
+               color='#A23B72', alpha=0.7, edgecolor='black')
+        ax2.axvline(x=threshold, color='red', linestyle='--', linewidth=2)
+        ax2.set_xlabel('Impact Parameter u₀', fontsize=13)
+        ax2.set_ylabel('Number of Events', fontsize=13)
+        ax2.set_title('Distribution of Impact Parameters', fontsize=12)
+        ax2.grid(alpha=0.3, axis='y')
         
         plt.tight_layout()
         
-        output_path = self.output_dir / 'calibration.png'
+        output_path = self.output_dir / 'u0_dependency.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
-    def plot_example_grid(self, n_examples=144):
-        """Plot 12×12 grid of examples using scatter plots"""
-        print(f"\n  Generating {n_examples} example plots...")
-        
-        # Get diverse examples
-        correct = self.predictions == self.y
-        binary_pred = self.predictions == 1
-        
-        # 4 categories
-        tp = np.where((self.y == 1) & binary_pred & correct)[0]
-        tn = np.where((self.y == 0) & ~binary_pred & correct)[0]
-        fp = np.where((self.y == 0) & binary_pred & ~correct)[0]
-        fn = np.where((self.y == 1) & ~binary_pred & ~correct)[0]
-        
-        # Select examples
-        n_per_cat = n_examples // 4
-        examples = []
-        
-        for idx_arr, label, color in [
-            (tp, 'TP', 'green'),
-            (tn, 'TN', 'blue'),
-            (fp, 'FP', 'orange'),
-            (fn, 'FN', 'red')
-        ]:
-            if len(idx_arr) > 0:
-                selected = np.random.choice(idx_arr, min(n_per_cat, len(idx_arr)), replace=False)
-                for idx in selected:
-                    examples.append((idx, label, color))
-        
-        # Create 12×12 grid
-        fig, axes = plt.subplots(12, 12, figsize=(30, 30))
-        axes = axes.flatten()
-        
-        for i, (idx, label, color) in enumerate(examples[:144]):
-            ax = axes[i]
-            
-            # Filter masked values
-            light_curve = self.X[idx]
-            valid_mask = light_curve != -1.0
-            times = np.arange(len(light_curve))[valid_mask]
-            fluxes = light_curve[valid_mask]
-            
-            # Scatter plot
-            ax.scatter(times, fluxes, c=color, s=0.5, alpha=0.6)
-            ax.set_title(f'{label} ({self.confidences[idx]:.0%})', fontsize=6, color=color)
-            ax.axis('off')
-        
-        # Hide unused
-        for i in range(len(examples), 144):
-            axes[i].axis('off')
-        
-        plt.suptitle(f'Example Predictions (12×12 Grid)', fontsize=20, fontweight='bold')
-        plt.tight_layout()
-        
-        output_path = self.output_dir / 'example_grid_12x12.png'
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
-        plt.close()
-    
-    def plot_real_time_evolution(self, event_idx=None):
-        """Plot real-time classification evolution (two panels)"""
-        if event_idx is None:
-            # Find a good binary event
-            binary_correct = np.where((self.y == 1) & (self.predictions == 1) & (self.confidences > 0.9))[0]
-            if len(binary_correct) == 0:
-                binary_correct = np.where(self.y == 1)[0]
-            event_idx = binary_correct[0]
-        
-        light_curve = self.X[event_idx]
-        light_curve_norm = self.X_norm[event_idx]
-        true_label = self.y[event_idx]
-        
-        # Sample different completeness levels
-        fractions = np.linspace(0.1, 1.0, 10)
-        binary_probs = []
-        confidences = []
-        
-        with torch.no_grad():
-            for frac in fractions:
-                n_points = int(1500 * frac)
-                partial_curve = np.full(1500, -1.0)
-                partial_curve[:n_points] = light_curve_norm[:n_points]
-                
-                x = torch.tensor([partial_curve], dtype=torch.float32).to(self.device)
-                output = self.model(x, return_all=False)
-                logits = output['binary']
-                probs = F.softmax(logits, dim=1).cpu().numpy()[0]
-                
-                binary_probs.append(probs[1])
-                confidences.append(probs.max())
-        
-        # Create two-panel figure
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-        
-        days = fractions * 1500
-        
-        # Panel 1: Binary probability
-        ax = axes[0]
-        ax.plot(days, binary_probs, 'o-', linewidth=3, markersize=8, color='darkblue', label='Binary Probability')
-        ax.axhline(y=0.5, color='red', linestyle='--', linewidth=2, label='Decision Threshold')
-        ax.axhline(y=0.8, color='orange', linestyle=':', linewidth=2, label='High Confidence')
-        
-        ax.fill_between(days, 0.8, 1.0, alpha=0.2, color='green')
-        ax.fill_between(days, 0.5, 0.8, alpha=0.2, color='yellow')
-        ax.fill_between(days, 0.0, 0.5, alpha=0.2, color='lightblue')
-        
-        true_str = 'Binary' if true_label == 1 else 'Single'
-        ax.set_ylabel('Binary Probability', fontsize=12, fontweight='bold')
-        ax.set_title(f'Real-Time Classification Evolution (True: {true_str})', fontsize=13, fontweight='bold')
-        ax.legend(loc='right', fontsize=9)
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim([-0.05, 1.05])
-        
-        # Annotate key point
-        high_conf = np.where(np.array(binary_probs) > 0.8)[0]
-        if len(high_conf) > 0:
-            first_conf = high_conf[0]
-            ax.annotate(f'First high-confidence\nbinary prediction\n({fractions[first_conf]*100:.0f}% data)',
-                       xy=(days[first_conf], binary_probs[first_conf]),
-                       xytext=(days[first_conf] + 200, 0.9),
-                       fontsize=9,
-                       bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8),
-                       arrowprops=dict(arrowstyle='->', color='green', lw=2))
-        
-        # Panel 2: Overall confidence
-        ax = axes[1]
-        ax.plot(days, confidences, 's-', linewidth=3, markersize=8, color='purple', label='Overall Confidence')
-        ax.axhline(y=0.8, color='orange', linestyle='--', linewidth=2, label='80% Threshold')
-        ax.axhline(y=0.9, color='red', linestyle='--', linewidth=2, label='90% Threshold')
-        
-        ax.set_xlabel('Time Points Observed', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Prediction Confidence', fontsize=12, fontweight='bold')
-        ax.set_title('Confidence Evolution Over Time', fontsize=13, fontweight='bold')
-        ax.legend(loc='lower right', fontsize=9)
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim([0.4, 1.05])
-        
-        plt.tight_layout()
-        
-        output_path = self.output_dir / f'real_time_evolution_event_{event_idx}.png'
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
-        plt.close()
-    
-    def plot_early_detection(self):
-        """Plot early detection performance"""
-        print("\n  Computing early detection performance...")
-        
-        fractions = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
-        overall_accs = []
-        binary_recalls = []
-        
-        for frac in tqdm(fractions, desc="    Testing fractions"):
-            predictions = []
-            
-            with torch.no_grad():
-                for i in range(0, len(self.X_norm), self.batch_size):
-                    batch_end = min(i + self.batch_size, len(self.X_norm))
-                    
-                    # Create partial curves
-                    partial_curves = []
-                    for j in range(i, batch_end):
-                        n_points = int(1500 * frac)
-                        partial_curve = np.full(1500, -1.0)
-                        partial_curve[:n_points] = self.X_norm[j][:n_points]
-                        partial_curves.append(partial_curve)
-                    
-                    x_batch = torch.tensor(partial_curves, dtype=torch.float32).to(self.device)
-                    output = self.model(x_batch, return_all=False)
-                    logits = output['binary']
-                    probs = F.softmax(logits, dim=1).cpu().numpy()
-                    
-                    predictions.extend(probs.argmax(axis=1))
-            
-            predictions = np.array(predictions)
-            overall_accs.append(accuracy_score(self.y, predictions))
-            binary_recalls.append(recall_score(self.y, predictions))
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(12, 7))
-        
-        completeness = [f*100 for f in fractions]
-        
-        ax.plot(completeness, [a*100 for a in overall_accs], 'o-', linewidth=3, markersize=10,
-               color='blue', label='Overall Accuracy')
-        ax.plot(completeness, [r*100 for r in binary_recalls], 's-', linewidth=3, markersize=10,
-               color='red', label='Binary Recall')
-        
-        ax.axhline(y=70, color='gray', linestyle='--', linewidth=1, alpha=0.5, label='70% threshold')
-        ax.axvline(x=50, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='50% observed')
-        
-        # Annotate 50% point
-        idx_50 = fractions.index(0.5)
-        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%',
-                   xy=(50, overall_accs[idx_50]*100),
-                   xytext=(55, overall_accs[idx_50]*100 - 5),
-                   fontsize=10, fontweight='bold')
-        
-        ax.set_xlabel('Observation Completeness (%)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Early Detection Performance', fontsize=14, fontweight='bold')
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim([0, 105])
-        
-        plt.tight_layout()
-        
-        output_path = self.output_dir / 'early_detection.png'
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
-        plt.close()
-    
-    def generate_all_plots(self, include_early_detection=False, n_evolution_examples=3):
+    def generate_all_plots(self, include_u0=True, u0_threshold=0.3, u0_bins=10):
         """Generate all visualizations"""
         print(f"\n{'='*70}")
         print("GENERATING ALL VISUALIZATIONS")
@@ -600,19 +433,18 @@ class ComprehensiveEvaluator:
         print("\n3. Confidence Distribution...")
         self.plot_confidence_distribution()
         
-        print("\n4. Calibration Curve...")
-        self.plot_calibration_curve()
-        
-        print("\n5. 12×12 Example Grid (scatter plots)...")
-        self.plot_example_grid(n_examples=144)
-        
-        print(f"\n6. Real-Time Evolution ({n_evolution_examples} examples)...")
-        for i in range(n_evolution_examples):
-            self.plot_real_time_evolution()
-        
-        if include_early_detection:
-            print("\n7. Early Detection Performance...")
-            self.plot_early_detection()
+        # u0 analysis (if parameters available)
+        if include_u0 and self.params is not None:
+            print("\n4. u0 Dependency Analysis...")
+            u0_results = self.analyze_u0_dependency(n_bins=u0_bins, threshold=u0_threshold)
+            if u0_results:
+                self.plot_u0_dependency(u0_results, threshold=u0_threshold)
+                
+                # Save u0 report
+                u0_report_path = self.output_dir / 'u0_report.json'
+                with open(u0_report_path, 'w') as f:
+                    json.dump(u0_results, f, indent=2)
+                print(f"  ✓ Saved: {u0_report_path.name}")
         
         print(f"\n{'='*70}")
         print(f"✅ ALL VISUALIZATIONS SAVED TO: {self.output_dir}")
@@ -625,9 +457,10 @@ class ComprehensiveEvaluator:
             'n_samples': int(len(self.y)),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
             'high_confidence_95': int((self.confidences >= 0.95).sum()),
+            'has_u0_analysis': self.params is not None
         }
         
-        output_path = self.output_dir / 'results.json'
+        output_path = self.output_dir / 'evaluation_summary.json'
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
         
@@ -635,15 +468,19 @@ class ComprehensiveEvaluator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Comprehensive model evaluation')
+    parser = argparse.ArgumentParser(
+        description='Comprehensive model evaluation with optional u0 analysis'
+    )
     parser.add_argument('--experiment_name', type=str, required=True,
                        help='Experiment name (will find latest matching dir)')
     parser.add_argument('--data', type=str, required=True,
                        help='Path to test data (.npz)')
-    parser.add_argument('--early_detection', action='store_true',
-                       help='Include early detection analysis (slower)')
-    parser.add_argument('--n_evolution_examples', type=int, default=3,
-                       help='Number of real-time evolution examples to generate')
+    parser.add_argument('--u0_threshold', type=float, default=0.3,
+                       help='Physical limit threshold for u0 analysis')
+    parser.add_argument('--u0_bins', type=int, default=10,
+                       help='Number of u0 bins for analysis')
+    parser.add_argument('--no_u0', action='store_true',
+                       help='Skip u0 analysis even if parameters available')
     parser.add_argument('--batch_size', type=int, default=128,
                        help='Batch size for evaluation')
     parser.add_argument('--no_cuda', action='store_true',
@@ -659,18 +496,21 @@ def main():
         print(f"❌ No experiment found matching: {args.experiment_name}")
         print(f"Available experiments:")
         for d in sorted(results_dir.glob('*')):
-            print(f"  - {d.name}")
+            if d.is_dir():
+                print(f"  - {d.name}")
         return
     
     exp_dir = exp_dirs[-1]  # Most recent
     model_path = exp_dir / 'best_model.pt'
+    normalizer_path = exp_dir / 'normalizer.pkl'
     
     if not model_path.exists():
         print(f"❌ Model not found: {model_path}")
         return
     
     print(f"Using experiment: {exp_dir.name}")
-    print(f"Model path: {model_path}")
+    print(f"Model: {model_path.name}")
+    print(f"Normalizer: {normalizer_path.name if normalizer_path.exists() else 'Will create default'}")
     
     # Create output directory
     output_dir = exp_dir / 'evaluation'
@@ -679,16 +519,18 @@ def main():
     device = 'cpu' if args.no_cuda else 'cuda'
     evaluator = ComprehensiveEvaluator(
         model_path=str(model_path),
+        normalizer_path=str(normalizer_path),
         data_path=args.data,
         output_dir=str(output_dir),
         device=device,
         batch_size=args.batch_size
     )
     
-    # Generate all plots
+    # Generate all plots (including u0 if available and not disabled)
     evaluator.generate_all_plots(
-        include_early_detection=args.early_detection,
-        n_evolution_examples=args.n_evolution_examples
+        include_u0=not args.no_u0,
+        u0_threshold=args.u0_threshold,
+        u0_bins=args.u0_bins
     )
     
     # Save results

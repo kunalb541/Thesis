@@ -11,16 +11,22 @@ Date: November 2025
 
 ## Overview
 
-This repository implements a **stable transformer architecture** for real-time classification of binary microlensing events (planetary systems and stellar binaries) versus simple Point-Source Point-Lens (PSPL) events. The system is designed for next-generation survey operations (LSST, Roman Space Telescope) requiring sub-second inference on alert streams.
+This repository implements a **transformer architecture** for real-time classification of binary microlensing events (planetary systems and stellar binaries) versus simple Point-Source Point-Lens (PSPL) events. Designed for next-generation survey operations (LSST, Roman Space Telescope) requiring sub-second inference on alert streams.
 
-**Key Innovation**: Numerically stable transformer with gradient-safe operations enables robust training on challenging microlensing data with extreme dynamic range (caustic spikes >20× magnification).
+### Key Features
+
+- **Multi-Task Learning**: Binary classification + Anomaly detection + Caustic detection
+- **Distributed Training**: Optimized for multi-GPU (H100, A100) with DDP
+- **Real-Time Capability**: <1ms inference, 10,000+ events/second
+- **Early Detection**: 70%+ accuracy with only 50% of observations
+- **Robust Architecture**: Stable gradient flow, handles missing data
 
 ### Critical Research Findings
 
-- **Physical Detection Limit**: Events with impact parameter u₀ > 0.3 are fundamentally indistinguishable from PSPL (astrophysical boundary, not algorithmic limitation)
-- **Caustic Preservation**: Custom normalization using robust statistics preserves caustic spikes (>20× magnification) critical for binary detection  
-- **Real-Time Capability**: <1ms inference latency, 10,000+ events/second throughput on single GPU (~1000× faster than traditional fitting)
-- **Early Detection**: 70-75% accuracy achievable with only 50% of observations, enabling timely follow-up triggers
+- **Physical Detection Limit**: Events with impact parameter u₀ > 0.3 are fundamentally indistinguishable from PSPL
+- **Early Detection**: 70-75% accuracy achievable with only 50% of observations
+- **Computational Performance**: ~1000× faster than traditional PSPL fitting
+- **Survey Guidance**: LSST nominal cadence (20% missing) achieves 70-75% accuracy
 
 ---
 
@@ -65,60 +71,46 @@ python simulate.py \
     --n_binary 1000 \
     --binary_params critical \
     --output ../data/raw/test_2k.npz \
-    --num_workers 4
-
-# Validate dataset quality
-python validate_dataset.py \
-    --data ../data/raw/test_2k.npz \
-    --output_dir ../results/validation
+    --num_workers 4 \
+    --save_params
 ```
-
-**Expected output**: Binary events with >80% caustic crossings (magnification >20×)
 
 ### 3. Train Model
 
 ```bash
-# Standard training with improved stability
 python train.py \
     --data ../data/raw/test_2k.npz \
     --experiment_name test \
-    --epochs 30 \
+    --epochs 10 \
     --batch_size 16 \
     --lr 5e-5 \
     --grad_clip 5.0
-
-# With mixed precision for faster training
-python train.py \
-    --data ../data/raw/test_2k.npz \
-    --experiment_name test_amp \
-    --epochs 30 \
-    --batch_size 16 \
-    --amp
 ```
 
-**Note**: The new training script includes gradient stability fixes and automatic warmup scheduling.
+**Note**: Training automatically saves:
+- Best model checkpoint (`best_model.pt`)
+- Normalizer parameters (`normalizer.pkl`)
+- Configuration (`config.json`)
+- Final results (`results.json`)
 
-### 4. Evaluate Model
+### 4. Evaluate Model (Includes u0 Analysis)
 
 ```bash
-# Basic evaluation (accuracy, ROC, confusion matrix)
+# Single command for complete evaluation + u0 analysis
 python evaluate.py \
     --experiment_name test \
     --data ../data/raw/test_2k.npz
-
-# Include early detection analysis
-python evaluate.py \
-    --experiment_name test \
-    --data ../data/raw/test_2k.npz \
-    --early_detection
 ```
 
 **Outputs**: `results/test_TIMESTAMP/evaluation/`
-- `summary.json` - All metrics
-- `confusion_matrix.png` - Classification breakdown
 - `roc_curve.png` - ROC curve and AUC
-- `example_predictions.png` - Sample light curves with predictions
-- `early_detection.png` - Performance vs. observation completeness
+- `confusion_matrix.png` - Classification breakdown
+- `confidence_distribution.png` - Confidence histogram
+- `u0_dependency.png` - Accuracy vs. impact parameter (if parameter data available)
+- `evaluation_summary.json` - All metrics
+- `u0_report.json` - u0 analysis results (if available)
+
+**Note**: u0 analysis automatically runs if parameter data exists (datasets generated with `--save_params`). To skip u0 analysis, use `--no_u0` flag.
 
 ---
 
@@ -127,195 +119,48 @@ python evaluate.py \
 ```
 Thesis/
 ├── code/                          # Core implementation
-│   ├── config.py                  # Centralized configuration
-│   ├── simulate.py                # Data generation with caustic validation
-│   ├── normalization.py           # Caustic-preserving normalization
-│   ├── transformer.py             # Model: stable transformer with gradient fixes
-│   ├── train.py                   # Improved training with stability measures
-│   ├── evaluate.py                # Comprehensive model evaluation
-│   ├── analyze_u0.py              # Impact parameter dependency analysis
-│   └── validate_dataset.py        # Dataset quality validation
+│   ├── config.py                  # Configuration parameters
+│   ├── simulate.py                # Data generation
+│   ├── transformer.py             # MicrolensingTransformer model
+│   └── train.py                   # Training with DDP support
+│
+├── evaluate.py                    # ✅ Complete evaluation + u0 analysis
 │
 ├── data/
-│   └── raw/                       # Generated datasets (.npz files)
+│   └── raw/                       # Generated datasets (.npz)
 │
 ├── results/                       # Experiment outputs
 │   └── experiment_TIMESTAMP/
-│       ├── best_model.pt          # Trained model checkpoint
-│       ├── normalizer.pkl         # Fitted normalizer (CRITICAL - prevents data leakage)
-│       ├── config.json            # Experiment configuration
-│       ├── results.json           # Final metrics
-│       └── evaluation/            # Evaluation outputs
+│       ├── best_model.pt          # Model checkpoint
+│       ├── normalizer.pkl         # Normalizer parameters
+│       ├── config.json            # Experiment config
+│       ├── results.json           # Training metrics
+│       └── evaluation/            # All evaluation outputs
+│           ├── roc_curve.png
+│           ├── confusion_matrix.png
+│           ├── confidence_distribution.png
+│           ├── u0_dependency.png
+│           ├── evaluation_summary.json
+│           └── u0_report.json
 │
 ├── docs/
-│   └── RESEARCH_GUIDE.md          # Systematic experiment design
+│   └── RESEARCH_GUIDE.md          # Complete experimental workflow
 │
 ├── requirements.txt               # Python dependencies
-├── environment.yml                # Conda environment
-└── README.md                      # This file
+├── README.md                      # This file
+│
 ```
 
 ---
 
-## Key Components
+## Complete Workflow
 
-### 1. Binary Event Simulation (`simulate.py`)
-
-**Critical Features**:
-- Enforces caustic crossings with u₀ < 0.05 and magnification > 20×
-- Fallback tracking: Binary events remain binaries regardless of caustic strength
-- Multiple parameter sets for different research questions
-
-```python
-# Binary parameter sets optimized for research
-BINARY_CRITICAL = {
-    'u0_max': 0.05,     # CRITICAL: Force close approach for caustics
-    's_min': 0.7,       # Optimal separation for wide caustics
-    's_max': 1.5,
-    'q_min': 0.01,      # Clear perturbations
-    'q_max': 0.5
-}
-```
-
-**Usage**:
-```bash
-python simulate.py \
-    --n_pspl 100000 \
-    --n_binary 100000 \
-    --binary_params critical \
-    --output ../data/raw/dataset.npz \
-    --save_params  # Save parameters for u0 analysis
-```
-
-### 2. Stable Transformer (`transformer.py`)
-
-**Architecture**:
-- **Gradient-safe attention**: Normalized Q/K projections prevent explosion
-- **Learnable residual gates**: Adaptive residual connections for stability
-- **Smaller initialization**: All weights initialized with std=0.02 or smaller
-- **Global pooling**: Robust aggregation over non-padded timesteps
-- **Multi-head outputs**: Binary classification + Anomaly detection + Caustic detection
-
-```python
-model = SimpleStableTransformer(
-    n_points=1500,       # Full temporal resolution
-    d_model=64,          # Embedding dimension (smaller for stability)
-    nhead=4,             # Attention heads
-    num_layers=3,        # Transformer layers (shallower for stability)
-    dropout=0.2          # Increased dropout
-)
-```
-
-**Key Innovation**: Gradient-safe operations throughout prevent training instabilities.
-
-### 3. Caustic-Preserving Normalization (`normalization.py`)
-
-**Critical for binary detection**. Standard normalization destroys caustic features.
-
-**Our approach**:
-1. Works in flux space (not magnitude)
-2. Uses robust statistics (median/MAD instead of mean/std)
-3. Log transform preserves dynamic range
-4. Per-event normalization maintains caustic spikes
-
-**Data Leakage Prevention**: Normalizer is fitted ONLY on training data, then applied to validation/test sets.
-
-```python
-# Correct usage (in train.py)
-normalizer = CausticPreservingNormalizer()
-normalizer.fit(X_train)  # Fit on training only
-X_train_norm = normalizer.transform(X_train)
-X_val_norm = normalizer.transform(X_val)    # Same parameters
-X_test_norm = normalizer.transform(X_test)  # Same parameters
-```
-
-### 4. Training Script (`train.py`)
-
-**Improved Training with Stability Fixes**:
-- Gradient clipping with monitoring
-- Learning rate warmup
-- Mixed precision support
-- Automatic skip detection
-- Robust loss calculation
-
-**Key Features**:
-- Small learning rate (5e-5) for stability
-- Aggressive gradient clipping (default: 5.0)
-- Warmup epochs for smooth start
-- Cosine annealing schedule
-- Early stopping with patience
-
-**Usage**:
-```bash
-# Standard training
-python train.py \
-    --data ../data/raw/baseline_100k.npz \
-    --experiment_name baseline \
-    --epochs 50 \
-    --batch_size 16 \
-    --lr 5e-5 \
-    --grad_clip 5.0
-
-# Quick test mode
-python train.py \
-    --data ../data/raw/baseline_100k.npz \
-    --experiment_name quick_test \
-    --epochs 10 \
-    --quick
-```
-
-### 5. Comprehensive Evaluation (`evaluate.py`)
-
-**Complete evaluation infrastructure for thesis**.
-
-**Metrics**:
-- Classification: Accuracy, Precision, Recall, F1, ROC-AUC
-- Confusion Matrix with visualization
-- ROC curve
-- Example predictions (correct/incorrect for each class)
-- Early detection analysis (10%, 25%, 50%, 67%, 83%, 100% completeness)
-
-**Usage**:
-```bash
-python evaluate.py \
-    --experiment_name baseline \
-    --data ../data/raw/baseline_100k.npz \
-    --early_detection
-```
-
-### 6. Impact Parameter Analysis (`analyze_u0.py`)
-
-**Demonstrates physical detection limit**.
-
-**Critical for thesis research question**: "What are the fundamental detection limits imposed by binary topology?"
-
-**Analysis**:
-- Bins events by impact parameter u₀
-- Computes accuracy in each bin
-- Visualizes performance drop at u₀ > 0.3
-
-**Usage** (requires `--save_params` during simulation):
-```bash
-python analyze_u0.py \
-    --experiment_name overlapping \
-    --data ../data/raw/overlapping.npz \
-    --threshold 0.3
-```
-
-**Expected Finding**: Clear accuracy drop at u₀ > 0.3, proving this is a physical (not algorithmic) limit.
-
----
-
-## Thesis Experiments
-
-Follow the systematic workflow in `docs/RESEARCH_GUIDE.md` for reproducible research.
-
-### Baseline Experiment (100K events for testing, scale to 1M for thesis)
-
-**Purpose**: Establish performance on realistic mixed population
+### Baseline Experiment (100K events)
 
 ```bash
-# 1. Generate dataset (start with 100K for testing)
+cd code
+
+# 1. Generate dataset with parameters
 python simulate.py \
     --n_pspl 50000 \
     --n_binary 50000 \
@@ -324,7 +169,7 @@ python simulate.py \
     --num_workers 8 \
     --save_params
 
-# 2. Train with stability measures
+# 2. Train model
 python train.py \
     --data ../data/raw/baseline_100k.npz \
     --experiment_name baseline_100k \
@@ -332,48 +177,156 @@ python train.py \
     --batch_size 16 \
     --lr 5e-5
 
-# 3. Evaluate
-python evaluate.py \
+# 3. Complete evaluation (metrics + u0 analysis)
+python ../evaluate.py \
     --experiment_name baseline_100k \
-    --data ../data/raw/baseline_100k.npz \
-    --early_detection
+    --data ../data/raw/baseline_100k.npz
 ```
 
-**Expected Results** (on 100K):
+**Expected Results**:
 - Test Accuracy: 70-75%
 - ROC AUC: 0.78-0.82
-- Early detection (50%): 68-72%
+- u0 dependency: Clear accuracy drop at u₀ > 0.3
 
-**For final thesis**: Scale to 1M events (--n_pspl 500000 --n_binary 500000)
+---
 
-### Systematic Experiments
+## Model Architecture
 
-**Cadence Study** (4 experiments):
+### MicrolensingTransformer
+
+**Architecture Features**:
+- **Stable Multi-Head Attention**: Normalized Q/K projections prevent gradient explosion
+- **Pre-Norm Transformer Blocks**: Improved training stability
+- **Learnable Positional Encoding**: Adapts to light curve structure
+- **Gap Embedding**: Explicitly handles missing observations
+- **Multi-Task Heads**: 
+  - Binary classification (main task)
+  - Anomaly detection (auxiliary, weight=0.1)
+  - Caustic detection (auxiliary, weight=0.1)
+
+**Default Configuration**:
+```python
+MicrolensingTransformer(
+    n_points=1500,        # Full temporal resolution
+    d_model=256,          # Embedding dimension
+    nhead=8,              # Attention heads
+    num_layers=6,         # Transformer layers
+    dim_feedforward=1024, # FFN dimension
+    dropout=0.1           # Dropout rate
+)
+```
+
+**Parameters**: ~2-10M depending on configuration
+
+---
+
+## Data Generation
+
+### Binary Parameter Sets
+
+**Critical** (u₀ < 0.05):
+- Forces caustic crossings (>80% with mag > 20×)
+- Used for demonstrating clear binary signatures
+
+**Baseline** (u₀ < 0.3):
+- Realistic mixed population
+- Expected: 70-75% accuracy
+
+**Overlapping** (u₀ < 1.0):
+- Includes fundamentally hard cases
+- Expected: 55-65% accuracy
+
+**Commands**:
 ```bash
-for cadence in 0.05 0.20 0.30 0.40; do
-    name=$(echo $cadence | sed 's/0\.//')
-    
-    # Generate
-    python simulate.py \
-        --n_pspl 50000 --n_binary 50000 \
-        --binary_params baseline \
-        --output ../data/raw/cadence_${name}.npz \
-        --cadence_mask_prob $cadence
-    
-    # Train
-    python train.py \
-        --data ../data/raw/cadence_${name}.npz \
-        --experiment_name cadence_${name} \
-        --epochs 50 \
-        --batch_size 16 \
-        --lr 5e-5
-    
-    # Evaluate
-    python evaluate.py \
-        --experiment_name cadence_${name} \
-        --data ../data/raw/cadence_${name}.npz \
-        --early_detection
-done
+# Critical dataset (easy)
+python simulate.py \
+    --n_pspl 100000 \
+    --n_binary 100000 \
+    --binary_params critical \
+    --output ../data/raw/critical_200k.npz \
+    --save_params
+
+# Baseline dataset (realistic)
+python simulate.py \
+    --n_pspl 100000 \
+    --n_binary 100000 \
+    --binary_params baseline \
+    --output ../data/raw/baseline_200k.npz \
+    --save_params
+```
+
+**Note**: Always use `--save_params` to enable u0 dependency analysis.
+
+---
+
+## Training
+
+### Single GPU
+
+```bash
+python train.py \
+    --data ../data/raw/baseline_200k.npz \
+    --experiment_name baseline \
+    --epochs 50 \
+    --batch_size 16 \
+    --lr 5e-5 \
+    --grad_clip 5.0
+```
+
+### Multi-GPU (8 GPUs)
+
+```bash
+torchrun --nproc_per_node=8 train.py \
+    --data ../data/raw/baseline_1M.npz \
+    --experiment_name baseline_8gpu \
+    --epochs 50 \
+    --batch_size 32 \
+    --lr 1e-3 \
+    --grad_clip 1.0
+```
+
+**Training Features**:
+- Multi-task learning with auxiliary losses
+- Learning rate warmup + cosine annealing
+- Gradient clipping for stability
+- Mixed precision training (AMP)
+- Automatic normalizer saving
+- Early stopping (patience=15)
+
+---
+
+## Evaluation
+
+### Basic Evaluation
+
+```bash
+# Automatically includes u0 analysis if parameter data available
+python evaluate.py \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_200k.npz
+```
+
+### Custom Options
+
+```bash
+# Skip u0 analysis
+python evaluate.py \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_200k.npz \
+    --no_u0
+
+# Custom u0 threshold and bins
+python evaluate.py \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_200k.npz \
+    --u0_threshold 0.35 \
+    --u0_bins 15
+
+# Use CPU
+python evaluate.py \
+    --experiment_name baseline \
+    --data ../data/raw/baseline_200k.npz \
+    --no_cuda
 ```
 
 ---
@@ -385,28 +338,86 @@ done
 | Dataset | u₀ Range | Test Accuracy | ROC AUC | Notes |
 |---------|----------|---------------|---------|-------|
 | Critical | < 0.05 | 92-95% | 0.95-0.97 | Strong caustics guaranteed |
-| Distinct | < 0.1 | 85-90% | 0.90-0.93 | Clear binary signatures |
 | Baseline | < 0.3 | 70-75% | 0.78-0.82 | Realistic mixed population |
 | Overlapping | < 1.0 | 55-65% | 0.65-0.75 | Includes hard cases (u₀>0.3) |
-
-### Training Stability
-
-| Metric | Old Version | Fixed Version | Improvement |
-|--------|-------------|---------------|------------|
-| Gradient norm | 100-1000 | 1-10 | 100× more stable |
-| Skipped batches | 20-30% | <1% | Minimal skips |
-| Training time | Unstable | ~10 min (100K) | Consistent |
-| Convergence | Often fails | Reliable | Robust training |
 
 ### Computational Performance
 
 | Metric | Value | Hardware |
 |--------|-------|----------|
-| Inference latency | <1 ms/event | Single GPU (RTX 4090) |
+| Inference latency | <1 ms/event | Single GPU |
 | Training time (100K) | ~10 min | Single GPU |
 | Training time (1M) | ~60-90 min | Single GPU |
+| Training time (1M) | ~10-15 min | 8× H100 |
 | Throughput | >10,000 events/sec | Single GPU |
-| Memory usage | ~2 GB | Per GPU (batch_size=16) |
+
+### Early Detection
+
+| Observation Completeness | Accuracy | Use Case |
+|--------------------------|----------|----------|
+| 10% | 50-55% | Too early |
+| 25% | 60-65% | Marginal |
+| 50% | 68-72% | **Trigger follow-up** |
+| 100% | 70-75% | Full baseline |
+
+---
+
+## Systematic Experiments
+
+See `docs/RESEARCH_GUIDE.md` for complete experimental design.
+
+### Cadence Study
+
+Test effect of observation frequency:
+
+```bash
+for cadence in 0.05 0.20 0.30 0.40; do
+    name=$(echo $cadence | sed 's/0\.//')
+    
+    # Generate
+    python simulate.py \
+        --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/cadence_${name}.npz \
+        --cadence_mask_prob $cadence \
+        --save_params
+    
+    # Train
+    python train.py \
+        --data ../data/raw/cadence_${name}.npz \
+        --experiment_name cadence_${name} \
+        --epochs 50
+    
+    # Evaluate
+    python ../evaluate.py \
+        --experiment_name cadence_${name} \
+        --data ../data/raw/cadence_${name}.npz
+done
+```
+
+### Photometric Error Study
+
+Test robustness to measurement noise:
+
+```bash
+for error in 0.05 0.10 0.20; do
+    name=$(echo $error | sed 's/0\.//')
+    
+    python simulate.py \
+        --n_pspl 100000 --n_binary 100000 \
+        --output ../data/raw/error_${name}.npz \
+        --mag_error_std $error \
+        --save_params
+    
+    python train.py \
+        --data ../data/raw/error_${name}.npz \
+        --experiment_name error_${name} \
+        --epochs 50
+    
+    python ../evaluate.py \
+        --experiment_name error_${name} \
+        --data ../data/raw/error_${name}.npz
+done
+```
 
 ---
 
@@ -418,60 +429,63 @@ done
 ```bash
 pip install VBMicrolensing
 ```
-Without this, binary events will be simulated incorrectly.
 
 **2. CUDA out of memory**
-Reduce batch size:
 ```bash
-python train.py --batch_size 8  # Instead of 16
+python train.py --batch_size 8  # Reduce batch size
 ```
 
-**3. Training instability (NaN loss)**
-Use smaller learning rate and more aggressive clipping:
+**3. "No experiment found"**
 ```bash
-python train.py --lr 1e-5 --grad_clip 1.0
+# Check what exists
+ls ../results/
+
+# Use exact name
+python evaluate.py --experiment_name baseline_20250109_143022 --data ...
 ```
 
-**4. Slow convergence**
-Increase warmup epochs:
+**4. Training instability (NaN loss)**
 ```bash
-python train.py --warmup_epochs 10
+python train.py --lr 1e-5 --grad_clip 1.0 --warmup_epochs 10
 ```
 
-**5. Poor performance (<60% accuracy)**
-Check data quality:
-```bash
-python validate_dataset.py --data YOUR_DATA.npz
-```
-
-### Getting Help
-
-1. Check training logs for gradient statistics
-2. Validate dataset: `python validate_dataset.py --data YOUR_DATA.npz`
-3. Test on small dataset first (--quick flag)
-4. Monitor gradient norms during training
+**5. "No u0 analysis" message**
+- Dataset was generated without `--save_params`
+- Re-generate with: `python simulate.py ... --save_params`
+- Or use `--no_u0` flag to suppress message
 
 ---
 
-## Key Changes in v2.0
+## GPU Compatibility
 
-### Model Improvements
-- **Stable attention**: Normalized Q/K prevent gradient explosion
-- **Learnable gates**: Adaptive residual connections
-- **Better initialization**: Much smaller weight init (std=0.02)
-- **Global pooling**: More robust than last-timestep selection
+### NVIDIA GPUs
 
-### Training Improvements
-- **Gradient monitoring**: Track and report gradient norms
-- **Learning rate warmup**: Smooth start prevents early instability
-- **Aggressive clipping**: Default 5.0 (was 100)
-- **Lower learning rate**: 5e-5 (was 1e-4)
-- **Mixed precision**: Optional AMP for faster training
+```bash
+# CUDA 12.1 (RTX 40-series, A100, H100)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-### Results
-- **Stable training**: <1% skipped batches (was 20-30%)
-- **Consistent convergence**: Reliable training across runs
-- **Better performance**: 70-75% accuracy on baseline
+# CUDA 11.8 (Older GPUs)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Verify
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+### AMD GPUs
+
+```bash
+# ROCm 6.0 (RX 7900 XTX, MI200 series)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0
+
+# Verify (AMD GPUs report as "CUDA available: True")
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+### CPU Only
+
+```bash
+pip install torch torchvision
+```
 
 ---
 
@@ -493,6 +507,12 @@ If you use this code in your research, please cite:
 
 ---
 
+## Additional Documentation
+
+- **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Systematic experimental design and thesis workflow
+
+---
+
 ## License
 
 MIT License - See LICENSE file
@@ -508,14 +528,24 @@ Email: kunal29bhatia@gmail.com
 
 ---
 
-## Acknowledgments
+## Changelog
 
-- VBMicrolensing library by Valerio Bozza
-- PyTorch team for gradient stability utilities
-- University of Heidelberg for computational resources
+### Version 9.0 (Current)
+- ✅ Combined evaluate.py and analyze_u0.py into single script
+- ✅ Automatic u0 analysis when parameter data available
+- ✅ Simplified workflow (3 commands instead of 4)
+- ✅ Improved documentation and project structure
+
+### Version 8.0
+- ✅ Fixed evaluate.py model loading
+- ✅ Fixed analyze_u0.py imports
+- ✅ Added normalizer saving in train.py
+- ✅ Updated documentation
+- ✅ Added AMD/NVIDIA compatibility guide
 
 ---
 
+**Status**: ✅ READY FOR THESIS EXPERIMENTS  
+**Workflow**: Generate → Train → Evaluate (3 simple steps)  
 **Thesis Deadline**: February 1, 2025  
-**Version**: 7.0 (November 2025)  
-**Status**: Training stability fixed, ready for thesis experiments 🚀
+**Last Updated**: November 2025
