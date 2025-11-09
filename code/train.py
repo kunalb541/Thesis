@@ -3,14 +3,17 @@
 Distributed Training for H100 GPUs
 Complete Fixed Version with Multi-Task Learning
 
-Fixes:
-1. Division by zero in learning rate scheduler
-2. DDP unused parameters (now using return_all=True for multi-task learning)
-3. Clean logging with suppressed NCCL warnings
-4. Proper auxiliary loss computation
+All Critical Fixes Applied:
+1. Division by zero in learning rate scheduler ✅
+2. DDP unused parameters ✅
+3. Clean logging with suppressed NCCL warnings ✅
+4. Proper auxiliary loss computation ✅
+5. Final evaluation hanging (DDP sync issue) ✅
+6. Early stopping broadcast to all ranks ✅
+7. All ranks load best model for consistency ✅
 
 Author: Kunal Bhatia
-Version: 11.1 - Production Ready
+Version: 13.0 - PRODUCTION READY (All Bugs Fixed)
 """
 
 import os
@@ -518,6 +521,19 @@ def main():
             pickle.dump(normalizer, f)
         print(f"💾 Normalizer saved to: {normalizer_path}")
     
+    # Broadcast experiment directory path to all ranks
+    if world_size > 1:
+        if rank == 0:
+            exp_dir_str = str(exp_dir)
+        else:
+            exp_dir_str = None
+        
+        # Create a list to hold the broadcasted value
+        exp_dir_list = [exp_dir_str]
+        dist.broadcast_object_list(exp_dir_list, src=0)
+        if rank != 0:
+            exp_dir = Path(exp_dir_list[0])
+    
     # Synchronize all processes
     if world_size > 1:
         dist.barrier()
@@ -555,7 +571,7 @@ def main():
             model, val_loader, criterion, device, rank, world_size
         )
         
-        # Print metrics (rank 0 only)
+        # Print metrics and handle early stopping (rank 0 only)
         if rank == 0:
             print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc*100:.2f}%")
             print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc*100:.2f}%")
@@ -583,32 +599,118 @@ def main():
             else:
                 patience_counter += 1
             
-            # Early stopping
-            if patience_counter >= max_patience:
+            # Check early stopping (rank 0 decides)
+            should_stop_now = (patience_counter >= max_patience)
+            
+            if should_stop_now:
                 print(f"\n⏹️  Early stopping at epoch {epoch+1}")
+        else:
+            # Other ranks don't have patience_counter
+            should_stop_now = False
+        
+        # CRITICAL: Broadcast early stopping decision to ALL ranks
+        if world_size > 1:
+            # Create tensor with early stopping flag
+            stop_flag = torch.tensor([1 if should_stop_now else 0], 
+                                    dtype=torch.long, device=device)
+            # Broadcast from rank 0 to all ranks
+            dist.broadcast(stop_flag, src=0)
+            
+            # All ranks check the flag
+            if stop_flag.item() == 1:
+                # Synchronize before breaking
+                if rank == 0:
+                    print("[Rank 0] Broadcasting early stop to all ranks...")
+                sys.stdout.flush()
+                dist.barrier()
                 break
+        else:
+            # Single GPU
+            if should_stop_now:
+                break
+    
+    # ========== AFTER TRAINING LOOP ==========
+    
+    # CRITICAL: Ensure all ranks exit training loop together
+    if world_size > 1:
+        if rank == 0:
+            print("\n[Rank 0] All ranks exited training loop")
+        print(f"[Rank {rank}] Synchronizing after training...")
+        sys.stdout.flush()
+        dist.barrier()
+        print(f"[Rank {rank}] Training sync complete")
+        sys.stdout.flush()
+    
+    # Training loop completed
+    if rank == 0:
+        print("\n" + "="*70)
+        print("TRAINING COMPLETE")
+        print("="*70)
     
     # Final evaluation
     if rank == 0:
         print("\n" + "="*70)
         print("FINAL EVALUATION")
         print("="*70)
+    
+    # CRITICAL FIX: ALL ranks must load best model for DDP consistency
+    if world_size > 1:
+        # Synchronize before loading
+        print(f"[Rank {rank}] Waiting before loading checkpoint...")
+        sys.stdout.flush()
+        dist.barrier()
         
-        # Load best model
-        checkpoint = torch.load(exp_dir / 'best_model.pt')
+        # All ranks load the checkpoint
+        print(f"[Rank {rank}] Loading checkpoint from {exp_dir / 'best_model.pt'}...")
+        sys.stdout.flush()
+        
+        # Map checkpoint to correct device for each rank
+        map_location = {'cuda:0': f'cuda:{local_rank}'}
+        
+        try:
+            checkpoint = torch.load(
+                exp_dir / 'best_model.pt', 
+                map_location=map_location,
+                weights_only=False
+            )
+            
+            load_model = model.module if hasattr(model, 'module') else model
+            load_model.load_state_dict(checkpoint['model_state_dict'])
+            
+            print(f"[Rank {rank}] Checkpoint loaded successfully")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"[Rank {rank}] ERROR loading checkpoint: {e}")
+            sys.stdout.flush()
+            cleanup_distributed()
+            sys.exit(1)
+        
+        # Synchronize after loading
+        print(f"[Rank {rank}] Synchronizing after checkpoint load...")
+        sys.stdout.flush()
+        dist.barrier()
+        print(f"[Rank {rank}] Post-load sync complete")
+        sys.stdout.flush()
+    else:
+        # Single GPU - only rank 0 loads
+        checkpoint = torch.load(exp_dir / 'best_model.pt', weights_only=False)
         load_model = model.module if hasattr(model, 'module') else model
         load_model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Synchronize before final evaluation
-    if world_size > 1:
-        dist.barrier()
+    # Evaluate on test set (all ranks participate)
+    print(f"[Rank {rank}] Starting final evaluation...")
+    sys.stdout.flush()
     
     test_loss, test_acc = evaluate(
         model, test_loader, criterion, device, rank, world_size
     )
     
+    print(f"[Rank {rank}] Evaluation complete")
+    sys.stdout.flush()
+    
+    # Only rank 0 prints and saves results
     if rank == 0:
-        print(f"Test Loss: {test_loss:.4f}")
+        print(f"\nTest Loss: {test_loss:.4f}")
         print(f"Test Accuracy: {test_acc*100:.2f}%")
         
         # Save results
@@ -635,8 +737,20 @@ def main():
         print(f"\n📁 Results saved to: {exp_dir}")
         print("="*70)
     
-    # Clean up
+    # CRITICAL: Final synchronization before cleanup
+    if world_size > 1:
+        print(f"[Rank {rank}] Final sync before cleanup...")
+        sys.stdout.flush()
+        dist.barrier()
+        print(f"[Rank {rank}] Final sync complete")
+        sys.stdout.flush()
+    
+    # Clean up distributed training
+    print(f"[Rank {rank}] Cleaning up...")
+    sys.stdout.flush()
     cleanup_distributed()
+    print(f"[Rank {rank}] Done!")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

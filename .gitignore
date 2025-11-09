@@ -1,47 +1,88 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
-*.egg-info/
-dist/
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Data (too large)
-*.npy
-*.npz
-*.h5
-*.hdf5
-*.keras
-*.pt
-*.pkl
-
-# Directories - be specific about what to ignore
-data/raw/*
-data/processed/*
-!data/*/.gitkeep
-
-models/*
-!models/.gitkeep
-
-# For results/ - ignore checkpoints but allow subdirectories and pngs
-results/*
-!results/.gitkeep
-!results/*/                    # ← ADD THIS: Allow subdirectories
-!results/**/*.png              # ← Now this works!
-!results/**/*.json             # ← Also allow JSON files (evaluation_summary.json, etc.)
-!results/**/evaluation/        # ← Explicitly allow evaluation folders
-
-logs/*
-!logs/.gitkeep
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
 
 # IDE
 .vscode/
 .idea/
 *.swp
-
-# OS
+*.swo
+*~
 .DS_Store
 
-# Temp
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Data files
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# Model checkpoints (but allow best_model.pt in results)
+*.pth
+*.pt
+!results/**/best_model.pt
+
+# Logs
+*.log
+logs/
+*.out
+*.err
+
+# Results directory - FIXED TO ALLOW PNG AND JSON FILES
+results/*
+!results/.gitkeep
+!results/*/
+!results/**/
+!results/**/*.png
+!results/**/*.jpg
+!results/**/*.jpeg
+!results/**/*.json
+!results/**/*.txt
+
+# Temporary files
 *.tmp
+*.temp
 tmp/
+temp/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Large data directories
+data/raw/*.npz
+data/processed/*.npz
+
+# But keep example data
+!data/raw/example.npz
+!data/processed/example.npz

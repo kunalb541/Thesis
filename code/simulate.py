@@ -329,6 +329,8 @@ def save_dataset(dataset: Dict, output_path: str, save_params: bool = False):
             return int(obj)
         elif isinstance(obj, np.floating):
             return float(obj)
+        elif isinstance(obj, np.bool_):  # ← ADD THIS LINE
+            return bool(obj)  
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         elif isinstance(obj, dict):
