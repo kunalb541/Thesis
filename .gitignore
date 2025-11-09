@@ -15,14 +15,22 @@ build/
 *.pt
 *.pkl
 
-# Directories
+# Directories - be specific about what to ignore
 data/raw/*
 data/processed/*
 !data/*/.gitkeep
+
 models/*
 !models/.gitkeep
+
+# For results/ - ignore checkpoints but allow subdirectories and pngs
 results/*
 !results/.gitkeep
+!results/*/                    # ← ADD THIS: Allow subdirectories
+!results/**/*.png              # ← Now this works!
+!results/**/*.json             # ← Also allow JSON files (evaluation_summary.json, etc.)
+!results/**/evaluation/        # ← Explicitly allow evaluation folders
+
 logs/*
 !logs/.gitkeep
 
