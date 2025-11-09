@@ -1,0 +1,17 @@
+{
+  "metrics": {
+    "accuracy": 0.7315,
+    "precision": 0.7118023787740164,
+    "recall": 0.778,
+    "f1": 0.7434304825609174,
+    "roc_auc": 0.7819025,
+    "tp": 778,
+    "tn": 685,
+    "fp": 315,
+    "fn": 222
+  },
+  "n_samples": 2000,
+  "high_confidence_90": 0,
+  "high_confidence_95": 0,
+  "has_u0_analysis": true
+}

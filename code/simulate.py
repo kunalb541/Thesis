@@ -1,419 +1,495 @@
 #!/usr/bin/env python3
 """
-FIXED Binary Microlensing Simulation - No PSPL Fallback
-Binaries remain binaries regardless of caustic strength
+Microlensing Event Simulation - Production Version
+==================================================
+Generates realistic PSPL and binary microlensing light curves.
+Uses VBBinaryLensing for accurate binary magnifications.
 
-Version: 7.0 - Final thesis version
 Author: Kunal Bhatia
+Version: 8.0 - Production Ready
 """
 
 import numpy as np
 import argparse
+from tqdm import tqdm
 import json
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Tuple, Dict, List, Optional
-import multiprocessing as mp
-from tqdm import tqdm
-import config as CFG
+from multiprocessing import Pool
+from functools import partial
+import sys
 
-# Try importing VBMicrolensing
+# Import configuration
+from config import (
+    N_POINTS, TIME_MIN, TIME_MAX,
+    PSPL_T0_MIN, PSPL_T0_MAX, PSPL_U0_MIN, PSPL_U0_MAX, PSPL_TE_MIN, PSPL_TE_MAX,
+    BASELINE_MIN, BASELINE_MAX,
+    CADENCE_MASK_PROB, MAG_ERROR_STD, PAD_VALUE,
+    BINARY_PARAM_SETS, VBM_TOLERANCE, MAX_BINARY_ATTEMPTS, MIN_BINARY_MAGNIFICATION,
+    get_config_summary, validate_config
+)
+
+# Try to import VBBinaryLensing
 try:
     import VBBinaryLensing
-    VBM = VBBinaryLensing.VBBinaryLensing()
-    VBM.Tol = CFG.VBM_TOLERANCE
-    VBM_AVAILABLE = True
+    HAS_VBB = True
+    print("✅ VBBinaryLensing loaded successfully")
 except ImportError:
-    VBM = None
-    VBM_AVAILABLE = False
-    print("ERROR: VBMicrolensing required! Install with: pip install VBMicrolensing")
+    HAS_VBB = False
+    print("⚠️  VBBinaryLensing not found, will use approximation")
 
 
-@dataclass
-class SimulationStats:
-    """Track simulation statistics"""
-    n_binary_generated: int = 0
-    n_binary_strong_caustic: int = 0
-    n_binary_weak: int = 0
-    max_magnifications: List[float] = None
-    
-    def __post_init__(self):
-        if self.max_magnifications is None:
-            self.max_magnifications = []
-
-
-def pspl_magnification(u: np.ndarray) -> np.ndarray:
-    """Standard PSPL magnification"""
-    return (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
-
-
-def generate_pspl_event(
-    timestamps: np.ndarray,
-    seed: Optional[int] = None
-) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Generate PSPL event"""
-    
-    if seed is not None:
-        np.random.seed(seed)
-    
-    # Sample parameters
-    t0 = np.random.uniform(CFG.PSPL_T0_MIN, CFG.PSPL_T0_MAX)
-    u0 = np.random.uniform(CFG.PSPL_U0_MIN, CFG.PSPL_U0_MAX)
-    tE = np.random.uniform(CFG.PSPL_TE_MIN, CFG.PSPL_TE_MAX)
-    baseline = np.random.uniform(CFG.BASELINE_MIN, CFG.BASELINE_MAX)
-    
-    # Calculate magnification
-    u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
-    magnification = pspl_magnification(u_t)
-    
-    # Convert to magnitude
-    magnitudes = baseline - 2.5 * np.log10(magnification)
-    
-    # Add photometric noise
-    if CFG.MAG_ERROR_STD > 0:
-        magnitudes += np.random.normal(0, CFG.MAG_ERROR_STD, magnitudes.shape)
-    
-    # Apply cadence mask
-    if CFG.CADENCE_MASK_PROB > 0:
-        mask = np.random.rand(len(timestamps)) < CFG.CADENCE_MASK_PROB
-        magnitudes[mask] = np.nan
-    
-    # Convert to flux (normalized)
-    flux = 10.0 ** (-(magnitudes - baseline) / 2.5)
-    flux = np.nan_to_num(flux, nan=CFG.PAD_VALUE)
-    
-    params = {
-        't0': t0, 'u0': u0, 'tE': tE, 'baseline': baseline,
-        'max_magnification': magnification.max(),
-        'event_type': 'pspl'
-    }
-    
-    return flux.astype(np.float32), params
-
-
-def generate_binary_event(
-    timestamps: np.ndarray,
-    binary_params: Dict,
-    seed: Optional[int] = None
-) -> Tuple[np.ndarray, Dict[str, float], bool]:
+def pspl_magnification(t, t_E, u_0, t_0):
     """
-    Generate binary event - ALWAYS returns a binary
+    Compute PSPL magnification
+    
+    Args:
+        t: Time array
+        t_E: Einstein crossing time
+        u_0: Impact parameter
+        t_0: Time of closest approach
+        
+    Returns:
+        Magnification array
+    """
+    u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
+    A = (u**2 + 2) / (u * np.sqrt(u**2 + 4))
+    return A
+
+
+def binary_magnification_vbb(t, t_E, u_0, t_0, s, q, alpha, rho=0.001):
+    """
+    Compute binary lens magnification using VBBinaryLensing
+    
+    Args:
+        t: Time array
+        t_E: Einstein crossing time
+        u_0: Impact parameter
+        t_0: Time of closest approach
+        s: Binary separation (in Einstein radii)
+        q: Mass ratio (secondary/primary)
+        alpha: Source trajectory angle
+        rho: Source size (normalized)
+        
+    Returns:
+        Magnification array
+    """
+    VBB = VBBinaryLensing.VBBinaryLensing()
+    VBB.Tol = VBM_TOLERANCE
+    VBB.RelTol = VBM_TOLERANCE
+    
+    # Source trajectory
+    tau = (t - t_0) / t_E
+    source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
+    source_y = u_0 * np.sin(alpha) - tau * np.cos(alpha)
+    
+    mag = np.zeros_like(t)
+    for i, (sx, sy) in enumerate(zip(source_x, source_y)):
+        mag[i] = VBB.BinaryMag2(s, q, sx, sy, rho)
+    
+    return mag
+
+
+def binary_magnification_approx(t, t_E, u_0, t_0, s, q, alpha, rho=0.001):
+    """
+    Approximate binary lens magnification (fallback when VBB unavailable)
+    
+    Uses PSPL with caustic perturbations
+    """
+    # Base PSPL magnification
+    A_pspl = pspl_magnification(t, t_E, u_0, t_0)
+    
+    # Add caustic-like features
+    tau = (t - t_0) / t_E
+    source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
+    source_y = u_0 * np.sin(alpha) - tau * np.cos(alpha)
+    
+    # Simplified caustic positions
+    caustic_x = s * np.array([0.5, -0.5, 0, 0])
+    caustic_y = s * np.array([0, 0, 0.5, -0.5])
+    
+    # Perturbation from caustics
+    perturbation = 0
+    for cx, cy in zip(caustic_x, caustic_y):
+        dist = np.sqrt((source_x - cx)**2 + (source_y - cy)**2)
+        caustic_width = 0.05 * np.sqrt(q)
+        perturbation += q * np.exp(-dist**2 / (2 * caustic_width**2))
+    
+    A_binary = A_pspl * (1 + perturbation * 3)
+    
+    return A_binary
+
+
+def generate_pspl_params(n_events, seed=None):
+    """
+    Generate PSPL parameters using config values
     
     Returns:
-        flux: Light curve flux
-        params: Event parameters
-        has_strong_caustic: Whether mag > 20 was achieved
+        list: List of parameter dictionaries
     """
-    
     if seed is not None:
         np.random.seed(seed)
     
-    if not VBM_AVAILABLE:
-        raise ImportError("VBMicrolensing is required for binary events!")
-    
-    # Sample parameters
-    s = np.random.uniform(binary_params.get('s_min', 0.1), 
-                        binary_params.get('s_max', 2.5))
-    q = np.random.uniform(binary_params.get('q_min', 0.001), 
-                        binary_params.get('q_max', 1.0))
-    u0 = np.random.uniform(binary_params.get('u0_min', 0.001), 
-                         binary_params.get('u0_max', 0.5))
-    alpha = np.random.uniform(binary_params.get('alpha_min', 0), 
-                            binary_params.get('alpha_max', 2*np.pi))
-    rho = np.random.uniform(binary_params.get('rho_min', 0.001), 
-                          binary_params.get('rho_max', 0.05))
-    t0 = np.random.uniform(binary_params.get('t0_min', -20.0), 
-                         binary_params.get('t0_max', 20.0))
-    tE = np.random.uniform(binary_params.get('tE_min', 20.0), 
-                         binary_params.get('tE_max', 150.0))
-    baseline = np.random.uniform(CFG.BASELINE_MIN, CFG.BASELINE_MAX)
-    
-    # Calculate binary light curve
-    try:
-        # VBMicrolensing parameters
-        params_vbm = [
-            np.log(s),
-            np.log(q),
-            u0,
-            alpha,
-            np.log(rho),
-            np.log(tE),
-            t0
-        ]
+    params = []
+    for _ in range(n_events):
+        t_E = np.random.uniform(PSPL_TE_MIN, PSPL_TE_MAX)
+        t_0 = np.random.uniform(PSPL_T0_MIN, PSPL_T0_MAX)
+        u_0 = np.random.uniform(PSPL_U0_MIN, PSPL_U0_MAX)
+        m_source = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
         
-        # Get magnification
-        magnification = np.array(VBM.BinaryLightCurve(params_vbm, timestamps)[0])
-        magnification = np.maximum(magnification, 1.0)  # Ensure positive
-        
-    except Exception as e:
-        # If VBM fails, generate a simple perturbed PSPL
-        print(f"VBM calculation failed: {e}, using perturbed PSPL")
-        u_t = np.sqrt(u0**2 + ((timestamps - t0) / tE)**2)
-        magnification = pspl_magnification(u_t)
-        # Add some perturbation to make it binary-like
-        perturbation = 1 + 0.2 * np.sin(2*np.pi * (timestamps - t0) / (0.3 * tE))
-        magnification = magnification * perturbation
+        params.append({
+            't_E': t_E,
+            'u_0': u_0,
+            't_0': t_0,
+            'm_source': m_source
+        })
     
-    # Check if strong caustic
-    max_mag = magnification.max()
-    has_strong_caustic = (max_mag >= CFG.MIN_BINARY_MAGNIFICATION)
-    
-    # Convert to magnitude
-    magnitudes = baseline - 2.5 * np.log10(magnification)
-    
-    # Add noise
-    if CFG.MAG_ERROR_STD > 0:
-        magnitudes += np.random.normal(0, CFG.MAG_ERROR_STD, magnitudes.shape)
-    
-    # Apply cadence mask
-    if CFG.CADENCE_MASK_PROB > 0:
-        mask = np.random.rand(len(timestamps)) < CFG.CADENCE_MASK_PROB
-        magnitudes[mask] = np.nan
-    
-    # Convert to flux
-    flux = 10.0 ** (-(magnitudes - baseline) / 2.5)
-    flux = np.nan_to_num(flux, nan=CFG.PAD_VALUE)
-    
-    params = {
-        's': s, 'q': q, 'u0': u0, 'alpha': alpha,
-        'rho': rho, 't0': t0, 'tE': tE, 'baseline': baseline,
-        'max_magnification': max_mag,
-        'has_strong_caustic': has_strong_caustic,
-        'event_type': 'binary'
-    }
-    
-    return flux.astype(np.float32), params, has_strong_caustic
+    return params
 
 
-def parallel_worker(args):
-    """Worker for parallel generation"""
-    idx, timestamps, event_type, binary_params, seed = args
+def generate_binary_params(n_events, params_set='baseline', seed=None):
+    """
+    Generate binary lens parameters using config values
     
+    Args:
+        n_events: Number of events to generate
+        params_set: Which binary configuration to use
+        seed: Random seed
+        
+    Returns:
+        list: List of parameter dictionaries
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    if params_set not in BINARY_PARAM_SETS:
+        print(f"⚠️  Unknown params_set '{params_set}', using 'baseline'")
+        params_set = 'baseline'
+    
+    config = BINARY_PARAM_SETS[params_set]
+    
+    params = []
+    attempts = 0
+    max_total_attempts = n_events * MAX_BINARY_ATTEMPTS
+    
+    pbar = tqdm(total=n_events, desc=f"  Generating {params_set} binary params")
+    
+    while len(params) < n_events and attempts < max_total_attempts:
+        attempts += 1
+        
+        # Generate parameters
+        t_E = np.random.uniform(config['tE_min'], config['tE_max'])
+        t_0 = np.random.uniform(config['t0_min'], config['t0_max'])
+        u_0 = np.random.uniform(config['u0_min'], config['u0_max'])
+        s = np.random.uniform(config['s_min'], config['s_max'])
+        q = np.random.uniform(config['q_min'], config['q_max'])
+        alpha = np.random.uniform(config['alpha_min'], config['alpha_max'])
+        rho = np.random.uniform(config['rho_min'], config['rho_max'])
+        m_source = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
+        
+        # Quick validation: check if this will produce strong magnification
+        # Sample a few points around peak
+        test_times = np.array([t_0 - t_E/10, t_0, t_0 + t_E/10])
+        
+        if HAS_VBB:
+            test_mag = binary_magnification_vbb(test_times, t_E, u_0, t_0, s, q, alpha, rho)
+        else:
+            test_mag = binary_magnification_approx(test_times, t_E, u_0, t_0, s, q, alpha, rho)
+        
+        # Accept if max magnification exceeds threshold
+        if test_mag.max() >= MIN_BINARY_MAGNIFICATION:
+            params.append({
+                't_E': t_E,
+                'u_0': u_0,
+                't_0': t_0,
+                's': s,
+                'q': q,
+                'alpha': alpha,
+                'rho': rho,
+                'm_source': m_source
+            })
+            pbar.update(1)
+    
+    pbar.close()
+    
+    if len(params) < n_events:
+        print(f"⚠️  Warning: Only generated {len(params)}/{n_events} valid binary events")
+    
+    return params
+
+
+def generate_light_curve(params, event_type, timestamps):
+    """
+    Generate a single light curve
+    
+    Args:
+        params: Parameter dictionary
+        event_type: 'pspl' or 'binary'
+        timestamps: Time array
+        
+    Returns:
+        Flux array
+    """
     if event_type == 'pspl':
-        flux, params = generate_pspl_event(timestamps, seed)
-        return idx, flux, params, True
-    else:
-        flux, params, has_caustic = generate_binary_event(
-            timestamps, binary_params, seed
-        )
-        return idx, flux, params, has_caustic
+        A = pspl_magnification(timestamps, params['t_E'], params['u_0'], params['t_0'])
+    else:  # binary
+        if HAS_VBB:
+            A = binary_magnification_vbb(
+                timestamps, params['t_E'], params['u_0'], params['t_0'],
+                params['s'], params['q'], params['alpha'], params['rho']
+            )
+        else:
+            A = binary_magnification_approx(
+                timestamps, params['t_E'], params['u_0'], params['t_0'],
+                params['s'], params['q'], params['alpha'], params['rho']
+            )
+    
+    # Convert to flux (magnification is already flux ratio)
+    flux = A
+    
+    return flux
 
 
-def generate_dataset(
-    n_pspl: int,
-    n_binary: int,
-    binary_params: Dict,
-    num_workers: int = 4,
-    seed: int = 42,
-    cadence_mask_prob: float = None,
-    mag_error_std: float = None
-) -> Dict:
-    """Generate complete dataset"""
+def add_observational_effects(flux, error_mag=MAG_ERROR_STD, 
+                              cadence_missing=CADENCE_MASK_PROB, 
+                              pad_value=PAD_VALUE):
+    """
+    Add realistic observational effects
     
-    np.random.seed(seed)
+    Args:
+        flux: Clean flux array
+        error_mag: Photometric error
+        cadence_missing: Fraction of missing observations
+        pad_value: Value for missing data
+        
+    Returns:
+        flux_obs: Observed flux with noise and gaps
+    """
+    flux_obs = flux.copy()
     
-    # Override config if specified
-    if cadence_mask_prob is not None:
-        CFG.CADENCE_MASK_PROB = cadence_mask_prob
-    if mag_error_std is not None:
-        CFG.MAG_ERROR_STD = mag_error_std
+    # Add photometric noise (fractional error in flux)
+    noise = np.random.normal(0, error_mag, size=len(flux))
+    flux_obs = flux_obs * (1 + noise)
+    
+    # Add missing observations
+    mask = np.random.random(len(flux)) < cadence_missing
+    flux_obs[mask] = pad_value
+    
+    # Ensure flux is positive where not masked
+    flux_obs[flux_obs != pad_value] = np.maximum(flux_obs[flux_obs != pad_value], 0.01)
+    
+    return flux_obs
+
+
+def generate_single_event(args):
+    """
+    Wrapper for parallel generation
+    
+    Args:
+        args: (index, params, event_type, timestamps)
+        
+    Returns:
+        (flux, label, params)
+    """
+    idx, params, event_type, timestamps = args
+    
+    # Generate clean light curve
+    flux = generate_light_curve(params, event_type, timestamps)
+    
+    # Add observational effects
+    flux_obs = add_observational_effects(flux)
+    
+    # Label: 0 = PSPL, 1 = Binary
+    label = 0 if event_type == 'pspl' else 1
+    
+    return flux_obs, label, params
+
+
+def simulate_dataset(n_pspl, n_binary, binary_params='baseline', 
+                     num_workers=1, seed=None, save_params=False):
+    """
+    Generate complete dataset
+    
+    Args:
+        n_pspl: Number of PSPL events
+        n_binary: Number of binary events
+        binary_params: Binary configuration
+        num_workers: Number of parallel workers
+        seed: Random seed
+        save_params: Whether to save event parameters
+        
+    Returns:
+        X: Light curves (n_events, n_points)
+        y: Labels (n_events,)
+        timestamps: Time array
+        params_dict: Event parameters (if save_params=True)
+    """
+    if seed is not None:
+        np.random.seed(seed)
     
     # Generate timestamps
-    timestamps = np.linspace(CFG.TIME_MIN, CFG.TIME_MAX, CFG.N_POINTS)
+    timestamps = np.linspace(TIME_MIN, TIME_MAX, N_POINTS)
     
-    print(f"Generating {n_pspl} PSPL + {n_binary} Binary events...")
-    print(f"Binary parameters: {binary_params.get('u0_min', 0.001):.3f} < u0 < {binary_params.get('u0_max', 0.5):.3f}")
-    print(f"Cadence mask: {CFG.CADENCE_MASK_PROB*100:.0f}% missing")
-    print(f"Photometric error: {CFG.MAG_ERROR_STD:.3f} mag")
+    # Generate parameters
+    print(f"\n{'='*70}")
+    print(f"GENERATING {n_pspl} PSPL + {n_binary} BINARY EVENTS")
+    print(f"{'='*70}")
+    print(f"Binary config: {binary_params}")
+    print(f"Time window: [{TIME_MIN}, {TIME_MAX}] days")
+    print(f"Cadence mask: {CADENCE_MASK_PROB*100:.0f}% missing")
+    print(f"Photometric error: {MAG_ERROR_STD:.3f}")
     
-    # Prepare data arrays
-    N = n_pspl + n_binary
-    X = np.zeros((N, CFG.N_POINTS), dtype=np.float32)
-    y = np.zeros(N, dtype=np.uint8)
+    print("\nGenerating PSPL parameters...")
+    params_pspl = generate_pspl_params(n_pspl, seed=seed)
     
-    # Prepare worker arguments
-    worker_args = []
+    print(f"\nGenerating Binary parameters ({binary_params})...")
+    params_binary = generate_binary_params(n_binary, params_set=binary_params, seed=seed+1 if seed else None)
     
-    # PSPL events
-    for i in range(n_pspl):
-        worker_args.append((i, timestamps, 'pspl', None, seed + i if seed else None))
+    # Prepare arguments for parallel processing
+    args_list = []
+    args_list.extend([(i, p, 'pspl', timestamps) for i, p in enumerate(params_pspl)])
+    args_list.extend([(i, p, 'binary', timestamps) for i, p in enumerate(params_binary)])
     
-    # Binary events
-    for i in range(n_binary):
-        idx = n_pspl + i
-        worker_args.append((idx, timestamps, 'binary', binary_params, seed + idx if seed else None))
+    # Generate events in parallel
+    print(f"\nGenerating light curves ({num_workers} workers)...")
+    if num_workers > 1:
+        with Pool(num_workers) as pool:
+            results = list(tqdm(
+                pool.imap(generate_single_event, args_list),
+                total=len(args_list),
+                desc="  Processing events"
+            ))
+    else:
+        results = [generate_single_event(args) for args in tqdm(args_list, desc="  Processing events")]
     
-    # Parallel processing
-    all_params = {'pspl': [], 'binary': []}
-    stats = SimulationStats()
+    # Unpack results
+    X = np.array([r[0] for r in results])
+    y = np.array([r[1] for r in results])
+    all_params = [r[2] for r in results]
     
-    with mp.Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(parallel_worker, worker_args),
-            total=N,
-            desc="Generating events"
-        ))
+    # Shuffle
+    shuffle_idx = np.random.permutation(len(X))
+    X = X[shuffle_idx]
+    y = y[shuffle_idx]
+    all_params = [all_params[i] for i in shuffle_idx]
     
-    # Process results
-    for idx, flux, params, success in results:
-        X[idx] = flux
-        
-        if idx < n_pspl:
-            y[idx] = 0  # PSPL
-            all_params['pspl'].append(params)
-        else:
-            y[idx] = 1  # Binary (always!)
-            all_params['binary'].append(params)
-            stats.n_binary_generated += 1
-            
-            if params.get('has_strong_caustic', False):
-                stats.n_binary_strong_caustic += 1
-            else:
-                stats.n_binary_weak += 1
-            
-            stats.max_magnifications.append(params['max_magnification'])
-    
-    # Shuffle data
-    perm = np.random.permutation(N)
-    X = X[perm]
-    y = y[perm]
-    
-    # Print statistics
-    print("\n" + "="*60)
+    # Statistics
+    print("\n" + "="*70)
     print("GENERATION COMPLETE")
-    print("="*60)
-    print(f"Total events: {N}")
-    print(f"  PSPL: {n_pspl} ({100*n_pspl/N:.1f}%)")
-    print(f"  Binary: {n_binary} ({100*n_binary/N:.1f}%)")
+    print("="*70)
+    print(f"Total events: {len(X)}")
+    print(f"  PSPL: {(y==0).sum()} ({(y==0).mean()*100:.1f}%)")
+    print(f"  Binary: {(y==1).sum()} ({(y==1).mean()*100:.1f}%)")
     
-    if stats.max_magnifications:
-        max_mags = np.array(stats.max_magnifications)
+    # Binary statistics
+    binary_mag = []
+    for i, label in enumerate(y):
+        if label == 1:
+            flux = X[i]
+            valid_flux = flux[flux != PAD_VALUE]
+            if len(valid_flux) > 0:
+                binary_mag.append(valid_flux.max())
+    
+    if binary_mag:
+        binary_mag = np.array(binary_mag)
+        strong_caustics = (binary_mag > MIN_BINARY_MAGNIFICATION).sum()
         print(f"\nBinary Statistics:")
-        print(f"  Strong caustics (mag>20): {stats.n_binary_strong_caustic} ({100*stats.n_binary_strong_caustic/n_binary:.1f}%)")
-        print(f"  Weak binaries: {stats.n_binary_weak} ({100*stats.n_binary_weak/n_binary:.1f}%)")
-        print(f"  Max mag mean: {max_mags.mean():.1f}")
-        print(f"  Max mag median: {np.median(max_mags):.1f}")
-        print(f"  Max mag range: [{max_mags.min():.1f}, {max_mags.max():.1f}]")
+        print(f"  Strong caustics (mag>{MIN_BINARY_MAGNIFICATION}): {strong_caustics} ({strong_caustics/len(binary_mag)*100:.1f}%)")
+        print(f"  Max mag mean: {binary_mag.mean():.1f}")
+        print(f"  Max mag median: {np.median(binary_mag):.1f}")
+        print(f"  Max mag range: [{binary_mag.min():.1f}, {binary_mag.max():.1f}]")
     
-    # Package results
-    dataset = {
-        'X': X,
-        'y': y,
-        'timestamps': timestamps,
-        'perm': perm,
-        'params': all_params,
-        'stats': asdict(stats),
-        'metadata': {
-            'n_pspl': n_pspl,
-            'n_binary': n_binary,
-            'n_points': CFG.N_POINTS,
-            'binary_params': binary_params,
-            'cadence_mask_prob': CFG.CADENCE_MASK_PROB,
-            'mag_error_std': CFG.MAG_ERROR_STD,
-            'vbm_available': VBM_AVAILABLE,
-            'seed': seed
+    # Prepare return
+    params_dict = None
+    if save_params:
+        params_pspl_list = [all_params[i] for i in range(len(all_params)) if y[i] == 0]
+        params_binary_list = [all_params[i] for i in range(len(all_params)) if y[i] == 1]
+        params_dict = {
+            'pspl': params_pspl_list,
+            'binary': params_binary_list
         }
-    }
     
-    return dataset
-
-
-def save_dataset(dataset: Dict, output_path: str, save_params: bool = False):
-    """Save dataset to NPZ file"""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Convert numpy types
-    def convert_numpy(obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.bool_):  # ← ADD THIS LINE
-            return bool(obj)  
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {key: convert_numpy(value) for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_numpy(item) for item in obj]
-        else:
-            return obj
-    
-    # Save NPZ with all data
-    save_dict = {
-        'X': dataset['X'],
-        'y': dataset['y'],
-        'timestamps': dataset['timestamps'],
-        'perm': dataset['perm'],
-        'meta_json': json.dumps(convert_numpy(dataset['metadata'])),
-        'stats_json': json.dumps(convert_numpy(dataset['stats'])),
-    }
-    
-    # Save parameters if requested (for u0 analysis)
-    if save_params and dataset['params']:
-        save_dict['params_pspl_json'] = json.dumps(convert_numpy(dataset['params']['pspl']))
-        save_dict['params_binary_json'] = json.dumps(convert_numpy(dataset['params']['binary']))
-    
-    np.savez_compressed(output_path, **save_dict)
-    print(f"\nDataset saved to: {output_path}")
-    print(f"Size: {output_path.stat().st_size / 1024**2:.1f} MB")
+    return X, y, timestamps, params_dict
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate microlensing dataset")
-    parser.add_argument('--n_pspl', type=int, default=5000)
-    parser.add_argument('--n_binary', type=int, default=5000)
-    parser.add_argument('--binary_params', choices=list(CFG.BINARY_PARAM_SETS.keys()), 
-                       default='baseline', help='Binary parameter set')
-    parser.add_argument('--output', type=str, default='../data/raw/dataset.npz')
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--save_params', action='store_true', 
-                       help='Save event parameters for u0 analysis')
-    parser.add_argument('--cadence_mask_prob', type=float, default=None,
-                       help='Override cadence mask probability')
-    parser.add_argument('--mag_error_std', type=float, default=None,
-                       help='Override photometric error std')
+    parser = argparse.ArgumentParser(
+        description='Generate microlensing dataset with complete events'
+    )
+    parser.add_argument('--n_pspl', type=int, default=10000,
+                       help='Number of PSPL events')
+    parser.add_argument('--n_binary', type=int, default=10000,
+                       help='Number of binary events')
+    parser.add_argument('--binary_params', type=str, default='baseline',
+                       choices=list(BINARY_PARAM_SETS.keys()),
+                       help='Binary parameter configuration')
+    parser.add_argument('--output', type=str, default='../data/raw/dataset.npz',
+                       help='Output file path')
+    parser.add_argument('--num_workers', type=int, default=1,
+                       help='Number of parallel workers')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='Random seed')
+    parser.add_argument('--save_params', action='store_true',
+                       help='Save event parameters in output file')
+    parser.add_argument('--show_config', action='store_true',
+                       help='Show configuration and exit')
     
     args = parser.parse_args()
     
-    if not VBM_AVAILABLE:
-        print("\n" + "!"*60)
-        print("ERROR: VBMicrolensing not installed!")
-        print("Install with: pip install VBMicrolensing")
-        print("!"*60)
+    # Show configuration if requested
+    if args.show_config:
+        get_config_summary()
+        print()
+        validate_config()
         return
     
-    # Get binary parameters
-    binary_params = CFG.BINARY_PARAM_SETS[args.binary_params]
+    print("="*70)
+    print("BINARY MICROLENSING SIMULATION v8.0")
+    print("="*70)
+    print(f"PSPL events: {args.n_pspl}")
+    print(f"Binary events: {args.n_binary}")
+    print(f"Binary config: {args.binary_params}")
+    print(f"Workers: {args.num_workers}")
+    print(f"Save params: {args.save_params}")
     
-    print("="*60)
-    print("BINARY MICROLENSING SIMULATION v7.0")
-    print("="*60)
-    print(f"Configuration:")
-    print(f"  PSPL events: {args.n_pspl}")
-    print(f"  Binary events: {args.n_binary}")
-    print(f"  Binary set: {args.binary_params}")
-    print(f"  Workers: {args.num_workers}")
-    print(f"  Save params: {args.save_params}")
+    # Validate configuration
+    print("\n" + "="*70)
+    if not validate_config():
+        print("\n⚠️  Configuration has warnings but will proceed...")
+    print("="*70)
     
     # Generate dataset
-    dataset = generate_dataset(
+    X, y, timestamps, params_dict = simulate_dataset(
         n_pspl=args.n_pspl,
         n_binary=args.n_binary,
-        binary_params=binary_params,
+        binary_params=args.binary_params,
         num_workers=args.num_workers,
         seed=args.seed,
-        cadence_mask_prob=args.cadence_mask_prob,
-        mag_error_std=args.mag_error_std
+        save_params=args.save_params
     )
     
-    # Save dataset
-    save_dataset(dataset, args.output, save_params=args.save_params)
+    # Save
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    print("\n✅ Simulation complete!")
+    save_dict = {
+        'X': X,
+        'y': y,
+        'timestamps': timestamps
+    }
+    
+    if params_dict:
+        # Save parameters as JSON strings
+        save_dict['params_pspl_json'] = json.dumps(params_dict['pspl'])
+        save_dict['params_binary_json'] = json.dumps(params_dict['binary'])
+    
+    np.savez(output_path, **save_dict)
+    
+    file_size_mb = output_path.stat().st_size / (1024 * 1024)
+    print(f"\n{'='*70}")
+    print(f"✅ Dataset saved to: {output_path}")
+    print(f"   Size: {file_size_mb:.1f} MB")
+    print(f"{'='*70}\n")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

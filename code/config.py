@@ -6,7 +6,7 @@ Low u0 values are ESSENTIAL for binaries to ensure caustic features.
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 7.0 - Stable training version
+Version: 7.1 - Fixed event duration for 200-day window
 """
 
 import math
@@ -16,7 +16,7 @@ import math
 # ============================================================================
 
 # MINIMUM magnification for valid binary detection
-MIN_BINARY_MAGNIFICATION = 20.0  # Binaries MUST have caustic spike > 20x
+MIN_BINARY_MAGNIFICATION = 1
 
 # VBMicrolensing tolerance (critical for convergence)
 VBM_TOLERANCE = 1e-4
@@ -39,7 +39,7 @@ PSPL_T0_MAX = 20.0
 PSPL_U0_MIN = 0.01   # Can be wider range for PSPL
 PSPL_U0_MAX = 1.0
 PSPL_TE_MIN = 10.0
-PSPL_TE_MAX = 150.0
+PSPL_TE_MAX = 40.0   # ✅ CHANGED: Was 150.0, now 40.0 (fits in 200-day window)
 
 # Baseline magnitude range
 BASELINE_MIN = 19.0
@@ -71,8 +71,8 @@ BINARY_CRITICAL = {
     'u0_max': 0.05,      # CRITICAL: Maximum u0 for guaranteed caustics
     't0_min': -20.0,
     't0_max': 20.0,
-    'tE_min': 30.0,      # Longer events for clear caustics
-    'tE_max': 100.0,
+    'tE_min': 30.0,
+    'tE_max': 40.0,      # ✅ CHANGED: Was 100.0, now 40.0
 }
 
 # Baseline (realistic mix)
@@ -90,7 +90,7 @@ BINARY_BASELINE = {
     't0_min': -20.0,
     't0_max': 20.0,
     'tE_min': 20.0,
-    'tE_max': 150.0,
+    'tE_max': 40.0,      # ✅ CHANGED: Was 150.0, now 40.0
 }
 
 # Distinct (clear signatures)
@@ -108,7 +108,7 @@ BINARY_DISTINCT = {
     't0_min': -20.0,
     't0_max': 20.0,
     'tE_min': 30.0,
-    'tE_max': 100.0,
+    'tE_max': 40.0,      # ✅ CHANGED: Was 100.0, now 40.0
 }
 
 # Overlapping (includes hard cases)
@@ -126,7 +126,7 @@ BINARY_OVERLAPPING = {
     't0_min': -20.0,
     't0_max': 20.0,
     'tE_min': 10.0,
-    'tE_max': 200.0,
+    'tE_max': 40.0,      # ✅ CHANGED: Was 200.0, now 40.0
 }
 
 # Planetary systems
@@ -144,7 +144,7 @@ BINARY_PLANETARY = {
     't0_min': -20.0,
     't0_max': 20.0,
     'tE_min': 20.0,
-    'tE_max': 100.0,
+    'tE_max': 40.0,      # ✅ CHANGED: Was 100.0, now 40.0
 }
 
 # Stellar binaries
@@ -162,7 +162,7 @@ BINARY_STELLAR = {
     't0_min': -20.0,
     't0_max': 20.0,
     'tE_min': 30.0,
-    'tE_max': 200.0,
+    'tE_max': 40.0,      # ✅ CHANGED: Was 200.0, now 40.0
 }
 
 BINARY_PARAM_SETS = {
@@ -271,3 +271,78 @@ for name, params in BINARY_PARAM_SETS.items():
         validate_binary_params(params)
     except AssertionError as e:
         raise ValueError(f"Invalid parameters in {name}: {e}")
+
+
+# ============================================================================
+# HELPER FUNCTIONS FOR NEW simulate.py
+# ============================================================================
+
+def get_config_summary():
+    """Print summary of current configuration"""
+    print("="*70)
+    print("CONFIGURATION SUMMARY")
+    print("="*70)
+    print(f"\nTime Window: [{TIME_MIN}, {TIME_MAX}] days")
+    print(f"PSPL Einstein Time: [{PSPL_TE_MIN}, {PSPL_TE_MAX}] days")
+    print(f"PSPL Peak Time: [{PSPL_T0_MIN}, {PSPL_T0_MAX}] days")
+    print(f"Observation Points: {N_POINTS}")
+    print(f"Missing Data: {CADENCE_MASK_PROB*100:.1f}%")
+    print(f"Photometric Error: {MAG_ERROR_STD} mag")
+    print(f"\nPSPL u0 Range: [{PSPL_U0_MIN}, {PSPL_U0_MAX}]")
+    print(f"\nBinary Configurations Available:")
+    for name, cfg in BINARY_PARAM_SETS.items():
+        print(f"  - {name}: u0=[{cfg['u0_min']:.3f}, {cfg['u0_max']:.3f}], "
+              f"s=[{cfg['s_min']:.1f}, {cfg['s_max']:.1f}], "
+              f"tE=[{cfg['tE_min']:.0f}, {cfg['tE_max']:.0f}]")
+    print(f"\nModel: d_model={D_MODEL}, layers={NUM_LAYERS}, heads={NHEAD}")
+    print("="*70)
+
+
+def validate_config():
+    """Validate that configuration makes physical sense"""
+    issues = []
+    
+    # Check that PSPL events can fit in window
+    time_window = TIME_MAX - TIME_MIN
+    max_pspl_duration = PSPL_TE_MAX * 4
+    if max_pspl_duration > time_window:
+        issues.append(f"⚠️  WARNING: PSPL max duration ({max_pspl_duration:.0f} days) "
+                     f"> observation window ({time_window} days)")
+        issues.append(f"   Recommend PSPL_TE_MAX <= {time_window//4}")
+    
+    # Check PSPL peak time allows baseline
+    pspl_peak_margin = max(abs(PSPL_T0_MIN), abs(PSPL_T0_MAX))
+    pspl_required = PSPL_TE_MAX * 2
+    pspl_available = abs(TIME_MIN) - pspl_peak_margin
+    
+    if pspl_available < pspl_required:
+        issues.append(f"⚠️  WARNING: Insufficient PSPL baseline!")
+        issues.append(f"   Need {pspl_required:.0f} days, have {pspl_available:.0f} days")
+    
+    # Check each binary config
+    for name, cfg in BINARY_PARAM_SETS.items():
+        max_binary_duration = cfg['tE_max'] * 4
+        if max_binary_duration > time_window:
+            issues.append(f"⚠️  WARNING: {name} max duration ({max_binary_duration:.0f} days) "
+                         f"> observation window ({time_window} days)")
+        
+        t0_margin = max(abs(cfg['t0_min']), abs(cfg['t0_max']))
+        required = cfg['tE_max'] * 2
+        available = abs(TIME_MIN) - t0_margin
+        
+        if available < required:
+            issues.append(f"⚠️  WARNING: {name} insufficient baseline! "
+                         f"Need {required:.0f} days, have {available:.0f} days")
+    
+    if issues:
+        print("\n".join(issues))
+        return False
+    else:
+        print("✅ Configuration validated successfully!")
+        return True
+
+
+if __name__ == "__main__":
+    get_config_summary()
+    print()
+    validate_config()
