@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Distributed Training for 8x H100 GPUs
-Uses PyTorch DDP with SLURM support
+Distributed Training for H100 GPUs
+Complete Fixed Version with Multi-Task Learning
+
+Fixes:
+1. Division by zero in learning rate scheduler
+2. DDP unused parameters (now using return_all=True for multi-task learning)
+3. Clean logging with suppressed NCCL warnings
+4. Proper auxiliary loss computation
 
 Author: Kunal Bhatia
-Version: 10.0 - H100 Production
+Version: 11.1 - Production Ready
 """
 
 import os
@@ -26,31 +32,27 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
 
-# Import our transformer
-from transformer import MicrolensingTransformer, count_parameters
-from normalization import CausticPreservingNormalizer
+# Suppress NCCL warnings for cleaner output
+os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
+os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
+os.environ['NCCL_TIMEOUT'] = '1800'
+os.environ['NCCL_DEBUG'] = 'WARN'
 
 
 def setup_distributed():
     """Initialize distributed training"""
-    
-    # Get environment variables
     rank = int(os.environ.get('RANK', 0))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     world_size = int(os.environ.get('WORLD_SIZE', 1))
     
-    # Initialize process group
     if world_size > 1:
-        print(f"[Rank {rank}] Initializing process group...")
+        if rank == 0:
+            print(f"[Rank {rank}] Initializing process group...")
         dist.init_process_group(
             backend='nccl',
             init_method='env://'
         )
         torch.cuda.set_device(local_rank)
-        
-        # Set NCCL options for H100
-        os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
-        os.environ['NCCL_TIMEOUT'] = '1800'  # 30 minutes
         
     return rank, local_rank, world_size
 
@@ -73,8 +75,6 @@ class MicrolensingDataset(Dataset):
     def __init__(self, X, y, pad_value=-1.0):
         # Clean data
         X = np.nan_to_num(X, nan=pad_value, posinf=100.0, neginf=-100.0)
-        
-        # Ensure reasonable range
         valid_mask = X != pad_value
         if valid_mask.any():
             X[valid_mask] = np.clip(X[valid_mask], -100, 100)
@@ -129,14 +129,25 @@ class StableNormalizer:
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, 
-                device, epoch, rank, world_size, use_amp=True):
-    """Train one epoch with mixed precision"""
+                device, epoch, rank, world_size, use_amp=True, grad_clip=1.0):
+    """
+    Train one epoch with multi-task learning
+    
+    Uses all three model heads:
+    - binary_head: Main classification (PSPL vs Binary)
+    - anomaly_head: Anomaly detection
+    - caustic_head: Caustic crossing detection
+    """
     model.train()
     
     total_loss = 0
+    binary_loss_total = 0
+    anomaly_loss_total = 0
+    caustic_loss_total = 0
     correct = 0
     total = 0
     num_batches = 0
+    skipped_batches = 0
     
     # Progress bar only on rank 0
     if rank == 0:
@@ -150,43 +161,68 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Mixed precision forward pass
+        # Mixed precision forward pass with multi-task learning
         with autocast(enabled=use_amp):
-            outputs = model(X)
+            # CRITICAL: Use return_all=True to ensure all model parameters receive gradients
+            # This prevents DDP unused parameter errors
+            outputs = model(X, return_all=True)
+            
+            # Main task: Binary classification
             logits = outputs['binary']
+            binary_loss = criterion(logits, y)
+            loss = binary_loss
             
-            # Add auxiliary losses if available
-            loss = criterion(logits, y)
-            
+            # Auxiliary task 1: Anomaly detection
+            # Binary events should have higher anomaly scores
             if 'anomaly' in outputs:
-                # Binary events should have higher anomaly scores
                 anomaly_target = y.float()
                 anomaly_loss = nn.functional.mse_loss(outputs['anomaly'], anomaly_target)
                 loss = loss + 0.1 * anomaly_loss
+            else:
+                anomaly_loss = torch.tensor(0.0)
+            
+            # Auxiliary task 2: Caustic detection
+            # Binary events have caustic crossings
+            if 'caustic' in outputs:
+                caustic_target = y.float()
+                # BCE is unsafe with autocast, so temporarily disable it
+                with autocast(enabled=False):
+                    # Convert to float32 for stable BCE computation
+                    caustic_pred = outputs['caustic'].float()
+                    caustic_target_f32 = caustic_target.float()
+                    # Clamp predictions to prevent numerical issues
+                    caustic_pred = torch.clamp(caustic_pred, min=1e-7, max=1-1e-7)
+                    caustic_loss = nn.functional.binary_cross_entropy(caustic_pred, caustic_target_f32)
+                loss = loss + 0.1 * caustic_loss
+            else:
+                caustic_loss = torch.tensor(0.0)
         
-        # Check for NaN
+        # Check for NaN/Inf
         if torch.isnan(loss) or torch.isinf(loss):
-            print(f"[Rank {rank}] NaN/Inf loss detected, skipping batch")
+            if rank == 0 and skipped_batches < 3:
+                print(f"[Warning] NaN/Inf loss at batch {batch_idx}, skipping")
+            skipped_batches += 1
             continue
         
         # Backward pass with gradient scaling
         if use_amp:
             scaler.scale(loss).backward()
-            
-            # Unscale and clip gradients
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
-            # Step optimizer
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
         
         # Update metrics
         total_loss += loss.item()
+        binary_loss_total += binary_loss.item()
+        if isinstance(anomaly_loss, torch.Tensor):
+            anomaly_loss_total += anomaly_loss.item()
+        if isinstance(caustic_loss, torch.Tensor):
+            caustic_loss_total += caustic_loss.item()
         num_batches += 1
         
         with torch.no_grad():
@@ -205,9 +241,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                     'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
                 })
     
-    # Step scheduler
-    if scheduler is not None:
-        scheduler.step()
+    # Print skipped batches warning
+    if rank == 0 and skipped_batches > 0:
+        print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf loss")
     
     # Gather metrics across all GPUs
     if world_size > 1:
@@ -224,7 +260,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device, rank, world_size):
-    """Evaluate model"""
+    """Evaluate model with multi-task outputs"""
     model.eval()
     
     total_loss = 0
@@ -234,7 +270,7 @@ def evaluate(model, loader, criterion, device, rank, world_size):
     
     # Progress bar only on rank 0
     if rank == 0:
-        pbar = tqdm(loader, desc="Evaluating", leave=False)
+        pbar = tqdm(loader, desc="Validating", leave=False)
     else:
         pbar = loader
     
@@ -242,7 +278,8 @@ def evaluate(model, loader, criterion, device, rank, world_size):
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         
-        outputs = model(X)
+        # Use return_all=True for DDP consistency (same parameters in every forward pass)
+        outputs = model(X, return_all=True)
         logits = outputs['binary']
         loss = criterion(logits, y)
         
@@ -272,8 +309,8 @@ def main():
     parser.add_argument('--data', required=True, help='Path to dataset')
     parser.add_argument('--experiment_name', default='h100_dist', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=64)  # Per GPU batch size
-    parser.add_argument('--lr', type=float, default=1e-3)  # Larger LR for larger batch
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
@@ -288,6 +325,12 @@ def main():
     
     args = parser.parse_args()
     
+    # Validate epochs vs warmup to prevent division by zero
+    if args.epochs <= args.warmup_epochs:
+        print(f"Warning: epochs ({args.epochs}) <= warmup_epochs ({args.warmup_epochs})")
+        print(f"Setting warmup_epochs to {max(1, args.epochs - 1)}")
+        args.warmup_epochs = max(1, args.epochs - 1)
+    
     # Setup distributed training
     rank, local_rank, world_size = setup_distributed()
     
@@ -297,12 +340,16 @@ def main():
     # Print info from rank 0
     if rank == 0:
         print("="*70)
-        print("H100 DISTRIBUTED TRAINING")
+        print("H100 DISTRIBUTED TRAINING WITH MULTI-TASK LEARNING")
         print("="*70)
         print(f"World size: {world_size} GPUs")
         print(f"Device: {device}")
         print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
         print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
+        print(f"\nMulti-Task Learning:")
+        print(f"  - Binary classification (main, weight=1.0)")
+        print(f"  - Anomaly detection (auxiliary, weight=0.1)")
+        print(f"  - Caustic detection (auxiliary, weight=0.1)")
     
     # Load data
     print_rank0(f"\nLoading data from {args.data}...", rank)
@@ -322,7 +369,6 @@ def main():
         indices = np.random.choice(len(X), min(10000, len(X)), replace=False)
         X = X[indices]
         y = y[indices]
-        args.epochs = 5
     
     # Data validation
     if rank == 0:
@@ -390,6 +436,9 @@ def main():
         persistent_workers=True
     )
     
+    # Import transformer here to avoid issues
+    from transformer import MicrolensingTransformer, count_parameters
+    
     # Create model
     print_rank0("\n🤖 Creating MicrolensingTransformer...", rank)
     model = MicrolensingTransformer(
@@ -408,7 +457,7 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True
+            find_unused_parameters=True  # All parameters used with return_all=True
         )
     
     if rank == 0:
@@ -420,7 +469,7 @@ def main():
     
     # Scale learning rate by world size
     effective_batch_size = args.batch_size * world_size
-    lr_scale = effective_batch_size / 256  # Base batch size
+    lr_scale = max(1.0, effective_batch_size / 256)  # Base batch size
     scaled_lr = args.lr * lr_scale
     
     optimizer = torch.optim.AdamW(
@@ -431,12 +480,15 @@ def main():
         eps=1e-8
     )
     
-    # Learning rate scheduler with warmup
+    # Learning rate scheduler with warmup (FIXED - no more division by zero)
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
-            return (epoch + 1) / args.warmup_epochs
+            # Linear warmup
+            return (epoch + 1) / max(args.warmup_epochs, 1)
         else:
-            progress = (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)
+            # Cosine annealing after warmup
+            total_epochs = max(args.epochs - args.warmup_epochs, 1)
+            progress = (epoch - args.warmup_epochs) / total_epochs
             return 0.5 * (1 + np.cos(np.pi * progress))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -485,8 +537,12 @@ def main():
         # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
-            device, epoch, rank, world_size, use_amp=not args.no_amp
+            device, epoch, rank, world_size, use_amp=not args.no_amp,
+            grad_clip=args.grad_clip
         )
+        
+        # Step scheduler after training
+        scheduler.step()
         
         # Validate
         val_loss, val_acc = evaluate(
@@ -511,6 +567,7 @@ def main():
                     'epoch': epoch,
                     'model_state_dict': save_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict() if scaler else None,
                     'val_acc': val_acc,
                     'val_loss': val_loss
@@ -561,12 +618,13 @@ def main():
             json.dump(results, f, indent=2)
         
         # Success message
+        print("\n" + "="*70)
         if test_acc > 0.75:
-            print("\n🌟 EXCELLENT! Model achieved great performance!")
+            print("🌟 EXCELLENT! Model achieved great performance!")
         elif test_acc > 0.70:
-            print("\n✅ SUCCESS! Model achieved good performance!")
+            print("✅ SUCCESS! Model achieved good performance!")
         else:
-            print("\n⚠️  Model needs improvement")
+            print("⚠️  Model performance: {:.2f}%".format(test_acc * 100))
         
         print(f"\n📁 Results saved to: {exp_dir}")
         print("="*70)
