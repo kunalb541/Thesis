@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-Detailed Binary Event Visualization (CUDA-ENABLED)
-===================================================
+FIXED - Detailed Binary Event Visualization
+============================================
+Uses CORRECT MicrolensingTransformer architecture
 
 Shows individual high-confidence binary events with:
 - Light curve with features highlighted
-- Confidence evolution (as if observing in real-time)
-- Model's "reasoning" via attention (if available)
+- Confidence evolution (real-time simulation)
+- Model's reasoning
 - Comparison to ground truth
 
 Perfect for thesis figures!
 
-Usage:
-    python visualize_binary_events_detailed_cuda.py \
-        --model_path ../results/critical_20gpu_working_20251108_135150/best_model.pt \
-        --data_path ../data/raw/test.npz \
-        --event_id 42 \
-        --output_dir ./figures/
+Author: Kunal Bhatia
+Version: FIXED for thesis
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -28,14 +26,48 @@ from pathlib import Path
 import json
 import sys
 from tqdm import tqdm
+from scipy.signal import find_peaks
 
 sys.path.insert(0, '/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/code')
-
-from transformer import MaskedMicrolensingTransformer
-from scipy.signal import find_peaks
+from transformer import MicrolensingTransformer  # CORRECT import!
 
 plt.style.use('seaborn-v0_8-paper')
 plt.rcParams['figure.dpi'] = 300
+
+
+class StableNormalizer:
+    """Same normalizer as training"""
+    
+    def __init__(self, pad_value=-1.0):
+        self.pad_value = pad_value
+        self.mean = 0.0
+        self.std = 1.0
+    
+    def fit(self, X):
+        valid_mask = (X != self.pad_value) & np.isfinite(X)
+        
+        if valid_mask.any():
+            valid_values = X[valid_mask]
+            self.mean = np.median(valid_values)
+            self.std = np.median(np.abs(valid_values - self.mean))
+            
+            if self.std < 1e-8:
+                self.std = 1.0
+            
+            self.mean = np.clip(self.mean, -100, 100)
+            self.std = np.clip(self.std, 0.01, 100)
+        
+        return self
+    
+    def transform(self, X):
+        X_norm = X.copy()
+        valid_mask = (X != self.pad_value) & np.isfinite(X)
+        
+        if valid_mask.any():
+            X_norm[valid_mask] = (X[valid_mask] - self.mean) / self.std
+            X_norm[valid_mask] = np.clip(X_norm[valid_mask], -10, 10)
+        
+        return np.nan_to_num(X_norm, nan=0.0, posinf=10.0, neginf=-10.0)
 
 
 def plot_binary_event_detailed(model, light_curve, true_label, event_id,
@@ -43,13 +75,17 @@ def plot_binary_event_detailed(model, light_curve, true_label, event_id,
     """
     Create detailed visualization of a single binary event
     """
+    # Normalize light curve
+    normalizer = StableNormalizer(pad_value=-1.0)
+    light_curve_norm = normalizer.fit(light_curve.reshape(1, -1)).transform(light_curve.reshape(1, -1))[0]
+    
     # Get prediction
     model.eval()
     with torch.no_grad():
-        x = torch.tensor([light_curve], dtype=torch.float32).to(device)
-        output = model(x, return_all_timesteps=False)
+        x = torch.tensor([light_curve_norm], dtype=torch.float32).to(device)
+        output = model(x, return_all=False)
         logits = output['binary']
-        probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        probs = F.softmax(logits, dim=1).cpu().numpy()[0]
     
     binary_prob = probs[1]
     pred_label = 'Binary' if binary_prob > 0.5 else 'Single'
@@ -68,14 +104,15 @@ def plot_binary_event_detailed(model, light_curve, true_label, event_id,
     ax1.plot(time_points, light_curve, 'b-', linewidth=2, alpha=0.7, label='Light Curve')
     
     # Find and mark peaks
-    peaks, properties = find_peaks(light_curve, height=1.0, distance=50, prominence=0.5)
+    peaks, properties = find_peaks(light_curve, height=light_curve.mean() + 0.5*light_curve.std(), 
+                                  distance=50, prominence=0.5*light_curve.std())
     if len(peaks) > 0:
         ax1.scatter(peaks, light_curve[peaks], color='red', s=200, 
                    zorder=5, marker='v', label=f'Detected Peaks ({len(peaks)})',
                    edgecolors='darkred', linewidth=2)
         
         # Annotate peaks
-        for i, peak in enumerate(peaks):
+        for i, peak in enumerate(peaks[:3]):  # Limit to first 3 peaks
             ax1.annotate(f'Peak {i+1}\nt={peak}', 
                         xy=(peak, light_curve[peak]),
                         xytext=(peak, light_curve[peak] + 1.5),
@@ -85,19 +122,20 @@ def plot_binary_event_detailed(model, light_curve, true_label, event_id,
                                       color='red', lw=2))
     
     # Baseline
-    ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.5, linewidth=1, label='Baseline')
+    baseline = np.median(light_curve)
+    ax1.axhline(y=baseline, color='gray', linestyle='--', alpha=0.5, linewidth=1, label='Baseline')
     
-    # Anomaly regions (if any)
-    anomaly_threshold = 2.0
-    anomalies = np.where(np.abs(light_curve) > anomaly_threshold)[0]
-    if len(anomalies) > 0:
-        ax1.fill_between(time_points, -5, 5, 
-                        where=(np.abs(light_curve) > anomaly_threshold),
+    # Anomaly regions
+    threshold = baseline + 2*light_curve.std()
+    anomalies = light_curve > threshold
+    if anomalies.any():
+        ax1.fill_between(time_points, light_curve.min(), light_curve.max(), 
+                        where=anomalies,
                         alpha=0.2, color='orange', label='High Flux Region')
     
     # Labels and styling
     ax1.set_xlabel('Time Point (arbitrary units)', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Normalized Flux', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Flux', fontsize=12, fontweight='bold')
     
     # Title with prediction
     title_color = 'green' if is_correct else 'red'
@@ -116,12 +154,13 @@ def plot_binary_event_detailed(model, light_curve, true_label, event_id,
         info_text = []
         if 'u0' in meta:
             info_text.append(f"Impact Parameter: u₀ = {meta['u0']:.3f}")
-        if 't_E' in meta:
-            info_text.append(f"Einstein Time: t_E = {meta['t_E']:.1f} days")
-        if 'separation' in meta and meta['separation'] is not None:
-            info_text.append(f"Binary Separation: d = {meta['separation']:.3f}")
-        if 'mass_ratio' in meta and meta['mass_ratio'] is not None:
-            info_text.append(f"Mass Ratio: q = {meta['mass_ratio']:.3f}")
+        if 't_E' in meta or 'tE' in meta:
+            tE = meta.get('t_E', meta.get('tE', 0))
+            info_text.append(f"Einstein Time: t_E = {tE:.1f} days")
+        if 's' in meta:
+            info_text.append(f"Binary Separation: s = {meta['s']:.3f}")
+        if 'q' in meta:
+            info_text.append(f"Mass Ratio: q = {meta['q']:.4f}")
         
         if info_text:
             ax1.text(0.02, 0.98, '\n'.join(info_text),
@@ -161,8 +200,8 @@ def plot_binary_event_detailed(model, light_curve, true_label, event_id,
     features = {
         'Peak Count': len(peaks),
         'Max Flux': float(light_curve.max()),
-        'Baseline Std': float(np.std(light_curve[:200])),
-        'Asymmetry': float(np.abs(np.mean(light_curve[:750]) - np.mean(light_curve[750:]))),
+        'Baseline': float(baseline),
+        'Std Dev': float(light_curve.std()),
     }
     
     # Create horizontal bar chart
@@ -188,11 +227,16 @@ def plot_binary_event_detailed(model, light_curve, true_label, event_id,
     plt.close()
 
 
-def plot_confidence_evolution(model, light_curve, true_label, output_path='confidence_evolution.png', device='cuda'):
+def plot_confidence_evolution(model, light_curve, true_label, 
+                              output_path='confidence_evolution.png', device='cuda'):
     """
     Show how confidence evolves as more data is observed
     Simulates real-time classification
     """
+    # Normalize
+    normalizer = StableNormalizer(pad_value=-1.0)
+    light_curve_norm = normalizer.fit(light_curve.reshape(1, -1)).transform(light_curve.reshape(1, -1))[0]
+    
     model.eval()
     
     # Sample different amounts of data (10%, 20%, ..., 100%)
@@ -204,16 +248,16 @@ def plot_confidence_evolution(model, light_curve, true_label, output_path='confi
     partial_curves = []
     for frac in fractions:
         n_points = int(1500 * frac)
-        partial_curve = np.zeros(1500)
-        partial_curve[:n_points] = light_curve[:n_points]
+        partial_curve = np.full(1500, -1.0)  # Fill with padding
+        partial_curve[:n_points] = light_curve_norm[:n_points]
         partial_curves.append(partial_curve)
     
     # Get all predictions at once
     with torch.no_grad():
         x = torch.tensor(partial_curves, dtype=torch.float32).to(device)
-        output = model(x, return_all_timesteps=False)
+        output = model(x, return_all=False)
         logits = output['binary']
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
+        probs = F.softmax(logits, dim=1).cpu().numpy()
     
     binary_probs = probs[:, 1].tolist()
     confidences = probs.max(axis=1).tolist()
@@ -224,7 +268,7 @@ def plot_confidence_evolution(model, light_curve, true_label, output_path='confi
     # ===== BINARY PROBABILITY EVOLUTION =====
     ax = axes[0]
     
-    days = fractions * 1500  # Assuming time points are days
+    days = fractions * 1500  # Time points
     ax.plot(days, binary_probs, 'o-', linewidth=3, markersize=8,
            color='darkblue', label='Binary Probability')
     ax.axhline(y=0.5, color='red', linestyle='--', linewidth=2, 
@@ -246,7 +290,6 @@ def plot_confidence_evolution(model, light_curve, true_label, output_path='confi
     ax.set_ylim([-0.05, 1.05])
     
     # Annotate key points
-    # When did it first confidently predict binary?
     high_conf_binary = np.where(np.array(binary_probs) > 0.8)[0]
     if len(high_conf_binary) > 0:
         first_conf = high_conf_binary[0]
@@ -287,20 +330,16 @@ def main():
     parser.add_argument('--model_path', type=str, required=True)
     parser.add_argument('--data_path', type=str, required=True)
     parser.add_argument('--event_id', type=int, default=None,
-                       help='Specific event ID to visualize (default: find high-conf binary)')
+                       help='Specific event ID (default: find high-conf binary)')
     parser.add_argument('--output_dir', type=str, default='./figures')
     parser.add_argument('--min_confidence', type=float, default=0.9)
-    parser.add_argument('--no_cuda', action='store_true',
-                       help='Disable CUDA even if available')
+    parser.add_argument('--no_cuda', action='store_true')
     
     args = parser.parse_args()
     
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
     print(f"Using device: {device}")
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -308,35 +347,33 @@ def main():
     # Load model
     print("\nLoading model...")
     checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
+    state_dict = checkpoint['model_state_dict']
     
-    # Detect architecture from checkpoint
-    if 'pos_embed' in checkpoint['model_state_dict']:
-        d_model = checkpoint['model_state_dict']['pos_embed'].shape[2]
+    # Detect architecture
+    if 'pos_encoding' in state_dict:
+        d_model = state_dict['pos_encoding'].shape[2]
+    elif 'input_embed.4.weight' in state_dict:
+        d_model = state_dict['input_embed.4.weight'].shape[0]
     else:
-        d_model = checkpoint['model_state_dict']['input_proj.0.weight'].shape[0]
+        d_model = 256
     
-    num_layers = sum(1 for k in checkpoint['model_state_dict'].keys() 
-                    if k.startswith('blocks.') and '.norm1.weight' in k)
+    num_layers = len([k for k in state_dict.keys() 
+                     if 'layers.' in k and '.norm.weight' in k])
     
-    # Detect nhead
-    possible_nheads = [2, 4, 8, 16]
-    nhead = 4  # default
-    for nh in possible_nheads:
-        if d_model % nh == 0:
-            nhead = nh
-            break
+    nhead = 8  # From config
     
     print(f"Detected: d_model={d_model}, num_layers={num_layers}, nhead={nhead}")
     
-    model = SimpleStableTransformer(
+    model = MicrolensingTransformer(
         n_points=1500,
         d_model=d_model,
         nhead=nhead,
         num_layers=num_layers,
-        dim_ff=d_model * 4,
-        dropout=0.2
+        dim_feedforward=d_model * 4,
+        dropout=0.1,
+        pad_value=-1.0
     )
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     print("✓ Model loaded successfully!")
@@ -344,42 +381,41 @@ def main():
     # Load data
     print("\nLoading data...")
     data = np.load(args.data_path)
-    X = data['X'].squeeze()
+    X = data['X']
     y = data['y']
     
+    if X.ndim == 3:
+        X = X.squeeze(1)
+    
     meta_list = None
-    if 'meta_json' in data:
+    if 'params_binary_json' in data:
         try:
-            meta_json = data['meta_json']
-            if isinstance(meta_json, np.ndarray):
-                if meta_json.ndim == 0:
-                    meta_json = np.array([meta_json.item()])
-                meta_list = [json.loads(m) if isinstance(m, (str, bytes)) else m 
-                            for m in meta_json]
-            else:
-                meta_list = [json.loads(meta_json)]
-        except Exception as e:
-            print(f"Warning: Could not load metadata: {e}")
-            meta_list = None
+            meta_list = json.loads(str(data['params_binary_json']))
+        except:
+            pass
     
     # Find high-confidence binary event if not specified
     if args.event_id is None:
         print(f"\nFinding high-confidence binary event (≥{args.min_confidence*100:.0f}%)...")
         
-        # Get predictions for all events (batched for speed)
+        # Normalize all data
+        normalizer = StableNormalizer(pad_value=-1.0)
+        X_norm = normalizer.fit(X).transform(X)
+        
+        # Get predictions (batched)
         predictions = []
         confidences = []
         
         batch_size = 256 if device.type == 'cuda' else 32
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(X), batch_size), desc="Predicting"):
-                batch_end = min(i + batch_size, len(X))
-                x_batch = torch.tensor(X[i:batch_end], dtype=torch.float32).to(device)
+            for i in tqdm(range(0, len(X_norm), batch_size), desc="Predicting"):
+                batch_end = min(i + batch_size, len(X_norm))
+                x_batch = torch.tensor(X_norm[i:batch_end], dtype=torch.float32).to(device)
                 
-                output = model(x_batch, return_all_timesteps=False)
+                output = model(x_batch, return_all=False)
                 logits = output['binary']
-                probs = torch.softmax(logits, dim=1)
+                probs = F.softmax(logits, dim=1)
                 
                 pred = probs.argmax(dim=1).cpu().numpy()
                 conf = probs.max(dim=1).values.cpu().numpy()
@@ -407,7 +443,7 @@ def main():
     # Get event data
     light_curve = X[event_id]
     true_label = y[event_id]
-    meta = meta_list[event_id] if meta_list is not None else None
+    meta = meta_list[event_id] if meta_list is not None and event_id < len(meta_list) else None
     
     # Generate visualizations
     print(f"\nGenerating visualizations for event {event_id}...")
