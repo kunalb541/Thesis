@@ -124,7 +124,7 @@ Thesis/
 │   ├── transformer.py             # MicrolensingTransformer model
 │   └── train.py                   # Training with DDP support
 │
-├── evaluate.py                    # ✅ Complete evaluation + u0 analysis
+├── evaluate.py                    # Complete evaluation + u0 analysis
 │
 ├── data/
 │   └── raw/                       # Generated datasets (.npz)
