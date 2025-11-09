@@ -357,6 +357,7 @@ def main():
     else:
         d_model = 256
     
+<<<<<<< HEAD
     # Count transformer layers by finding unique layer indices
     layer_indices = set()
     for key in state_dict.keys():
@@ -375,6 +376,12 @@ def main():
         nhead = 8
     else:
         nhead = 8
+=======
+    num_layers = len([k for k in state_dict.keys() 
+                     if 'layers.' in k and '.norm.weight' in k])
+    
+    nhead = 8  # From config
+>>>>>>> ff6c14ebf8417b6d4ce378b67db348e372bbbd72
     
     print(f"Detected: d_model={d_model}, num_layers={num_layers}, nhead={nhead}")
     

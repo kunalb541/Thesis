@@ -111,16 +111,27 @@ class FixedVisualizer:
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         state_dict = checkpoint['model_state_dict']
         
+<<<<<<< HEAD
         # Auto-detect d_model from pos_encoding
         if 'pos_encoding' in state_dict:
             d_model = state_dict['pos_encoding'].shape[2]
         # Method 2: Try from input_embed
         elif 'input_embed.4.weight' in state_dict:
             d_model = state_dict['input_embed.4.weight'].shape[0]
+=======
+        # Auto-detect architecture from checkpoint
+        # Method 1: Try from pos_encoding
+        if 'pos_encoding' in state_dict:
+            d_model = state_dict['pos_encoding'].shape[2]
+        # Method 2: Try from input_embed
+        elif 'input_embed.0.weight' in state_dict:
+            d_model = state_dict['input_embed.4.weight'].shape[0]  # Last layer of input_embed
+>>>>>>> ff6c14ebf8417b6d4ce378b67db348e372bbbd72
         else:
             # Fallback
             d_model = 256
         
+<<<<<<< HEAD
         # Count transformer layers by finding unique layer indices
         layer_indices = set()
         for key in state_dict.keys():
@@ -139,6 +150,14 @@ class FixedVisualizer:
             nhead = 8
         else:
             nhead = 8
+=======
+        # Count transformer layers
+        num_layers = len([k for k in state_dict.keys() 
+                         if 'layers.' in k and '.norm.weight' in k])
+        
+        # Detect nhead (should be from config, default 8)
+        nhead = 8
+>>>>>>> ff6c14ebf8417b6d4ce378b67db348e372bbbd72
         
         print(f"   Detected architecture:")
         print(f"   - d_model: {d_model}")
