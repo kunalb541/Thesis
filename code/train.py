@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-NaN-Proof Training Script
-Guaranteed stable training with no NaN gradients
+Distributed Training for 8x H100 GPUs
+Uses PyTorch DDP with SLURM support
 
 Author: Kunal Bhatia
-Version: 9.0
+Version: 10.0 - H100 Production
 """
 
 import os
+import sys
 import json
 import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.cuda.amp import GradScaler, autocast
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
@@ -21,33 +26,62 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
 
-from transformer import StableMicrolensingTransformer, NaNSafeLoss
+# Import our transformer
+from transformer import MicrolensingTransformer, count_parameters
+from normalization import CausticPreservingNormalizer
 
 
-class SafeDataset(Dataset):
-    """Dataset that guarantees no NaN/Inf values"""
+def setup_distributed():
+    """Initialize distributed training"""
+    
+    # Get environment variables
+    rank = int(os.environ.get('RANK', 0))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    
+    # Initialize process group
+    if world_size > 1:
+        print(f"[Rank {rank}] Initializing process group...")
+        dist.init_process_group(
+            backend='nccl',
+            init_method='env://'
+        )
+        torch.cuda.set_device(local_rank)
+        
+        # Set NCCL options for H100
+        os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
+        os.environ['NCCL_TIMEOUT'] = '1800'  # 30 minutes
+        
+    return rank, local_rank, world_size
+
+
+def cleanup_distributed():
+    """Clean up distributed training"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def print_rank0(message, rank=0):
+    """Print only from rank 0"""
+    if rank == 0:
+        print(message)
+
+
+class MicrolensingDataset(Dataset):
+    """Dataset for distributed training"""
     
     def __init__(self, X, y, pad_value=-1.0):
-        # Clean data - replace any NaN/Inf with pad_value
+        # Clean data
         X = np.nan_to_num(X, nan=pad_value, posinf=100.0, neginf=-100.0)
         
-        # Ensure data is in reasonable range
+        # Ensure reasonable range
         valid_mask = X != pad_value
         if valid_mask.any():
             X[valid_mask] = np.clip(X[valid_mask], -100, 100)
         
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.long)
-        
-        # Validate
-        assert not torch.isnan(self.X).any(), "NaN found in dataset X"
-        assert not torch.isinf(self.X).any(), "Inf found in dataset X"
-        assert not torch.isnan(self.y).any(), "NaN found in dataset y"
-        
-        # Report statistics
-        valid_points = (self.X != pad_value).sum().item()
-        total_points = self.X.numel()
-        print(f"  Dataset: {len(self.X)} samples, {valid_points/total_points*100:.1f}% valid data")
+        self.pad_value = pad_value
     
     def __len__(self):
         return len(self.y)
@@ -56,244 +90,222 @@ class SafeDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-class SafeNormalizer:
-    """Normalizer that cannot produce NaN"""
+class StableNormalizer:
+    """Normalizer that handles padding and prevents NaN"""
     
     def __init__(self, pad_value=-1.0):
         self.pad_value = pad_value
-        self.center = 0.0
-        self.scale = 1.0
+        self.mean = 0.0
+        self.std = 1.0
     
     def fit(self, X):
-        """Fit with guaranteed stability"""
-        # Find valid values
         valid_mask = (X != self.pad_value) & np.isfinite(X)
         
         if valid_mask.any():
             valid_values = X[valid_mask]
+            self.mean = np.median(valid_values)
+            self.std = np.median(np.abs(valid_values - self.mean))
             
-            # Robust statistics
-            self.center = np.median(valid_values)
-            self.scale = np.median(np.abs(valid_values - self.center))
+            if self.std < 1e-8:
+                self.std = 1.0
             
-            # Ensure scale is not zero
-            if self.scale < 1e-8:
-                self.scale = np.std(valid_values)
-            if self.scale < 1e-8:
-                self.scale = 1.0
-            
-            # Clamp to reasonable values
-            self.center = np.clip(self.center, -100, 100)
-            self.scale = np.clip(self.scale, 0.01, 100)
-        else:
-            print("WARNING: No valid data for normalization, using defaults")
-            self.center = 0.0
-            self.scale = 1.0
+            self.mean = np.clip(self.mean, -100, 100)
+            self.std = np.clip(self.std, 0.01, 100)
         
-        print(f"  Normalizer: center={self.center:.3f}, scale={self.scale:.3f}")
         return self
     
     def transform(self, X):
-        """Transform with NaN safety"""
         X_norm = X.copy()
         valid_mask = (X != self.pad_value) & np.isfinite(X)
         
         if valid_mask.any():
-            # Safe normalization
-            X_norm[valid_mask] = (X[valid_mask] - self.center) / self.scale
-            # Clip to prevent extreme values
+            X_norm[valid_mask] = (X[valid_mask] - self.mean) / self.std
             X_norm[valid_mask] = np.clip(X_norm[valid_mask], -10, 10)
         
-        # Ensure no NaN/Inf
-        X_norm = np.nan_to_num(X_norm, nan=0.0, posinf=10.0, neginf=-10.0)
-        
-        return X_norm
-
-
-def check_model_health(model):
-    """Check if model parameters are healthy"""
-    unhealthy = False
+        return np.nan_to_num(X_norm, nan=0.0, posinf=10.0, neginf=-10.0)
     
-    for name, param in model.named_parameters():
-        if torch.isnan(param).any():
-            print(f"  ❌ NaN in {name}")
-            unhealthy = True
-        if torch.isinf(param).any():
-            print(f"  ❌ Inf in {name}")
-            unhealthy = True
-        
-        # Check if parameters are exploding
-        param_norm = param.norm().item()
-        if param_norm > 1000:
-            print(f"  ⚠️  Large parameters in {name}: {param_norm:.2e}")
-    
-    return not unhealthy
+    def fit_transform(self, X):
+        return self.fit(X).transform(X)
 
 
-def safe_backward(loss, model):
-    """Perform backward pass with NaN checking"""
-    # Check loss first
-    if torch.isnan(loss) or torch.isinf(loss):
-        print("  ⚠️  NaN/Inf loss detected, skipping backward pass")
-        return False
-    
-    # Backward pass
-    loss.backward()
-    
-    # Check gradients
-    grad_ok = True
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            if torch.isnan(param.grad).any():
-                print(f"  ⚠️  NaN gradient in {name}, zeroing")
-                param.grad.zero_()
-                grad_ok = False
-            elif torch.isinf(param.grad).any():
-                print(f"  ⚠️  Inf gradient in {name}, clipping")
-                param.grad = torch.clamp(param.grad, -1.0, 1.0)
-                grad_ok = False
-    
-    return grad_ok
-
-
-def train_epoch(model, loader, criterion, optimizer, scheduler, device, epoch):
-    """Train one epoch with extensive NaN protection"""
+def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, 
+                device, epoch, rank, world_size, use_amp=True):
+    """Train one epoch with mixed precision"""
     model.train()
     
     total_loss = 0
     correct = 0
     total = 0
-    valid_batches = 0
-    skipped_batches = 0
+    num_batches = 0
     
-    pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
+    # Progress bar only on rank 0
+    if rank == 0:
+        pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
+    else:
+        pbar = loader
     
     for batch_idx, (X, y) in enumerate(pbar):
-        X = X.to(device)
-        y = y.to(device)
+        X = X.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
         
-        # Check input
-        if torch.isnan(X).any() or torch.isinf(X).any():
-            print(f"  ⚠️  NaN/Inf in input batch {batch_idx}, skipping")
-            skipped_batches += 1
-            continue
+        optimizer.zero_grad(set_to_none=True)
         
-        # Forward pass
-        try:
+        # Mixed precision forward pass
+        with autocast(enabled=use_amp):
             outputs = model(X)
             logits = outputs['binary']
+            
+            # Add auxiliary losses if available
             loss = criterion(logits, y)
-        except Exception as e:
-            print(f"  ⚠️  Error in forward pass: {e}")
-            skipped_batches += 1
+            
+            if 'anomaly' in outputs:
+                # Binary events should have higher anomaly scores
+                anomaly_target = y.float()
+                anomaly_loss = nn.functional.mse_loss(outputs['anomaly'], anomaly_target)
+                loss = loss + 0.1 * anomaly_loss
+        
+        # Check for NaN
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"[Rank {rank}] NaN/Inf loss detected, skipping batch")
             continue
         
-        # Check loss
-        if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 100:
-            skipped_batches += 1
-            continue
-        
-        # Backward pass with safety
-        optimizer.zero_grad()
-        
-        if safe_backward(loss, model):
-            # Gradient clipping
+        # Backward pass with gradient scaling
+        if use_amp:
+            scaler.scale(loss).backward()
+            
+            # Unscale and clip gradients
+            scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             
-            if torch.isfinite(grad_norm) and grad_norm < 100:
-                # Update weights
-                optimizer.step()
-                valid_batches += 1
-                
-                # Update metrics
-                total_loss += loss.item()
-                preds = logits.argmax(dim=1)
-                correct += (preds == y).sum().item()
-                total += len(y)
-            else:
-                skipped_batches += 1
+            # Step optimizer
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            skipped_batches += 1
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
         
-        # Update progress bar
-        if valid_batches > 0 and total > 0:
-            pbar.set_postfix({
-                'loss': f'{total_loss/valid_batches:.4f}',
-                'acc': f'{100*correct/total:.1f}%',
-                'skip': skipped_batches
-            })
+        # Update metrics
+        total_loss += loss.item()
+        num_batches += 1
+        
+        with torch.no_grad():
+            preds = logits.argmax(dim=1)
+            correct += (preds == y).sum().item()
+            total += len(y)
+        
+        # Update progress bar (rank 0 only)
+        if rank == 0 and batch_idx % 10 == 0:
+            acc = correct / total if total > 0 else 0
+            if hasattr(pbar, 'set_postfix'):
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'acc': f'{acc*100:.1f}%',
+                    'grad': f'{grad_norm:.3f}',
+                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+                })
     
     # Step scheduler
     if scheduler is not None:
         scheduler.step()
     
-    # Report
-    if skipped_batches > 0:
-        print(f"  ⚠️  Skipped {skipped_batches} batches")
+    # Gather metrics across all GPUs
+    if world_size > 1:
+        metrics = torch.tensor([total_loss, correct, total, num_batches], 
+                              dtype=torch.float32).to(device)
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        total_loss, correct, total, num_batches = metrics.cpu().numpy()
     
-    avg_loss = total_loss / max(valid_batches, 1)
+    avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
     
-    return avg_loss, accuracy, skipped_batches
+    return avg_loss, accuracy
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
-    """Evaluate with NaN protection"""
+def evaluate(model, loader, criterion, device, rank, world_size):
+    """Evaluate model"""
     model.eval()
     
     total_loss = 0
     correct = 0
     total = 0
-    valid_batches = 0
+    num_batches = 0
     
-    for X, y in tqdm(loader, desc="Evaluating", leave=False):
-        X = X.to(device)
-        y = y.to(device)
-        
-        # Skip bad batches
-        if torch.isnan(X).any() or torch.isinf(X).any():
-            continue
-        
-        try:
-            outputs = model(X)
-            logits = outputs['binary']
-            loss = criterion(logits, y)
-            
-            if torch.isfinite(loss):
-                total_loss += loss.item()
-                valid_batches += 1
-            
-            preds = logits.argmax(dim=1)
-            correct += (preds == y).sum().item()
-            total += len(y)
-        except Exception as e:
-            print(f"  ⚠️  Error in evaluation: {e}")
-            continue
+    # Progress bar only on rank 0
+    if rank == 0:
+        pbar = tqdm(loader, desc="Evaluating", leave=False)
+    else:
+        pbar = loader
     
-    avg_loss = total_loss / max(valid_batches, 1)
+    for X, y in pbar:
+        X = X.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        
+        outputs = model(X)
+        logits = outputs['binary']
+        loss = criterion(logits, y)
+        
+        if torch.isfinite(loss):
+            total_loss += loss.item()
+            num_batches += 1
+        
+        preds = logits.argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total += len(y)
+    
+    # Gather metrics across all GPUs
+    if world_size > 1:
+        metrics = torch.tensor([total_loss, correct, total, num_batches],
+                              dtype=torch.float32).to(device)
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        total_loss, correct, total, num_batches = metrics.cpu().numpy()
+    
+    avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
     
     return avg_loss, accuracy
 
 
 def main():
-    parser = argparse.ArgumentParser(description='NaN-Proof Training')
+    parser = argparse.ArgumentParser(description='H100 Distributed Training')
     parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', default='stable', help='Experiment name')
+    parser.add_argument('--experiment_name', default='h100_dist', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=16)  # Smaller for stability
-    parser.add_argument('--lr', type=float, default=5e-5)  # Small learning rate
-    parser.add_argument('--quick', action='store_true', help='Quick test')
+    parser.add_argument('--batch_size', type=int, default=64)  # Per GPU batch size
+    parser.add_argument('--lr', type=float, default=1e-3)  # Larger LR for larger batch
+    parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
+    parser.add_argument('--grad_clip', type=float, default=1.0)
+    parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision')
+    parser.add_argument('--quick', action='store_true', help='Quick test mode')
+    
+    # Model hyperparameters
+    parser.add_argument('--d_model', type=int, default=256)
+    parser.add_argument('--nhead', type=int, default=8)
+    parser.add_argument('--num_layers', type=int, default=6)
+    parser.add_argument('--dropout', type=float, default=0.1)
     
     args = parser.parse_args()
     
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # Setup distributed training
+    rank, local_rank, world_size = setup_distributed()
+    
+    # Device setup
+    device = torch.device(f'cuda:{local_rank}')
+    
+    # Print info from rank 0
+    if rank == 0:
+        print("="*70)
+        print("H100 DISTRIBUTED TRAINING")
+        print("="*70)
+        print(f"World size: {world_size} GPUs")
+        print(f"Device: {device}")
+        print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
+        print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
     
     # Load data
-    print(f"\nLoading data from {args.data}...")
+    print_rank0(f"\nLoading data from {args.data}...", rank)
     data = np.load(args.data)
     X = data['X']
     y = data['y']
@@ -301,38 +313,32 @@ def main():
     if X.ndim == 3:
         X = X.squeeze(1)
     
-    print(f"Data shape: {X.shape}")
-    
-    # Data validation
-    print("\n🔍 Data Validation:")
-    nan_count = np.isnan(X).sum()
-    inf_count = np.isinf(X).sum()
-    print(f"  NaN values: {nan_count}")
-    print(f"  Inf values: {inf_count}")
-    
-    # Clean data if needed
-    if nan_count > 0 or inf_count > 0:
-        print("  Cleaning data...")
-        X = np.nan_to_num(X, nan=-1.0, posinf=100.0, neginf=-100.0)
+    print_rank0(f"Data shape: {X.shape}", rank)
+    print_rank0(f"Classes: Binary={np.sum(y==1)}, PSPL={np.sum(y==0)}", rank)
     
     # Quick mode
     if args.quick:
-        print("⚡ Quick mode: Using 1000 samples")
-        indices = np.random.choice(len(X), min(1000, len(X)), replace=False)
+        print_rank0("⚡ Quick mode: Using 10000 samples", rank)
+        indices = np.random.choice(len(X), min(10000, len(X)), replace=False)
         X = X[indices]
         y = y[indices]
         args.epochs = 5
     
-    # Normalize
-    print("\n🔄 Normalizing data...")
-    normalizer = SafeNormalizer(pad_value=-1.0)
-    X_norm = normalizer.fit(X).transform(X)
+    # Data validation
+    if rank == 0:
+        print("\n🔍 Data Validation:")
+        print(f"  NaN values: {np.isnan(X).sum()}")
+        print(f"  Inf values: {np.isinf(X).sum()}")
     
-    # Verify normalization
-    print(f"  Normalized range: [{X_norm.min():.2f}, {X_norm.max():.2f}]")
-    assert not np.isnan(X_norm).any(), "NaN after normalization!"
+    # Normalize data
+    print_rank0("\n🔄 Normalizing data...", rank)
+    normalizer = StableNormalizer(pad_value=-1.0)
+    X_norm = normalizer.fit_transform(X)
     
-    # Split data
+    if rank == 0:
+        print(f"  Normalized range: [{X_norm.min():.2f}, {X_norm.max():.2f}]")
+    
+    # Train/val/test split
     X_train, X_temp, y_train, y_temp = train_test_split(
         X_norm, y, test_size=0.3, stratify=y, random_state=42
     )
@@ -340,157 +346,233 @@ def main():
         X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
     )
     
-    print(f"\nSplits: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
+    print_rank0(f"\nSplits: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}", rank)
     
     # Create datasets
-    train_dataset = SafeDataset(X_train, y_train)
-    val_dataset = SafeDataset(X_val, y_val)
-    test_dataset = SafeDataset(X_test, y_test)
+    train_dataset = MicrolensingDataset(X_train, y_train)
+    val_dataset = MicrolensingDataset(X_val, y_val)
+    test_dataset = MicrolensingDataset(X_test, y_test)
     
-    # Data loaders
+    # Create distributed samplers
+    train_sampler = DistributedSampler(
+        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+    )
+    val_sampler = DistributedSampler(
+        val_dataset, num_replicas=world_size, rank=rank, shuffle=False
+    )
+    test_sampler = DistributedSampler(
+        test_dataset, num_replicas=world_size, rank=rank, shuffle=False
+    )
+    
+    # Create data loaders
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size,
-        shuffle=True, num_workers=0
+        train_dataset, 
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size*2,
-        shuffle=False, num_workers=0
+        val_dataset,
+        batch_size=args.batch_size * 2,
+        sampler=val_sampler,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=args.batch_size*2,
-        shuffle=False, num_workers=0
+        test_dataset,
+        batch_size=args.batch_size * 2,
+        sampler=test_sampler,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True
     )
     
     # Create model
-    print("\n🤖 Creating Stable Transformer...")
-    model = StableMicrolensingTransformer(
+    print_rank0("\n🤖 Creating MicrolensingTransformer...", rank)
+    model = MicrolensingTransformer(
         n_points=X.shape[1],
-        d_model=64,  # Small for stability
-        nhead=4,     # Few heads for stability
-        num_layers=3,  # Shallow for stability
-        dropout=0.1
+        d_model=args.d_model,
+        nhead=args.nhead,
+        num_layers=args.num_layers,
+        dim_feedforward=args.d_model * 4,
+        dropout=args.dropout,
+        pad_value=-1.0
     ).to(device)
     
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {n_params:,}")
+    # Wrap in DDP
+    if world_size > 1:
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True
+        )
     
-    # Check initial model health
-    print("\n🏥 Initial model health check:")
-    if check_model_health(model):
-        print("  ✅ Model parameters healthy")
-    else:
-        print("  ⚠️  Model has issues, continuing anyway...")
+    if rank == 0:
+        base_model = model.module if hasattr(model, 'module') else model
+        print(f"Model parameters: {count_parameters(base_model):,}")
     
     # Loss and optimizer
-    criterion = NaNSafeLoss()
+    criterion = nn.CrossEntropyLoss()
     
-    # Very conservative optimizer settings
+    # Scale learning rate by world size
+    effective_batch_size = args.batch_size * world_size
+    lr_scale = effective_batch_size / 256  # Base batch size
+    scaled_lr = args.lr * lr_scale
+    
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
-        weight_decay=1e-5,
-        eps=1e-4  # Larger epsilon for stability
+        lr=scaled_lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
     )
     
-    # Cosine annealing scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs
-    )
+    # Learning rate scheduler with warmup
+    def lr_lambda(epoch):
+        if epoch < args.warmup_epochs:
+            return (epoch + 1) / args.warmup_epochs
+        else:
+            progress = (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)
+            return 0.5 * (1 + np.cos(np.pi * progress))
     
-    # Create experiment directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = Path(f"results/{args.experiment_name}_{timestamp}")
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\n📁 Experiment directory: {exp_dir}")
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
-    # Training
-    print("\n" + "="*60)
-    print("STARTING STABLE TRAINING")
-    print("="*60)
+    # Mixed precision scaler
+    scaler = GradScaler() if not args.no_amp else None
+    
+    # Create experiment directory (rank 0 only)
+    if rank == 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_dir = Path(f"../results/{args.experiment_name}_{timestamp}")
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n📁 Experiment directory: {exp_dir}")
+        
+        # Save config
+        config = vars(args)
+        config['world_size'] = world_size
+        config['effective_batch_size'] = effective_batch_size
+        config['scaled_lr'] = scaled_lr
+        
+        with open(exp_dir / 'config.json', 'w') as f:
+            json.dump(config, f, indent=2)
+    
+    # Synchronize all processes
+    if world_size > 1:
+        dist.barrier()
+    
+    # Training loop
+    if rank == 0:
+        print("\n" + "="*70)
+        print("STARTING DISTRIBUTED TRAINING")
+        print("="*70)
     
     best_val_acc = 0
     patience_counter = 0
-    max_patience = 20
+    max_patience = 15
     
     for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch+1}/{args.epochs}")
-        print("-"*50)
+        # Set epoch for distributed sampler
+        train_sampler.set_epoch(epoch)
+        
+        if rank == 0:
+            print(f"\nEpoch {epoch+1}/{args.epochs}")
+            print("-"*50)
         
         # Train
-        train_loss, train_acc, skipped = train_epoch(
-            model, train_loader, criterion, optimizer, scheduler, device, epoch
+        train_loss, train_acc = train_epoch(
+            model, train_loader, criterion, optimizer, scaler, scheduler,
+            device, epoch, rank, world_size, use_amp=not args.no_amp
         )
         
-        # Check model health
-        if not check_model_health(model):
-            print("  ❌ Model unhealthy, stopping training")
-            break
-        
         # Validate
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+        val_loss, val_acc = evaluate(
+            model, val_loader, criterion, device, rank, world_size
+        )
         
-        print(f"Train: Loss={train_loss:.4f}, Acc={train_acc*100:.2f}%")
-        print(f"Val: Loss={val_loss:.4f}, Acc={val_acc*100:.2f}%")
-        
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            patience_counter = 0
+        # Print metrics (rank 0 only)
+        if rank == 0:
+            print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc*100:.2f}%")
+            print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc*100:.2f}%")
+            print(f"LR: {optimizer.param_groups[0]['lr']:.2e}")
             
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-                'normalizer': {
-                    'center': normalizer.center,
-                    'scale': normalizer.scale
-                }
-            }, exp_dir / 'best_model.pt')
+            # Save best model
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                
+                # Get base model
+                save_model = model.module if hasattr(model, 'module') else model
+                
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': save_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict() if scaler else None,
+                    'val_acc': val_acc,
+                    'val_loss': val_loss
+                }, exp_dir / 'best_model.pt')
+                
+                print(f"✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
+            else:
+                patience_counter += 1
             
-            print(f"✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
-        else:
-            patience_counter += 1
-        
-        # Early stopping
-        if patience_counter >= max_patience:
-            print(f"\n⏹️  Early stopping at epoch {epoch+1}")
-            break
+            # Early stopping
+            if patience_counter >= max_patience:
+                print(f"\n⏹️  Early stopping at epoch {epoch+1}")
+                break
     
     # Final evaluation
-    print("\n" + "="*60)
-    print("FINAL EVALUATION")
-    print("="*60)
+    if rank == 0:
+        print("\n" + "="*70)
+        print("FINAL EVALUATION")
+        print("="*70)
+        
+        # Load best model
+        checkpoint = torch.load(exp_dir / 'best_model.pt')
+        load_model = model.module if hasattr(model, 'module') else model
+        load_model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Load best model
-    checkpoint = torch.load(exp_dir / 'best_model.pt')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Synchronize before final evaluation
+    if world_size > 1:
+        dist.barrier()
     
-    test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+    test_loss, test_acc = evaluate(
+        model, test_loader, criterion, device, rank, world_size
+    )
     
-    print(f"Test Loss: {test_loss:.4f}")
-    print(f"Test Accuracy: {test_acc*100:.2f}%")
+    if rank == 0:
+        print(f"Test Loss: {test_loss:.4f}")
+        print(f"Test Accuracy: {test_acc*100:.2f}%")
+        
+        # Save results
+        results = {
+            'test_loss': float(test_loss),
+            'test_acc': float(test_acc),
+            'best_val_acc': float(best_val_acc),
+            'world_size': world_size,
+            'effective_batch_size': effective_batch_size
+        }
+        
+        with open(exp_dir / 'results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        # Success message
+        if test_acc > 0.75:
+            print("\n🌟 EXCELLENT! Model achieved great performance!")
+        elif test_acc > 0.70:
+            print("\n✅ SUCCESS! Model achieved good performance!")
+        else:
+            print("\n⚠️  Model needs improvement")
+        
+        print(f"\n📁 Results saved to: {exp_dir}")
+        print("="*70)
     
-    # Save results
-    results = {
-        'test_loss': float(test_loss),
-        'test_acc': float(test_acc),
-        'best_val_acc': float(best_val_acc)
-    }
-    
-    with open(exp_dir / 'results.json', 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    # Success message
-    if test_acc > 0.70:
-        print("\n🎉 SUCCESS! Model achieved good performance WITHOUT NaN!")
-    elif test_acc > 0.65:
-        print("\n✅ Model trained successfully without NaN")
-    else:
-        print("\n⚠️  Model needs improvement, but no NaN issues!")
-    
-    print(f"\n📁 Results saved to: {exp_dir}")
-    print("\n✨ Training completed without NaN gradients!")
+    # Clean up
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
