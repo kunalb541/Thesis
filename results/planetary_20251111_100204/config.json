@@ -1,6 +1,6 @@
 {
-  "data": "/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/data/raw/stellar.npz",
-  "experiment_name": "stellar",
+  "data": "/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/data/raw/planetary.npz",
+  "experiment_name": "planetary",
   "epochs": 50,
   "batch_size": 64,
   "lr": 0.0003,
