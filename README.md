@@ -12,7 +12,8 @@ Date: November 2025
 
 ## Overview
 
-This repository implements a **transformer architecture** for real-time classification of binary microlensing events (planetary systems and stellar binaries) versus simple Point-Source Point-Lens (PSPL) events. Designed for next-generation survey operations (LSST, Roman Space Telescope) requiring sub-second inference on alert streams.
+This repository implements a **transformer architecture** for real-time classification of binary microlensing events (planetary systems and stellar binaries) versus simple Point-Source Point-Lens (PSPL) events. 
+Designed for next-generation survey operations (LSST, Roman Space Telescope) requiring sub-second inference on alert streams.
 
 ### Key Features
 
