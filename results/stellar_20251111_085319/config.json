@@ -1,9 +1,9 @@
 {
-  "data": "/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/data/raw/distinct.npz",
-  "experiment_name": "distinct",
+  "data": "/pfs/data6/home/hd/hd_hd/hd_vm305/Thesis/data/raw/stellar.npz",
+  "experiment_name": "stellar",
   "epochs": 50,
   "batch_size": 64,
-  "lr": 0.001,
+  "lr": 0.0003,
   "warmup_epochs": 5,
   "weight_decay": 0.0001,
   "grad_clip": 1.0,
@@ -15,5 +15,5 @@
   "dropout": 0.1,
   "world_size": 32,
   "effective_batch_size": 2048,
-  "scaled_lr": 0.008
+  "scaled_lr": 0.0024
 }
