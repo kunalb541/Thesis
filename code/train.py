@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Distributed Training for THREE-CLASS Classification
-===================================================
+Distributed Training for THREE-CLASS Classification with Enhanced Multi-Task Learning
+====================================================================================
 Classes: 0=Flat, 1=PSPL, 2=Binary
 
-NEW in v11.0: Updated for 3-class classification
+NEW in v11.1:
+- HIGH WEIGHT auxiliary losses for Flat and PSPL detection (0.5 each)
+- Early prediction training (random temporal truncation)
+- Improved early detection capabilities
 
 Author: Kunal Bhatia
-Version: 11.0 - Three-Class Classification
+Version: 11.1 - Enhanced Multi-Task Training
 """
 
 import os
@@ -29,6 +32,7 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
 import torch.nn.functional as F
+
 # Suppress NCCL warnings
 os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
 os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
@@ -124,15 +128,65 @@ class StableNormalizer:
         return self.fit(X).transform(X)
 
 
-def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, 
-                device, epoch, rank, world_size, use_amp=True, grad_clip=1.0):
+def apply_early_truncation(X, y, truncation_prob=0.3, min_frac=0.1, max_frac=0.8):
     """
-    Train one epoch with 3-class multi-task learning
+    Apply random temporal truncation to simulate early observations
+    
+    This trains the model to make predictions from partial data,
+    improving early detection capabilities.
+    
+    Args:
+        X: Input light curves [B, T]
+        y: Labels [B]
+        truncation_prob: Probability of truncating a sample
+        min_frac: Minimum fraction of data to keep (e.g., 0.1 = 10%)
+        max_frac: Maximum fraction to truncate to (e.g., 0.8 = 80%)
+    
+    Returns:
+        X_truncated: Light curves with some randomly truncated
+    """
+    B, T = X.shape
+    device = X.device
+    pad_value = -1.0
+    
+    # Randomly decide which samples to truncate
+    truncate_mask = torch.rand(B, device=device) < truncation_prob
+    
+    if truncate_mask.sum() == 0:
+        return X
+    
+    X_truncated = X.clone()
+    
+    # For each sample to truncate, choose random truncation point
+    for i in range(B):
+        if truncate_mask[i]:
+            # Random fraction between min_frac and max_frac
+            frac = torch.rand(1, device=device).item() * (max_frac - min_frac) + min_frac
+            n_keep = int(T * frac)
+            
+            # Mask out everything after n_keep
+            X_truncated[i, n_keep:] = pad_value
+    
+    return X_truncated
+
+
+def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, 
+                device, epoch, rank, world_size, use_amp=True, grad_clip=1.0,
+                early_training=True):
+    """
+    Train one epoch with ENHANCED multi-task learning
+    
+    NEW in v11.1:
+    - HIGH WEIGHT losses for Flat detection (0.5)
+    - HIGH WEIGHT losses for PSPL detection (0.5)
+    - Early prediction training via random truncation
     """
     model.train()
     
     total_loss = 0
     classification_loss_total = 0
+    flat_loss_total = 0
+    pspl_loss_total = 0
     anomaly_loss_total = 0
     caustic_loss_total = 0
     correct = 0
@@ -149,46 +203,68 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         
+        # EARLY PREDICTION TRAINING: Randomly truncate sequences
+        if early_training and torch.rand(1).item() < 0.5:  # 50% of batches
+            X = apply_early_truncation(X, y, truncation_prob=0.5, min_frac=0.1, max_frac=0.8)
+        
         optimizer.zero_grad(set_to_none=True)
         
         with autocast(enabled=use_amp):
             outputs = model(X, return_all=True)
             
-            # Main task: 3-class classification (Flat vs PSPL vs Binary)
+            # ============== MAIN TASK ==============
+            # 3-class classification (Flat, PSPL, Binary)
             logits = outputs['logits']  # [B, 3]
             classification_loss = criterion(logits, y)
             loss = classification_loss
             
-            # Auxiliary task 1: Anomaly detection
-            # Flat=0 should have low anomaly, PSPL=1 and Binary=2 should have higher
+            # ============== HIGH WEIGHT AUXILIARY TASKS ==============
+            
+            # Flat detection: Class 0 vs. classes 1,2
+            # TARGET: 1.0 for Flat (class 0), 0.0 for PSPL/Binary (classes 1,2)
+            # HIGH WEIGHT (0.5): Critical for avoiding false triggers!
+            if 'flat' in outputs:
+                flat_target = (y == 0).float()
+                flat_loss = F.binary_cross_entropy(outputs['flat'], flat_target)
+                loss = loss + 0.5 * flat_loss  # HIGH WEIGHT!
+                flat_loss_total += flat_loss.item()
+            else:
+                flat_loss = torch.tensor(0.0)
+            
+            # PSPL detection: Class 1 vs. classes 0,2
+            # TARGET: 1.0 for PSPL (class 1), 0.0 for Flat/Binary (classes 0,2)
+            # HIGH WEIGHT (0.5): Important for distinguishing simple from complex!
+            if 'pspl' in outputs:
+                pspl_target = (y == 1).float()
+                pspl_loss = F.binary_cross_entropy(outputs['pspl'], pspl_target)
+                loss = loss + 0.5 * pspl_loss  # HIGH WEIGHT!
+                pspl_loss_total += pspl_loss.item()
+            else:
+                pspl_loss = torch.tensor(0.0)
+            
+            # ============== MODERATE WEIGHT AUXILIARY TASKS ==============
+            
+            # Anomaly detection: Any event (PSPL or Binary) vs. Flat
+            # TARGET: 0.0 for Flat, 1.0 for PSPL/Binary
+            # MODERATE WEIGHT (0.2): General event detection
             if 'anomaly' in outputs:
-                # Create target: 0.0 for Flat, 1.0 for PSPL/Binary
-                anomaly_target = (y > 0).float()
-                anomaly_loss = nn.functional.mse_loss(outputs['anomaly'], anomaly_target)
-                loss = loss + anomaly_loss
+                anomaly_target = (y > 0).float()  # 1 if PSPL or Binary
+                anomaly_loss = F.binary_cross_entropy(outputs['anomaly'], anomaly_target)
+                loss = loss + 0.2 * anomaly_loss
+                anomaly_loss_total += anomaly_loss.item()
             else:
                 anomaly_loss = torch.tensor(0.0)
             
-            # Auxiliary task 2: Caustic detection
-            # Only Binary (class 2) has caustics
+            # Caustic detection: Binary vs. PSPL/Flat
+            # TARGET: 1.0 for Binary (class 2), 0.0 for Flat/PSPL (classes 0,1)
+            # MODERATE WEIGHT (0.2): Binary-specific features
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
-                with autocast(enabled=False):
-                    caustic_pred = outputs['caustic'].float()
-                    caustic_target_f32 = caustic_target.float()
-                    caustic_pred = torch.clamp(caustic_pred, min=1e-7, max=1-1e-7)
-                    caustic_loss = nn.functional.binary_cross_entropy(caustic_pred, caustic_target_f32)
-                loss = loss + caustic_loss
+                caustic_loss = F.binary_cross_entropy(outputs['caustic'], caustic_target)
+                loss = loss + 0.2 * caustic_loss
+                caustic_loss_total += caustic_loss.item()
             else:
                 caustic_loss = torch.tensor(0.0)
-            
-            # Optional: Add confidence loss to encourage high confidence on correct predictions
-            if 'confidence' in outputs:
-                probs = F.softmax(logits, dim=-1)
-                max_prob, pred = probs.max(dim=-1)
-                correct_pred = (pred == y).float()
-                conf_loss = nn.functional.mse_loss(outputs['confidence'], correct_pred)
-                loss = loss + 0.05 * conf_loss
         
         # Check for NaN/Inf
         if torch.isnan(loss) or torch.isinf(loss):
@@ -212,10 +288,6 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         # Update metrics
         total_loss += loss.item()
         classification_loss_total += classification_loss.item()
-        if isinstance(anomaly_loss, torch.Tensor):
-            anomaly_loss_total += anomaly_loss.item()
-        if isinstance(caustic_loss, torch.Tensor):
-            caustic_loss_total += caustic_loss.item()
         num_batches += 1
         
         with torch.no_grad():
@@ -229,13 +301,25 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             if hasattr(pbar, 'set_postfix'):
                 pbar.set_postfix({
                     'loss': f'{loss.item():.4f}',
+                    'cls': f'{classification_loss.item():.3f}',
+                    'flat': f'{flat_loss.item() if isinstance(flat_loss, torch.Tensor) else 0:.3f}',
+                    'pspl': f'{pspl_loss.item() if isinstance(pspl_loss, torch.Tensor) else 0:.3f}',
                     'acc': f'{acc*100:.1f}%',
-                    'grad': f'{grad_norm:.3f}',
-                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+                    'grad': f'{grad_norm:.2f}'
                 })
     
-    if rank == 0 and skipped_batches > 0:
-        print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf loss")
+    if rank == 0:
+        if skipped_batches > 0:
+            print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf loss")
+        
+        # Print loss breakdown
+        if num_batches > 0:
+            print(f"\n  Loss breakdown:")
+            print(f"    Classification: {classification_loss_total / num_batches:.4f}")
+            print(f"    Flat detection (×0.5): {flat_loss_total / num_batches:.4f}")
+            print(f"    PSPL detection (×0.5): {pspl_loss_total / num_batches:.4f}")
+            print(f"    Anomaly (×0.2): {anomaly_loss_total / num_batches:.4f}")
+            print(f"    Caustic (×0.2): {caustic_loss_total / num_batches:.4f}")
     
     # Gather metrics across all GPUs
     if world_size > 1:
@@ -264,6 +348,12 @@ def evaluate(model, loader, criterion, device, rank, world_size):
     class_correct = torch.zeros(3).to(device)
     class_total = torch.zeros(3).to(device)
     
+    # Auxiliary task accuracy tracking
+    flat_correct = 0
+    flat_total = 0
+    pspl_correct = 0
+    pspl_total = 0
+    
     if rank == 0:
         pbar = tqdm(loader, desc="Validating", leave=False)
     else:
@@ -291,16 +381,29 @@ def evaluate(model, loader, criterion, device, rank, world_size):
             if mask.sum() > 0:
                 class_correct[c] += (preds[mask] == y[mask]).sum().item()
                 class_total[c] += mask.sum().item()
+        
+        # Auxiliary task accuracy
+        if 'flat' in outputs:
+            flat_pred = (outputs['flat'] > 0.5).long()
+            flat_true = (y == 0).long()
+            flat_correct += (flat_pred == flat_true).sum().item()
+            flat_total += len(y)
+        
+        if 'pspl' in outputs:
+            pspl_pred = (outputs['pspl'] > 0.5).long()
+            pspl_true = (y == 1).long()
+            pspl_correct += (pspl_pred == pspl_true).sum().item()
+            pspl_total += len(y)
     
     # Gather metrics across all GPUs
     if world_size > 1:
-        metrics = torch.tensor([total_loss, correct, total, num_batches],
+        metrics = torch.tensor([total_loss, correct, total, num_batches, flat_correct, flat_total, pspl_correct, pspl_total],
                               dtype=torch.float32).to(device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         dist.all_reduce(class_correct, op=dist.ReduceOp.SUM)
         dist.all_reduce(class_total, op=dist.ReduceOp.SUM)
         
-        total_loss, correct, total, num_batches = metrics.cpu().numpy()
+        total_loss, correct, total, num_batches, flat_correct, flat_total, pspl_correct, pspl_total = metrics.cpu().numpy()
         class_correct = class_correct.cpu().numpy()
         class_total = class_total.cpu().numpy()
     else:
@@ -310,21 +413,30 @@ def evaluate(model, loader, criterion, device, rank, world_size):
     avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
     
-    # Print per-class accuracies on rank 0
+    # Print detailed metrics on rank 0
     if rank == 0:
         class_names = ['Flat', 'PSPL', 'Binary']
+        print(f"\n  3-Class Accuracy:")
         for c in range(3):
             if class_total[c] > 0:
                 class_acc = class_correct[c] / class_total[c]
-                print(f"  {class_names[c]} accuracy: {class_acc*100:.2f}% ({int(class_correct[c])}/{int(class_total[c])})")
+                print(f"    {class_names[c]:8s}: {class_acc*100:5.2f}% ({int(class_correct[c])}/{int(class_total[c])})")
+        
+        print(f"\n  Auxiliary Task Accuracy:")
+        if flat_total > 0:
+            flat_acc = flat_correct / flat_total
+            print(f"    Flat detection: {flat_acc*100:5.2f}%")
+        if pspl_total > 0:
+            pspl_acc = pspl_correct / pspl_total
+            print(f"    PSPL detection: {pspl_acc*100:5.2f}%")
     
     return avg_loss, accuracy
 
 
 def main():
-    parser = argparse.ArgumentParser(description="3-Class Distributed Training v11.0")
+    parser = argparse.ArgumentParser(description="3-Class Enhanced Multi-Task Training v11.1")
     parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', default='3class_baseline', help='Experiment name')
+    parser.add_argument('--experiment_name', default='3class_enhanced', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
@@ -332,6 +444,8 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--no_amp', action='store_true')
+    parser.add_argument('--no_early_training', action='store_true', 
+                       help='Disable early prediction training (random truncation)')
     parser.add_argument('--quick', action='store_true')
     
     parser.add_argument('--d_model', type=int, default=256)
@@ -351,13 +465,19 @@ def main():
     
     if rank == 0:
         print("="*70)
-        print("THREE-CLASS CLASSIFICATION TRAINING v11.0")
+        print("ENHANCED THREE-CLASS TRAINING v11.1")
         print("="*70)
         print(f"World size: {world_size} GPUs")
         print(f"Device: {device}")
         print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
+        print(f"Early Training: {'Disabled' if args.no_early_training else 'Enabled'}")
         print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
-        print(f"Classes: 0=Flat, 1=PSPL, 2=Binary")
+        print(f"\nLoss Weights:")
+        print(f"  Classification: 1.0")
+        print(f"  Flat detection: 0.5 (HIGH)")
+        print(f"  PSPL detection: 0.5 (HIGH)")
+        print(f"  Anomaly: 0.2")
+        print(f"  Caustic: 0.2")
 
     # Load data
     print_rank0(f"\nLoading data from {args.data}...", rank)
@@ -448,7 +568,7 @@ def main():
     from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
-    print_rank0("\n🤖 Creating MicrolensingTransformer (3-class)...", rank)
+    print_rank0("\n🤖 Creating MicrolensingTransformer v11.1 (Enhanced Multi-Task)...", rank)
     model = MicrolensingTransformer(
         n_points=X.shape[1],
         d_model=args.d_model,
@@ -470,7 +590,12 @@ def main():
     if rank == 0:
         base_model = model.module if hasattr(model, 'module') else model
         print(f"Model parameters: {count_parameters(base_model):,}")
-        print(f"Output classes: 3 (Flat, PSPL, Binary)")
+        print(f"Output: 3 classes + 5 auxiliary heads")
+        print(f"  - Flat detection (HIGH WEIGHT)")
+        print(f"  - PSPL detection (HIGH WEIGHT)")
+        print(f"  - Anomaly detection")
+        print(f"  - Caustic detection")
+        print(f"  - Confidence estimation")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -512,6 +637,14 @@ def main():
         config['scaled_lr'] = scaled_lr
         config['n_classes'] = 3
         config['class_names'] = ['Flat', 'PSPL', 'Binary']
+        config['version'] = '11.1'
+        config['loss_weights'] = {
+            'classification': 1.0,
+            'flat': 0.5,
+            'pspl': 0.5,
+            'anomaly': 0.2,
+            'caustic': 0.2
+        }
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -540,7 +673,7 @@ def main():
     # Training loop
     if rank == 0:
         print("\n" + "="*70)
-        print("STARTING THREE-CLASS TRAINING")
+        print("STARTING ENHANCED TRAINING")
         print("="*70)
     
     best_val_acc = 0
@@ -557,7 +690,7 @@ def main():
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
             device, epoch, rank, world_size, use_amp=not args.no_amp,
-            grad_clip=args.grad_clip
+            grad_clip=args.grad_clip, early_training=not args.no_early_training
         )
         
         scheduler.step()
@@ -567,7 +700,7 @@ def main():
         )
         
         if rank == 0:
-            print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc*100:.2f}%")
+            print(f"\nTrain Loss: {train_loss:.4f}, Acc: {train_acc*100:.2f}%")
             print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc*100:.2f}%")
             print(f"LR: {optimizer.param_groups[0]['lr']:.2e}")
             
@@ -585,7 +718,8 @@ def main():
                     'scaler_state_dict': scaler.state_dict() if scaler else None,
                     'val_acc': val_acc,
                     'val_loss': val_loss,
-                    'n_classes': 3
+                    'n_classes': 3,
+                    'version': '11.1'
                 }, exp_dir / 'best_model.pt')
                 
                 print(f"✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
@@ -693,7 +827,15 @@ def main():
             'world_size': world_size,
             'effective_batch_size': effective_batch_size,
             'n_classes': 3,
-            'class_names': ['Flat', 'PSPL', 'Binary']
+            'class_names': ['Flat', 'PSPL', 'Binary'],
+            'version': '11.1',
+            'loss_weights': {
+                'classification': 1.0,
+                'flat': 0.5,
+                'pspl': 0.5,
+                'anomaly': 0.2,
+                'caustic': 0.2
+            }
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
@@ -701,9 +843,9 @@ def main():
         
         print("\n" + "="*70)
         if test_acc > 0.75:
-            print("🌟 EXCELLENT! 3-class model achieved great performance!")
+            print("🌟 EXCELLENT! Enhanced model achieved great performance!")
         elif test_acc > 0.70:
-            print("✅ SUCCESS! 3-class model achieved good performance!")
+            print("✅ SUCCESS! Enhanced model achieved good performance!")
         else:
             print(f"⚠️  Model performance: {test_acc*100:.2f}%")
         

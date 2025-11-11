@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Production Transformer for THREE-CLASS Classification
-=====================================================
+Production Transformer for THREE-CLASS Classification with Enhanced Auxiliary Tasks
+===================================================================================
 Classes: 0=Flat (no event), 1=PSPL, 2=Binary
 
-NEW in v11.0: Output head updated for 3 classes
+NEW in v11.1: 
+- Added Flat-specific detection head (HIGH WEIGHT)
+- Added PSPL-specific detection head (HIGH WEIGHT)
+- Improved early detection capabilities
 
 Author: Kunal Bhatia
-Version: 11.0 - Three-Class Classification
+Version: 11.1 - Enhanced Multi-Task Learning
 """
 
 import torch
@@ -125,10 +128,12 @@ class MicrolensingTransformer(nn.Module):
     """
     Production transformer for THREE-CLASS microlensing classification
     
-    NEW in v11.0: Output 3 classes instead of 2
-    - Class 0: Flat (no event, baseline only)
-    - Class 1: PSPL (single lens)
-    - Class 2: Binary (binary lens)
+    NEW in v11.1: Enhanced multi-task learning with class-specific heads
+    - Main task: 3-class classification (Flat, PSPL, Binary)
+    - Auxiliary: Flat detection (HIGH WEIGHT) - avoids false triggers
+    - Auxiliary: PSPL detection (HIGH WEIGHT) - distinguishes simple events
+    - Auxiliary: Anomaly detection - any event vs baseline
+    - Auxiliary: Caustic detection - binary-specific features
     """
     
     def __init__(
@@ -177,34 +182,60 @@ class MicrolensingTransformer(nn.Module):
         # Final norm
         self.norm = nn.LayerNorm(d_model, eps=1e-5)
         
-        # ============== UPDATED FOR 3 CLASSES ==============
-        # Main classification head: 3 classes (Flat, PSPL, Binary)
+        # ============== MAIN TASK ==============
+        # 3-class classification head (Flat, PSPL, Binary)
         self.classification_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 3)  # Changed from 2 to 3!
+            nn.Linear(d_model // 2, 3)
         )
         
         # Keep "binary" alias for backwards compatibility
         self.binary_head = self.classification_head
         
-        # Auxiliary heads for multi-task learning
-        # Anomaly detection: higher for PSPL/Binary vs Flat
-        self.anomaly_head = nn.Sequential(
+        # ============== AUXILIARY TASKS (HIGH WEIGHT) ==============
+        
+        # Flat detection: Is this a non-event? (Flat vs. PSPL/Binary)
+        # HIGH WEIGHT (0.5): Critical for avoiding false triggers in real surveys
+        self.flat_head = nn.Sequential(
             nn.LayerNorm(d_model),
-            nn.Linear(d_model, 1)
+            nn.Linear(d_model, d_model // 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 4, 1),
+            nn.Sigmoid()
         )
         
-        # Caustic detection: only Binary has caustics
+        # PSPL detection: Is this a simple lens event? (PSPL vs. Flat/Binary)
+        # HIGH WEIGHT (0.5): Important for distinguishing simple from complex
+        self.pspl_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model // 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 4, 1),
+            nn.Sigmoid()
+        )
+        
+        # Anomaly detection: Any event vs. Flat (PSPL or Binary vs Flat)
+        # MODERATE WEIGHT (0.2): General event detection
+        self.anomaly_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 1),
+            nn.Sigmoid()
+        )
+        
+        # Caustic detection: only Binary has caustics (Binary vs. PSPL/Flat)
+        # MODERATE WEIGHT (0.2): Binary-specific features
         self.caustic_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 1),
             nn.Sigmoid()
         )
         
-        # NEW: Confidence estimation head
+        # Confidence estimation head
         self.confidence_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 1),
@@ -249,7 +280,7 @@ class MicrolensingTransformer(nn.Module):
         return_all: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass
+        Forward pass with enhanced auxiliary outputs
         
         Args:
             x: Input light curves [B, T] or [B, T, 1]
@@ -260,8 +291,10 @@ class MicrolensingTransformer(nn.Module):
             - 'logits': Main 3-class classification [B, 3]
             - 'binary': Alias for 'logits' (backwards compatibility)
             - 'confidence': Prediction confidence [B]
-            - 'anomaly': Anomaly score [B] (if return_all=True)
-            - 'caustic': Caustic detection [B] (if return_all=True)
+            - 'flat': Flat detection score [B] (NEW v11.1)
+            - 'pspl': PSPL detection score [B] (NEW v11.1)
+            - 'anomaly': Anomaly score [B]
+            - 'caustic': Caustic detection [B]
             - 'prob_flat': Flat probability [B] (if return_all=True)
             - 'prob_pspl': PSPL probability [B] (if return_all=True)
             - 'prob_binary': Binary probability [B] (if return_all=True)
@@ -316,10 +349,15 @@ class MicrolensingTransformer(nn.Module):
         # Get outputs
         logits = self.classification_head(x_final)  # [B, 3]
         
+        # ALWAYS compute auxiliary heads (for training)
         outputs = {
             'logits': logits,
             'binary': logits,  # Alias for backwards compatibility
-            'confidence': self.confidence_head(x_final).squeeze(-1)
+            'confidence': self.confidence_head(x_final).squeeze(-1),
+            'flat': self.flat_head(x_final).squeeze(-1),        # NEW v11.1
+            'pspl': self.pspl_head(x_final).squeeze(-1),        # NEW v11.1
+            'anomaly': self.anomaly_head(x_final).squeeze(-1),
+            'caustic': self.caustic_head(x_final).squeeze(-1)
         }
         
         if return_all:
@@ -328,10 +366,6 @@ class MicrolensingTransformer(nn.Module):
             outputs['prob_flat'] = probs[:, 0]
             outputs['prob_pspl'] = probs[:, 1]
             outputs['prob_binary'] = probs[:, 2]
-            
-            # Auxiliary outputs
-            outputs['anomaly'] = self.anomaly_head(x_final).squeeze(-1)
-            outputs['caustic'] = self.caustic_head(x_final).squeeze(-1)
         
         # Clamp outputs
         outputs['logits'] = torch.clamp(outputs['logits'], min=-20, max=20)
@@ -347,7 +381,7 @@ def count_parameters(model):
 
 def test_model():
     """Test model creation and forward pass"""
-    print("Testing MicrolensingTransformer v11.0 (3-class)...")
+    print("Testing MicrolensingTransformer v11.1 (Enhanced Multi-Task)...")
     
     model = MicrolensingTransformer(
         n_points=1500,
@@ -368,13 +402,19 @@ def test_model():
     print(f"Logits shape: {outputs['logits'].shape}")  # Should be [4, 3]
     print(f"Number of classes: {outputs['logits'].shape[1]}")
     
+    print(f"\nAuxiliary outputs:")
+    print(f"  Flat detection: {outputs['flat'][0].item():.3f}")
+    print(f"  PSPL detection: {outputs['pspl'][0].item():.3f}")
+    print(f"  Anomaly detection: {outputs['anomaly'][0].item():.3f}")
+    print(f"  Caustic detection: {outputs['caustic'][0].item():.3f}")
+    
     if 'prob_flat' in outputs:
-        print(f"✅ Three-class probabilities working!")
+        print(f"\n✅ Three-class probabilities working!")
         print(f"   Flat prob: {outputs['prob_flat'][0].item():.3f}")
         print(f"   PSPL prob: {outputs['prob_pspl'][0].item():.3f}")
         print(f"   Binary prob: {outputs['prob_binary'][0].item():.3f}")
     
-    print("✅ Model test passed!")
+    print("\n✅ Model test passed!")
 
 
 if __name__ == "__main__":
