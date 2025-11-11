@@ -308,7 +308,7 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='H100 Distributed Training')
+    parser = argparse.ArgumentParser(description= "Distributed Training")
     parser.add_argument('--data', required=True, help='Path to dataset')
     parser.add_argument('--experiment_name', default='h100_dist', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
@@ -343,17 +343,12 @@ def main():
     # Print info from rank 0
     if rank == 0:
         print("="*70)
-        print("H100 DISTRIBUTED TRAINING WITH MULTI-TASK LEARNING")
         print("="*70)
         print(f"World size: {world_size} GPUs")
         print(f"Device: {device}")
         print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
         print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
-        print(f"\nMulti-Task Learning:")
-        print(f"  - Binary classification (main, weight=1.0)")
-        print(f"  - Anomaly detection (auxiliary, weight=0.1)")
-        print(f"  - Caustic detection (auxiliary, weight=0.1)")
-    
+
     # Load data
     print_rank0(f"\nLoading data from {args.data}...", rank)
     data = np.load(args.data)
