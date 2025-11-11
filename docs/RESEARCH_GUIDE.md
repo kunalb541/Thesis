@@ -531,25 +531,6 @@ To reproduce: Use commands exactly as specified above with same data paths.
 
 ---
 
-## 🚀 What's New in Version 10.0
-
-### Performance Improvements
-
-1. **Optimized evaluate.py**:
-   - 2-3x faster tensor creation in early detection
-   - Fixed array indexing bugs
-   - Better memory efficiency for large datasets
-
-2. **Enhanced Visualizations**:
-   - Real-time evolution now shows BOTH PSPL and Binary probabilities
-   - Clearer probability evolution plots
-   - Added calibration curve
-
-3. **Version Consistency**:
-   - All files standardized to v10.0
-   - New `update_versions.py` script for maintenance
-   - Consistent documentation across all files
-
 ### Compatibility Enhancements
 
 1. **Full AMD Support**:
@@ -581,7 +562,6 @@ To reproduce: Use commands exactly as specified above with same data paths.
 ### Documentation
 - [x] README updated to v10.0
 - [x] RESEARCH_GUIDE updated to v10.0
-- [x] BUG_FIXES_AND_COMPATIBILITY.md created
 - [x] All examples tested
 
 ### Experimental Setup

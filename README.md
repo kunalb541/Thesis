@@ -432,29 +432,6 @@ pip install torch torchvision
 ```
 
 ---
-
-## 🐛 Bug Fixes in Version 10.0
-
-### Critical Fixes:
-
-1. **evaluate.py - Tensor Creation Efficiency**
-   - **Before**: Created list, then numpy array (slow)
-   - **After**: Pre-allocate numpy array directly (2-3x faster)
-   - **Impact**: Faster evaluation, especially for early detection
-
-2. **evaluate.py - Array Indexing**
-   - **Before**: `self.X_norm[j][:n_points]` (wrong)
-   - **After**: `self.X_norm[j, :n_points]` (correct 2D indexing)
-   - **Impact**: Fixes potential indexing errors
-
-3. **Version Consistency**
-   - **Before**: Different versions across files (9.0, 18.0, 8.0, 13.0, 10.0, 7.1)
-   - **After**: All files now v10.0
-   - **Tool**: Use `python update_versions.py --version 10.0`
-
-
----
-
 ## 🔍 Troubleshooting
 
 ### Common Issues

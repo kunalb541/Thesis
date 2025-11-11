@@ -71,12 +71,9 @@ dependencies:
 # 3. If using AMD GPUs, install PyTorch manually:
 #    pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
 #
-# 4. Verify installation:
-#    python code/preflight_check.py
-#
-# 5. Update environment (if needed):
+# 4. Update environment (if needed):
 #    conda env update -f environment.yml --prune
 #
-# 6. Export your working environment:
+# 5. Export your working environment:
 #    conda env export > environment_working.yml
 # =============================================================================
