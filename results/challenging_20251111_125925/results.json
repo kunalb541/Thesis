@@ -1,7 +1,0 @@
-{
-  "test_loss": 0.01784839853644371,
-  "test_acc": 0.9947361350059509,
-  "best_val_acc": 0.9943696856498718,
-  "world_size": 32,
-  "effective_batch_size": 2048
-}

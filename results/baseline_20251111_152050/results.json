@@ -1,0 +1,13 @@
+{
+  "test_loss": 0.046110741794109344,
+  "test_acc": 0.9862961769104004,
+  "best_val_acc": 0.9852744936943054,
+  "world_size": 48,
+  "effective_batch_size": 1536,
+  "n_classes": 3,
+  "class_names": [
+    "Flat",
+    "PSPL",
+    "Binary"
+  ]
+}

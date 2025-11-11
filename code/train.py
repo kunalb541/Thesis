@@ -28,7 +28,7 @@ from datetime import datetime
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
-
+import torch.nn.functional as F
 # Suppress NCCL warnings
 os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
 os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
@@ -165,7 +165,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 # Create target: 0.0 for Flat, 1.0 for PSPL/Binary
                 anomaly_target = (y > 0).float()
                 anomaly_loss = nn.functional.mse_loss(outputs['anomaly'], anomaly_target)
-                loss = loss + 0.1 * anomaly_loss
+                loss = loss + anomaly_loss
             else:
                 anomaly_loss = torch.tensor(0.0)
             
@@ -178,7 +178,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                     caustic_target_f32 = caustic_target.float()
                     caustic_pred = torch.clamp(caustic_pred, min=1e-7, max=1-1e-7)
                     caustic_loss = nn.functional.binary_cross_entropy(caustic_pred, caustic_target_f32)
-                loss = loss + 0.1 * caustic_loss
+                loss = loss + caustic_loss
             else:
                 caustic_loss = torch.tensor(0.0)
             
