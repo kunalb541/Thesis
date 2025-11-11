@@ -4,7 +4,7 @@ Production Transformer for 8x H100 Distributed Training
 Optimized for multi-GPU with gradient stability
 
 Author: Kunal Bhatia
-Version: 10.0 - H100 Production
+Version: 10.0 
 """
 
 import torch

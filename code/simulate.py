@@ -6,7 +6,7 @@ Generates realistic PSPL and binary microlensing light curves.
 Uses VBBinaryLensing for accurate binary magnifications.
 
 Author: Kunal Bhatia
-Version: 8.0 - Production Ready
+Version: 10.0 - Production Ready
 """
 
 import numpy as np

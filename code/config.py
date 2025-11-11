@@ -6,7 +6,7 @@ Low u0 values are ESSENTIAL for binaries to ensure caustic features.
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 7.1 - Fixed event duration for 200-day window
+Version: 10.0 - Production Ready
 """
 
 import math

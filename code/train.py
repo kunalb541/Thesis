@@ -13,7 +13,7 @@ All Critical Fixes Applied:
 7. All ranks load best model for consistency ✅
 
 Author: Kunal Bhatia
-Version: 13.0 - PRODUCTION READY (All Bugs Fixed)
+Version: 10.0 - PRODUCTION READY (All Bugs Fixed)
 """
 
 import os
