@@ -15,9 +15,6 @@ import math
 # CRITICAL DETECTION PARAMETERS
 # ============================================================================
 
-# MINIMUM magnification for valid binary detection
-MIN_BINARY_MAGNIFICATION = 1
-
 # VBMicrolensing tolerance (critical for convergence)
 VBM_TOLERANCE = 1e-4
 

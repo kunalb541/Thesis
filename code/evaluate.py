@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-COMPLETE Comprehensive Model Evaluation + u0 Analysis
-=====================================================
-Astronomical-style light curves with all fixes applied.
+ENHANCED Comprehensive Model Evaluation + u0 Analysis
+======================================================
+Now with BOTH PSPL and Binary probability evolution plots!
 
 Author: Kunal Bhatia  
-Version: 17.0 - FINAL (All Bugs Fixed)
+Version: 18.0 - ENHANCED (Both Probabilities + PSPL Evolution Examples)
 """
 
 import torch
@@ -83,7 +83,7 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n{'='*70}")
-        print(f"COMPLETE EVALUATION + u0 ANALYSIS")
+        print(f"ENHANCED EVALUATION + u0 ANALYSIS")
         print(f"{'='*70}")
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
@@ -487,14 +487,31 @@ class ComprehensiveEvaluator:
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
-    def plot_real_time_evolution(self, event_idx=None):
+    def plot_real_time_evolution(self, event_idx=None, event_type='binary'):
+        """
+        🌟 ENHANCED: Plot real-time evolution showing BOTH PSPL and Binary probabilities!
+        
+        Args:
+            event_idx: Specific event index (if None, picks a good example)
+            event_type: 'binary', 'pspl', or 'auto' (auto-detect from event_idx)
+        """
         if event_idx is None:
-            binary_correct = np.where((self.y == 1) & (self.predictions == 1) & (self.confidences > 0.8))[0]
-            if len(binary_correct) == 0:
-                binary_correct = np.where(self.y == 1)[0]
-            if len(binary_correct) == 0:
-                return
-            event_idx = np.random.choice(binary_correct)
+            if event_type == 'binary':
+                # Pick a correctly classified binary event with high confidence
+                binary_correct = np.where((self.y == 1) & (self.predictions == 1) & (self.confidences > 0.8))[0]
+                if len(binary_correct) == 0:
+                    binary_correct = np.where(self.y == 1)[0]
+                if len(binary_correct) == 0:
+                    return
+                event_idx = np.random.choice(binary_correct)
+            else:  # pspl
+                # Pick a correctly classified PSPL event with high confidence
+                pspl_correct = np.where((self.y == 0) & (self.predictions == 0) & (self.confidences > 0.8))[0]
+                if len(pspl_correct) == 0:
+                    pspl_correct = np.where(self.y == 0)[0]
+                if len(pspl_correct) == 0:
+                    return
+                event_idx = np.random.choice(pspl_correct)
         
         light_curve = self.X[event_idx]
         light_curve_norm = self.X_norm[event_idx]
@@ -502,6 +519,7 @@ class ComprehensiveEvaluator:
         
         fractions = np.linspace(0.1, 1.0, 10)
         binary_probs = []
+        pspl_probs = []
         confidences = []
         
         with torch.no_grad():
@@ -515,12 +533,14 @@ class ComprehensiveEvaluator:
                 logits = output['binary']
                 probs = F.softmax(logits, dim=1).cpu().numpy()[0]
                 
-                binary_probs.append(probs[1])
+                pspl_probs.append(probs[0])  # PSPL probability
+                binary_probs.append(probs[1])  # Binary probability
                 confidences.append(probs.max())
         
         fig = plt.figure(figsize=(14, 10))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1, 1], hspace=0.3)
         
+        # Top: Light curve
         ax1 = fig.add_subplot(gs[0])
         valid_mask = light_curve != -1.0
         times = self.timestamps[valid_mask]
@@ -528,7 +548,9 @@ class ComprehensiveEvaluator:
         baseline = 20.0
         magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
         
-        ax1.scatter(times, magnitudes, c='darkblue', s=15, alpha=0.7, edgecolors='black', linewidth=0.5)
+        # Color based on true label
+        color = 'darkblue' if true_label == 1 else 'darkred'
+        ax1.scatter(times, magnitudes, c=color, s=15, alpha=0.7, edgecolors='black', linewidth=0.5)
         ax1.invert_yaxis()
         
         true_str = 'Binary' if true_label == 1 else 'PSPL'
@@ -538,21 +560,29 @@ class ComprehensiveEvaluator:
                      fontsize=13, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
+        # Middle: BOTH PROBABILITIES! 🌟 THIS IS THE KEY ENHANCEMENT!
         ax2 = fig.add_subplot(gs[1])
         days = fractions * 1500
-        ax2.plot(days, binary_probs, 'o-', linewidth=3, markersize=8, color='darkblue', label='Binary Probability')
-        ax2.axhline(y=0.5, color='red', linestyle='--', linewidth=2, label='Decision Threshold')
-        ax2.axhline(y=0.8, color='orange', linestyle=':', linewidth=2, label='High Confidence')
-        ax2.fill_between(days, 0.8, 1.0, alpha=0.2, color='green')
-        ax2.fill_between(days, 0.5, 0.8, alpha=0.2, color='yellow')
-        ax2.fill_between(days, 0.0, 0.5, alpha=0.2, color='lightblue')
-        ax2.set_ylabel('Binary Probability', fontsize=12, fontweight='bold')
-        ax2.legend(loc='right', fontsize=9)
+        ax2.plot(days, binary_probs, 'o-', linewidth=3, markersize=8, 
+                color='darkblue', label='Binary Probability')
+        ax2.plot(days, pspl_probs, 's-', linewidth=3, markersize=8, 
+                color='darkred', label='PSPL Probability', alpha=0.8)
+        ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, label='Decision Threshold')
+        ax2.axhline(y=0.8, color='orange', linestyle=':', linewidth=1.5, alpha=0.7, label='High Confidence')
+        
+        # Shading regions
+        ax2.fill_between(days, 0.8, 1.0, alpha=0.15, color='green')
+        ax2.fill_between(days, 0.5, 0.8, alpha=0.15, color='yellow')
+        ax2.fill_between(days, 0.0, 0.5, alpha=0.15, color='lightblue')
+        
+        ax2.set_ylabel('Class Probability', fontsize=12, fontweight='bold')
+        ax2.legend(loc='center left', fontsize=9, bbox_to_anchor=(1, 0.5))
         ax2.grid(True, alpha=0.3)
         ax2.set_ylim([-0.05, 1.05])
         
+        # Bottom: Overall confidence
         ax3 = fig.add_subplot(gs[2])
-        ax3.plot(days, confidences, 's-', linewidth=3, markersize=8, color='purple', label='Overall Confidence')
+        ax3.plot(days, confidences, 'd-', linewidth=3, markersize=8, color='purple', label='Overall Confidence')
         ax3.axhline(y=0.8, color='orange', linestyle='--', linewidth=2, label='80% Threshold')
         ax3.axhline(y=0.9, color='red', linestyle='--', linewidth=2, label='90% Threshold')
         ax3.set_xlabel('Time Points Observed', fontsize=12, fontweight='bold')
@@ -561,9 +591,11 @@ class ComprehensiveEvaluator:
         ax3.grid(True, alpha=0.3)
         ax3.set_ylim([0.4, 1.05])
         
-        plt.suptitle('Real-Time Classification Evolution', fontsize=14, fontweight='bold')
+        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event', 
+                    fontsize=14, fontweight='bold')
         
-        output_path = self.output_dir / f'real_time_evolution_event_{event_idx}.png'
+        event_type_str = 'binary' if true_label == 1 else 'pspl'
+        output_path = self.output_dir / f'real_time_evolution_{event_type_str}_event_{event_idx}.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
@@ -582,7 +614,7 @@ class ComprehensiveEvaluator:
                 for i in range(0, len(self.X_norm), self.batch_size):
                     batch_end = min(i + self.batch_size, len(self.X_norm))
                     
-                    # FIXED: Create numpy array first, then convert to tensor
+                    # Create numpy array first, then convert to tensor
                     partial_curves = []
                     for j in range(i, batch_end):
                         n_points = int(1500 * frac)
@@ -647,7 +679,7 @@ class ComprehensiveEvaluator:
         binary_params = self.params['binary']
         binary_mask = self.y == 1
         
-        # FIXED: Use 'u_0' (with underscore) instead of 'u0'
+        # Use 'u_0' (with underscore) from the parameters
         u0_values = np.array([p['u_0'] for p in binary_params])
         u0_bins = np.linspace(u0_values.min(), u0_values.max(), n_bins + 1)
         u0_centers = (u0_bins[:-1] + u0_bins[1:]) / 2
@@ -740,10 +772,13 @@ class ComprehensiveEvaluator:
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
-    def generate_all_plots(self, include_u0=True, include_early=False, n_evolution=3, 
+    def generate_all_plots(self, include_u0=True, include_early=False, n_evolution_per_type=3, 
                           u0_threshold=0.3, u0_bins=10):
+        """
+        🌟 ENHANCED: Generate evolution plots for BOTH binary AND PSPL events!
+        """
         print(f"\n{'='*70}")
-        print("GENERATING ALL VISUALIZATIONS (ASTRONOMICAL STYLE)")
+        print("GENERATING ALL VISUALIZATIONS (ENHANCED WITH BOTH PROBABILITIES)")
         print(f"{'='*70}\n")
         
         print("1. ROC Curve...")
@@ -761,9 +796,14 @@ class ComprehensiveEvaluator:
         print("\n5. 3×4 Example Grid (astronomical convention)...")
         self.plot_example_grid(n_per_class=3)
         
-        print(f"\n6. Real-Time Evolution ({n_evolution} examples, astronomical style)...")
-        for i in range(n_evolution):
-            self.plot_real_time_evolution()
+        print(f"\n6. Real-Time Evolution ({n_evolution_per_type} Binary + {n_evolution_per_type} PSPL examples)...")
+        print("   🌟 Generating Binary event evolutions...")
+        for i in range(n_evolution_per_type):
+            self.plot_real_time_evolution(event_type='binary')
+        
+        print("   🌟 Generating PSPL event evolutions...")
+        for i in range(n_evolution_per_type):
+            self.plot_real_time_evolution(event_type='pspl')
         
         if include_early:
             print("\n7. Early Detection Performance...")
@@ -802,7 +842,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Complete evaluation with ALL plots + u0 analysis'
+        description='ENHANCED evaluation with BOTH PSPL and Binary probability plots + u0 analysis'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -811,7 +851,8 @@ def main():
     parser.add_argument('--u0_bins', type=int, default=10)
     parser.add_argument('--no_u0', action='store_true')
     parser.add_argument('--early_detection', action='store_true')
-    parser.add_argument('--n_evolution', type=int, default=3)
+    parser.add_argument('--n_evolution_per_type', type=int, default=3,
+                       help='Number of evolution plots per event type (binary and PSPL)')
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--no_cuda', action='store_true')
     
@@ -849,13 +890,13 @@ def main():
     evaluator.generate_all_plots(
         include_u0=not args.no_u0,
         include_early=args.early_detection,
-        n_evolution=args.n_evolution,
+        n_evolution_per_type=args.n_evolution_per_type,
         u0_threshold=args.u0_threshold,
         u0_bins=args.u0_bins
     )
     
     evaluator.save_results()
-    print("\n🎉 Evaluation complete!\n")
+    print("\n🎉 Enhanced evaluation complete!\n")
 
 
 if __name__ == '__main__':

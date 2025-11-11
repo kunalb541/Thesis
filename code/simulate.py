@@ -24,7 +24,7 @@ from config import (
     PSPL_T0_MIN, PSPL_T0_MAX, PSPL_U0_MIN, PSPL_U0_MAX, PSPL_TE_MIN, PSPL_TE_MAX,
     BASELINE_MIN, BASELINE_MAX,
     CADENCE_MASK_PROB, MAG_ERROR_STD, PAD_VALUE,
-    BINARY_PARAM_SETS, VBM_TOLERANCE, MAX_BINARY_ATTEMPTS, MIN_BINARY_MAGNIFICATION,
+    BINARY_PARAM_SETS, VBM_TOLERANCE, MAX_BINARY_ATTEMPTS,
     get_config_summary, validate_config
 )
 
@@ -168,14 +168,10 @@ def generate_binary_params(n_events, params_set='baseline', seed=None):
     config = BINARY_PARAM_SETS[params_set]
     
     params = []
-    attempts = 0
-    max_total_attempts = n_events * MAX_BINARY_ATTEMPTS
     
     pbar = tqdm(total=n_events, desc=f"  Generating {params_set} binary params")
     
-    while len(params) < n_events and attempts < max_total_attempts:
-        attempts += 1
-        
+    for _ in range(n_events):
         # Generate parameters
         t_E = np.random.uniform(config['tE_min'], config['tE_max'])
         t_0 = np.random.uniform(config['t0_min'], config['t0_max'])
@@ -186,33 +182,19 @@ def generate_binary_params(n_events, params_set='baseline', seed=None):
         rho = np.random.uniform(config['rho_min'], config['rho_max'])
         m_source = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
         
-        # Quick validation: check if this will produce strong magnification
-        # Sample a few points around peak
-        test_times = np.array([t_0 - t_E/10, t_0, t_0 + t_E/10])
-        
-        if HAS_VBB:
-            test_mag = binary_magnification_vbb(test_times, t_E, u_0, t_0, s, q, alpha, rho)
-        else:
-            test_mag = binary_magnification_approx(test_times, t_E, u_0, t_0, s, q, alpha, rho)
-        
-        # Accept if max magnification exceeds threshold
-        if test_mag.max() >= MIN_BINARY_MAGNIFICATION:
-            params.append({
-                't_E': t_E,
-                'u_0': u_0,
-                't_0': t_0,
-                's': s,
-                'q': q,
-                'alpha': alpha,
-                'rho': rho,
-                'm_source': m_source
-            })
-            pbar.update(1)
+        params.append({
+            't_E': t_E,
+            'u_0': u_0,
+            't_0': t_0,
+            's': s,
+            'q': q,
+            'alpha': alpha,
+            'rho': rho,
+            'm_source': m_source
+        })
+        pbar.update(1)
     
     pbar.close()
-    
-    if len(params) < n_events:
-        print(f"⚠️  Warning: Only generated {len(params)}/{n_events} valid binary events")
     
     return params
 
@@ -391,9 +373,7 @@ def simulate_dataset(n_pspl, n_binary, binary_params='baseline',
     
     if binary_mag:
         binary_mag = np.array(binary_mag)
-        strong_caustics = (binary_mag > MIN_BINARY_MAGNIFICATION).sum()
         print(f"\nBinary Statistics:")
-        print(f"  Strong caustics (mag>{MIN_BINARY_MAGNIFICATION}): {strong_caustics} ({strong_caustics/len(binary_mag)*100:.1f}%)")
         print(f"  Max mag mean: {binary_mag.mean():.1f}")
         print(f"  Max mag median: {np.median(binary_mag):.1f}")
         print(f"  Max mag range: [{binary_mag.min():.1f}, {binary_mag.max():.1f}]")
