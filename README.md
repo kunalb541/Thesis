@@ -27,13 +27,6 @@ Designed for next-generation survey operations (LSST, Roman Space Telescope) req
 - **AMD Compatible**: Full ROCm support for AMD GPUs
 - **Multi-Node DDP**: Scales to 32+ GPUs across multiple nodes
 
-### Critical Research Findings
-
-- **Physical Detection Limit**: Events with impact parameter u₀ > 0.3 are fundamentally indistinguishable from PSPL
-- **Early Detection**: 70-75% accuracy achievable with only 50% of observations
-- **Computational Performance**: ~1000× faster than traditional PSPL fitting
-- **Survey Guidance**: LSST nominal cadence (20% missing) achieves 70-75% accuracy
-
 ---
 
 ## 🚀 Quick Start
@@ -131,8 +124,6 @@ Thesis/
 │   ├── transformer.py             # MicrolensingTransformer model (v10.0) 
 │   ├── evaluate.py                # Complete evaluation + u0 analysis (v10.0)
 │   └── train.py                   # Training with DDP support (v10.0)
-│
-├── update_versions.py             # Version standardization script (NEW!)
 │
 ├── data/
 │   └── raw/                       # Generated datasets (.npz)
