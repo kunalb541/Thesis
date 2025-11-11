@@ -1,10 +1,13 @@
 """
 Configuration for Real-Time Binary Microlensing Detection
-FIXED VERSION - Complete Backwards Compatibility
+CORRECTED VERSION - Matching Parameter Ranges Between PSPL and Binary
+
+CRITICAL FIX: PSPL and Binary now have IDENTICAL ranges for u0 and tE
+This ensures the model learns caustic features, not proxy correlations.
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 10.0 - Production Ready (FIXED)
+Version: 10.1 - Parameter Range Fix
 """
 
 import math
@@ -35,16 +38,22 @@ class SimulationConfig:
     PAD_VALUE = -1.0          # Marker for missing data
 
 # ============================================================================
-# EVENT PARAMETERS
+# EVENT PARAMETERS - CRITICAL FIX
 # ============================================================================
 
 class PSPLConfig:
-    """Point Source Point Lens parameters"""
+    """
+    Point Source Point Lens parameters
+    
+    CRITICAL FIX: Ranges now MATCH binary baseline configuration
+    This ensures fair comparison - the only difference between PSPL
+    and binary should be caustic structure, not event brightness/duration.
+    """
     T0_MIN = -20.0    # Peak time range
     T0_MAX = 20.0
-    U0_MIN = 0.01     # Impact parameter range
-    U0_MAX = 1.0      # Wide range for PSPL
-    TE_MIN = 10.0     # Einstein time range
+    U0_MIN = 0.001    # ✅ FIXED: Match binary range (was 0.01)
+    U0_MAX = 0.3      # ✅ FIXED: Match binary range (was 1.0) 
+    TE_MIN = 20.0     # ✅ FIXED: Match binary range (was 10.0)
     TE_MAX = 40.0     # Fits in 200-day window
 
 class BinaryConfig:
@@ -68,12 +77,12 @@ class BinaryConfig:
             'description': 'Realistic mixed population for benchmarking',
             's_range': (0.1, 2.5),       # Wide range
             'q_range': (0.001, 1.0),     # All mass ratios
-            'u0_range': (0.001, 0.3),    # Mixed difficulties
+            'u0_range': (0.001, 0.3),    # ✅ Matches PSPL now
             'rho_range': (0.001, 0.05),  
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-20.0, 20.0),
-            'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.72
+            'tE_range': (20.0, 40.0),    # ✅ Matches PSPL now
+            'expected_accuracy': 0.70    # ✅ Lowered (more realistic)
         },
         
         'challenging': {
@@ -85,7 +94,7 @@ class BinaryConfig:
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-20.0, 20.0),
             'tE_range': (10.0, 40.0),
-            'expected_accuracy': 0.60
+            'expected_accuracy': 0.55    # ✅ Lowered (more realistic)
         },
         
         # Specialized configs for specific science
@@ -98,7 +107,7 @@ class BinaryConfig:
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-20.0, 20.0),
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.75
+            'expected_accuracy': 0.70    # ✅ Lowered (more realistic)
         },
         
         'stellar': {
@@ -296,7 +305,7 @@ def get_all_configs() -> Dict[str, Any]:
 def print_config_summary():
     """Print configuration summary"""
     print("="*70)
-    print("CONFIGURATION SUMMARY - v10.0")
+    print("CONFIGURATION SUMMARY - v10.1 (PARAMETER RANGE FIX)")
     print("="*70)
     
     sim = SimulationConfig
@@ -305,6 +314,11 @@ def print_config_summary():
     print(f"  Points: {sim.N_POINTS}")
     print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
     print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
+    
+    pspl = PSPLConfig
+    print(f"\n⚠️  CRITICAL FIX - PSPL Parameters Now Match Binary:")
+    print(f"  u0: [{pspl.U0_MIN}, {pspl.U0_MAX}] (was [0.01, 1.0])")
+    print(f"  tE: [{pspl.TE_MIN}, {pspl.TE_MAX}] days (was [10, 40])")
     
     print(f"\n🧬 Binary Configurations:")
     for name, cfg in BinaryConfig.CONFIGS.items():
@@ -357,6 +371,17 @@ def validate_config():
     if abs(split_sum - 1.0) > 0.001:
         issues.append(f"⚠️ Data splits sum to {split_sum:.3f}, not 1.0")
     
+    # ✅ NEW: Validate matching parameter ranges
+    binary_baseline = BinaryConfig.CONFIGS['baseline']
+    pspl_u0_range = (PSPLConfig.U0_MIN, PSPLConfig.U0_MAX)
+    pspl_tE_range = (PSPLConfig.TE_MIN, PSPLConfig.TE_MAX)
+    
+    if pspl_u0_range != binary_baseline['u0_range']:
+        issues.append(f"⚠️ PSPL u0 range {pspl_u0_range} != Binary u0 range {binary_baseline['u0_range']}")
+    
+    if pspl_tE_range != binary_baseline['tE_range']:
+        issues.append(f"⚠️ PSPL tE range {pspl_tE_range} != Binary tE range {binary_baseline['tE_range']}")
+    
     if issues:
         print("Configuration Issues Found:")
         for issue in issues:
@@ -364,6 +389,7 @@ def validate_config():
         return False
     else:
         print("✅ Configuration validated successfully!")
+        print("✅ PSPL and Binary parameter ranges match!")
         return True
 
 # ============================================================================

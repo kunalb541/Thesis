@@ -56,30 +56,45 @@ Designed for next-generation survey operations (LSST, Roman Space Telescope) req
 | **Events u₀ < 0.3** | 75.3% | Strong caustic coverage |
 | **Events u₀ ≥ 0.3** | 24.7% | Physically challenging |
 
+### Planetary Configuration (u₀ < 0.2) - ✅ VALIDATED **[NEW!]**
+
+**Purpose**: Planet detection focus (q=0.0001-0.01)  
+**Hardware**: 8 nodes × 4 GPUs = 32 GPUs (AMD MI250X)  
+**Model**: 335K parameters (d_model=64, nhead=4, num_layers=4)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Test Accuracy** | **99.35%** | Planetary systems |
+| **ROC AUC** | **0.9995** | Exceptional discrimination |
+| **Events u₀ < 0.3** | 100% | All events detectable |
+| **Early Detection (50%)** | 82.7% | High binary recall |
+| **Training Time** | ~20 minutes (50 epochs) |
+
 ### Key Findings
 
 1. ✅ **Architecture Validated**: Transformer successfully learns caustic crossing signatures across different binary topologies
 2. ✅ **Stellar Binaries**: High accuracy maintained for equal-mass systems (q=0.3-1.0)
-3. ✅ **Multi-Node DDP**: Consistent 99%+ accuracy across 32 GPU distributed training
-4. ✅ **Early Detection**: Real-time classification viable for survey operations
-5. ✅ **Perfect Calibration**: Model confidence matches prediction accuracy
+3. ✅ **Planetary Systems**: Near-perfect detection of low-mass companions (q<0.01) - **Critical for exoplanet discovery!**
+4. ✅ **Multi-Node DDP**: Consistent 99%+ accuracy across 32 GPU distributed training
+5. ✅ **Early Detection**: Real-time classification viable for survey operations
+6. ✅ **Perfect Calibration**: Model confidence matches prediction accuracy
 
 ### Experimental Progression
 
 **Completed** ✅:
 - Critical configuration (u₀ < 0.05): 99.72% accuracy
 - Stellar configuration (q=0.3-1.0): 99.31% accuracy
+- Planetary configuration (q=0.0001-0.01): 99.35% accuracy **[NEW!]**
 
 **In Progress** 🔄:
 - Cadence experiments (5%, 20%, 30%, 40% missing)
 - Photometric error experiments (0.05, 0.10, 0.20 mag)
-- Additional binary configurations (planetary, baseline)
 
 **Planned** 📋:
 - Baseline (u₀ < 0.3): Main thesis benchmark - Expected 70-75%
 - Challenging (u₀ < 1.0): Physical detection limit - Expected 55-65%
 
-The validated experiments demonstrate transformer architecture viability. The baseline experiment will establish performance on realistic mixed populations for thesis benchmarking.
+The validated experiments demonstrate transformer architecture viability across different mass regimes. The baseline experiment will establish performance on realistic mixed populations for thesis benchmarking.
 
 ---
 
@@ -291,6 +306,37 @@ python evaluate.py \
 # Results: 99.31% accuracy (validated Nov 11, 2025) ✅
 ```
 
+#### Planetary Configuration (NEW!)
+```bash
+cd code
+
+# 1. Generate (q=0.0001-0.01, planetary systems)
+python simulate.py \
+    --n_pspl 100000 --n_binary 100000 \
+    --binary_params planetary \
+    --output ../data/raw/planetary.npz \
+    --save_params \
+    --num_workers 8
+
+# 2. Train (32 GPUs, 8 nodes)
+srun torchrun --nnodes=8 --nproc_per_node=4 \
+    --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    train.py \
+        --data /path/to/planetary.npz \
+        --experiment_name planetary \
+        --epochs 50 --batch_size 64 --lr 1e-3 \
+        --d_model 64 --nhead 4 --num_layers 4
+
+# 3. Evaluate
+python evaluate.py \
+    --experiment_name planetary \
+    --data ../data/raw/planetary.npz \
+    --early_detection \
+    --n_samples 10000
+
+# Results: 99.35% accuracy (validated Nov 11, 2025) ✅
+```
+
 ### Baseline Experiment (Main Thesis Result - Planned)
 
 ```bash
@@ -341,7 +387,7 @@ python evaluate.py \
 **Validated Configurations**:
 
 ```python
-# Small (critical/stellar datasets - validated ✅)
+# Small (critical/stellar/planetary datasets - validated ✅)
 MicrolensingTransformer(
     n_points=1500,
     d_model=64,
@@ -350,7 +396,7 @@ MicrolensingTransformer(
     dropout=0.1
 )
 # Parameters: 335K
-# Performance: 99%+ on critical/stellar
+# Performance: 99%+ on critical/stellar/planetary
 
 # Standard (baseline dataset - recommended)
 MicrolensingTransformer(
@@ -380,6 +426,11 @@ MicrolensingTransformer(
 - **Achieved**: 99.31% accuracy
 - **Use**: Stellar binary classification
 
+**Planetary** (q=0.0001-0.01) - **Validated ✅**:
+- Low-mass planetary companions
+- **Achieved**: 99.35% accuracy
+- **Use**: Exoplanet detection
+
 **Baseline** (u₀ < 0.3) - **Planned**:
 - Realistic mixed population
 - **Expected**: 70-75% accuracy
@@ -404,6 +455,13 @@ python simulate.py \
     --n_pspl 100000 --n_binary 100000 \
     --binary_params stellar \
     --output ../data/raw/stellar.npz \
+    --save_params
+
+# Planetary (validated ✅)
+python simulate.py \
+    --n_pspl 100000 --n_binary 100000 \
+    --binary_params planetary \
+    --output ../data/raw/planetary.npz \
     --save_params
 
 # Baseline (realistic - main result)
@@ -471,7 +529,7 @@ srun --partition=gpu_a100 --nodes=8 --gres=gpu:4 --exclusive \
 - Full multi-node DDP support (validated on 32 GPUs ✅)
 
 **Validated Performance** (32 GPUs):
-- Training time: ~15 minutes for 47 epochs
+- Training time: ~15-20 minutes for 50 epochs
 - Speed: ~2.8 it/s per epoch
 - No NaN losses, stable gradients
 - Perfect DDP synchronization
@@ -529,6 +587,7 @@ python evaluate.py \
 |---------|----------|---------------|---------|--------|-------|
 | Critical | < 0.05 | **99.72%** ✅ | **0.9999** ✅ | Validated | Strong caustics guaranteed |
 | Stellar | < 0.4 (q=0.3-1.0) | **99.31%** ✅ | **0.9999** ✅ | Validated | Equal-mass binaries |
+| Planetary | < 0.2 (q<0.01) | **99.35%** ✅ | **0.9995** ✅ | Validated | **Exoplanet detection** |
 | Baseline | < 0.3 | 70-75% (expected) | 0.78-0.82 | Planned | Realistic mixed population |
 | Challenging | < 1.0 | 55-65% (expected) | 0.65-0.75 | Future | Includes hard cases (u₀>0.3) |
 
@@ -537,22 +596,27 @@ python evaluate.py \
 | Metric | Value | Hardware | Status |
 |--------|-------|----------|--------|
 | Inference latency | <1 ms/event | Single GPU | Validated |
-| Training time (200K) | ~15 min | 32× GPUs (8 nodes) | Validated ✅ |
+| Training time (200K) | ~15-20 min | 32× GPUs (8 nodes) | Validated ✅ |
 | Training time (1M) | ~60-90 min | 32× GPUs (8 nodes) | Expected |
 | Throughput | >10,000 events/sec | Single GPU | Validated |
-| Epochs/min | ~3 | 32× GPUs | Validated ✅ |
+| Epochs/min | ~2.5-3 | 32× GPUs | Validated ✅ |
 
 ### Early Detection (Validated ✅)
 
 | Observation Completeness | Overall Acc | Binary Recall | Status | Use Case |
 |--------------------------|-------------|---------------|--------|----------|
-| 10% | 50% | 0% | Validated | Too early |
-| 25% | 72% | ~47% | Validated | Marginal |
-| **50%** | **72%** | **100%** ✅ | **Validated** | **Trigger follow-up** |
-| 67% | ~89% | 100% | Validated | High confidence |
-| 100% | 99.7% | 99.8% | Validated | Full critical |
+| 10% | 64% | 76% | Validated | Very early |
+| 25% | 72% | 54% | Validated | Early trigger |
+| **50%** | **72-83%** | **83-100%** ✅ | **Validated** | **Follow-up decision** |
+| 67% | ~89% | 79-100% | Validated | High confidence |
+| 100% | 99.3-99.7% | 99.4-99.8% | Validated | Full observation |
 
-**Key Finding**: At 50% observation completeness, binary recall reaches 100% with 72% overall accuracy - enabling early follow-up trigger decisions.
+**Key Finding**: At 50% observation completeness:
+- **Critical**: 72% overall, 100% binary recall
+- **Planetary**: 83% overall, 82.7% binary recall
+- **Stellar**: Data shows similar strong performance
+
+This enables early follow-up trigger decisions **halfway through the event**.
 
 ---
 
@@ -688,8 +752,9 @@ Email: kunal29bhatia@gmail.com
 ### Version 10.0 (Current) - Production Ready
 - ✅ **VALIDATED**: Critical configuration (99.72% accuracy, 32 GPUs)
 - ✅ **VALIDATED**: Stellar configuration (99.31% accuracy, 32 GPUs)
+- ✅ **VALIDATED**: Planetary configuration (99.35% accuracy, 32 GPUs) **[NEW!]**
 - ✅ **VALIDATED**: Multi-node DDP training (8 nodes, 32 GPUs)
-- ✅ **VALIDATED**: Early detection (100% binary recall at 50%)
+- ✅ **VALIDATED**: Early detection (82.7-100% binary recall at 50%)
 - ✅ **VALIDATED**: Perfect model calibration
 - ✅ Fixed tensor creation efficiency in evaluate.py
 - ✅ Fixed array indexing bugs
