@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 """
-Distributed Training for H100 GPUs
-Complete Fixed Version with Multi-Task Learning
+Distributed Training for THREE-CLASS Classification
+===================================================
+Classes: 0=Flat, 1=PSPL, 2=Binary
 
-All Critical Fixes Applied:
-1. Division by zero in learning rate scheduler ✅
-2. DDP unused parameters ✅
-3. Clean logging with suppressed NCCL warnings ✅
-4. Proper auxiliary loss computation ✅
-5. Final evaluation hanging (DDP sync issue) ✅
-6. Early stopping broadcast to all ranks ✅
-7. All ranks load best model for consistency ✅
+NEW in v11.0: Updated for 3-class classification
 
 Author: Kunal Bhatia
-Version: 10.0 - PRODUCTION READY (All Bugs Fixed)
+Version: 11.0 - Three-Class Classification
 """
 
 import os
@@ -35,7 +29,7 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
 
-# Suppress NCCL warnings for cleaner output
+# Suppress NCCL warnings
 os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
 os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
 os.environ['NCCL_TIMEOUT'] = '1800'
@@ -76,7 +70,6 @@ class MicrolensingDataset(Dataset):
     """Dataset for distributed training"""
     
     def __init__(self, X, y, pad_value=-1.0):
-        # Clean data
         X = np.nan_to_num(X, nan=pad_value, posinf=100.0, neginf=-100.0)
         valid_mask = X != pad_value
         if valid_mask.any():
@@ -134,17 +127,12 @@ class StableNormalizer:
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, 
                 device, epoch, rank, world_size, use_amp=True, grad_clip=1.0):
     """
-    Train one epoch with multi-task learning
-    
-    Uses all three model heads:
-    - binary_head: Main classification (PSPL vs Binary)
-    - anomaly_head: Anomaly detection
-    - caustic_head: Caustic crossing detection
+    Train one epoch with 3-class multi-task learning
     """
     model.train()
     
     total_loss = 0
-    binary_loss_total = 0
+    classification_loss_total = 0
     anomaly_loss_total = 0
     caustic_loss_total = 0
     correct = 0
@@ -152,7 +140,6 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
     num_batches = 0
     skipped_batches = 0
     
-    # Progress bar only on rank 0
     if rank == 0:
         pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
     else:
@@ -164,41 +151,44 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Mixed precision forward pass with multi-task learning
         with autocast(enabled=use_amp):
-            # CRITICAL: Use return_all=True to ensure all model parameters receive gradients
-            # This prevents DDP unused parameter errors
             outputs = model(X, return_all=True)
             
-            # Main task: Binary classification
-            logits = outputs['binary']
-            binary_loss = criterion(logits, y)
-            loss = binary_loss
+            # Main task: 3-class classification (Flat vs PSPL vs Binary)
+            logits = outputs['logits']  # [B, 3]
+            classification_loss = criterion(logits, y)
+            loss = classification_loss
             
             # Auxiliary task 1: Anomaly detection
-            # Binary events should have higher anomaly scores
+            # Flat=0 should have low anomaly, PSPL=1 and Binary=2 should have higher
             if 'anomaly' in outputs:
-                anomaly_target = y.float()
+                # Create target: 0.0 for Flat, 1.0 for PSPL/Binary
+                anomaly_target = (y > 0).float()
                 anomaly_loss = nn.functional.mse_loss(outputs['anomaly'], anomaly_target)
                 loss = loss + 0.1 * anomaly_loss
             else:
                 anomaly_loss = torch.tensor(0.0)
             
             # Auxiliary task 2: Caustic detection
-            # Binary events have caustic crossings
+            # Only Binary (class 2) has caustics
             if 'caustic' in outputs:
-                caustic_target = y.float()
-                # BCE is unsafe with autocast, so temporarily disable it
+                caustic_target = (y == 2).float()
                 with autocast(enabled=False):
-                    # Convert to float32 for stable BCE computation
                     caustic_pred = outputs['caustic'].float()
                     caustic_target_f32 = caustic_target.float()
-                    # Clamp predictions to prevent numerical issues
                     caustic_pred = torch.clamp(caustic_pred, min=1e-7, max=1-1e-7)
                     caustic_loss = nn.functional.binary_cross_entropy(caustic_pred, caustic_target_f32)
                 loss = loss + 0.1 * caustic_loss
             else:
                 caustic_loss = torch.tensor(0.0)
+            
+            # Optional: Add confidence loss to encourage high confidence on correct predictions
+            if 'confidence' in outputs:
+                probs = F.softmax(logits, dim=-1)
+                max_prob, pred = probs.max(dim=-1)
+                correct_pred = (pred == y).float()
+                conf_loss = nn.functional.mse_loss(outputs['confidence'], correct_pred)
+                loss = loss + 0.05 * conf_loss
         
         # Check for NaN/Inf
         if torch.isnan(loss) or torch.isinf(loss):
@@ -207,7 +197,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             skipped_batches += 1
             continue
         
-        # Backward pass with gradient scaling
+        # Backward pass
         if use_amp:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -221,7 +211,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         
         # Update metrics
         total_loss += loss.item()
-        binary_loss_total += binary_loss.item()
+        classification_loss_total += classification_loss.item()
         if isinstance(anomaly_loss, torch.Tensor):
             anomaly_loss_total += anomaly_loss.item()
         if isinstance(caustic_loss, torch.Tensor):
@@ -233,7 +223,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             correct += (preds == y).sum().item()
             total += len(y)
         
-        # Update progress bar (rank 0 only)
+        # Update progress bar
         if rank == 0 and batch_idx % 10 == 0:
             acc = correct / total if total > 0 else 0
             if hasattr(pbar, 'set_postfix'):
@@ -244,7 +234,6 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                     'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
                 })
     
-    # Print skipped batches warning
     if rank == 0 and skipped_batches > 0:
         print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf loss")
     
@@ -263,7 +252,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device, rank, world_size):
-    """Evaluate model with multi-task outputs"""
+    """Evaluate model with 3-class outputs"""
     model.eval()
     
     total_loss = 0
@@ -271,7 +260,10 @@ def evaluate(model, loader, criterion, device, rank, world_size):
     total = 0
     num_batches = 0
     
-    # Progress bar only on rank 0
+    # Per-class accuracy tracking
+    class_correct = torch.zeros(3).to(device)
+    class_total = torch.zeros(3).to(device)
+    
     if rank == 0:
         pbar = tqdm(loader, desc="Validating", leave=False)
     else:
@@ -281,9 +273,8 @@ def evaluate(model, loader, criterion, device, rank, world_size):
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         
-        # Use return_all=True for DDP consistency (same parameters in every forward pass)
         outputs = model(X, return_all=True)
-        logits = outputs['binary']
+        logits = outputs['logits']
         loss = criterion(logits, y)
         
         if torch.isfinite(loss):
@@ -293,34 +284,56 @@ def evaluate(model, loader, criterion, device, rank, world_size):
         preds = logits.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += len(y)
+        
+        # Per-class accuracy
+        for c in range(3):
+            mask = (y == c)
+            if mask.sum() > 0:
+                class_correct[c] += (preds[mask] == y[mask]).sum().item()
+                class_total[c] += mask.sum().item()
     
     # Gather metrics across all GPUs
     if world_size > 1:
         metrics = torch.tensor([total_loss, correct, total, num_batches],
                               dtype=torch.float32).to(device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        dist.all_reduce(class_correct, op=dist.ReduceOp.SUM)
+        dist.all_reduce(class_total, op=dist.ReduceOp.SUM)
+        
         total_loss, correct, total, num_batches = metrics.cpu().numpy()
+        class_correct = class_correct.cpu().numpy()
+        class_total = class_total.cpu().numpy()
+    else:
+        class_correct = class_correct.cpu().numpy()
+        class_total = class_total.cpu().numpy()
     
     avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
+    
+    # Print per-class accuracies on rank 0
+    if rank == 0:
+        class_names = ['Flat', 'PSPL', 'Binary']
+        for c in range(3):
+            if class_total[c] > 0:
+                class_acc = class_correct[c] / class_total[c]
+                print(f"  {class_names[c]} accuracy: {class_acc*100:.2f}% ({int(class_correct[c])}/{int(class_total[c])})")
     
     return avg_loss, accuracy
 
 
 def main():
-    parser = argparse.ArgumentParser(description= "Distributed Training")
+    parser = argparse.ArgumentParser(description="3-Class Distributed Training v11.0")
     parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', default='h100_dist', help='Experiment name')
+    parser.add_argument('--experiment_name', default='3class_baseline', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
-    parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision')
-    parser.add_argument('--quick', action='store_true', help='Quick test mode')
+    parser.add_argument('--no_amp', action='store_true')
+    parser.add_argument('--quick', action='store_true')
     
-    # Model hyperparameters
     parser.add_argument('--d_model', type=int, default=256)
     parser.add_argument('--nhead', type=int, default=8)
     parser.add_argument('--num_layers', type=int, default=6)
@@ -328,26 +341,23 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate epochs vs warmup to prevent division by zero
     if args.epochs <= args.warmup_epochs:
         print(f"Warning: epochs ({args.epochs}) <= warmup_epochs ({args.warmup_epochs})")
         print(f"Setting warmup_epochs to {max(1, args.epochs - 1)}")
         args.warmup_epochs = max(1, args.epochs - 1)
     
-    # Setup distributed training
     rank, local_rank, world_size = setup_distributed()
-    
-    # Device setup
     device = torch.device(f'cuda:{local_rank}')
     
-    # Print info from rank 0
     if rank == 0:
         print("="*70)
+        print("THREE-CLASS CLASSIFICATION TRAINING v11.0")
         print("="*70)
         print(f"World size: {world_size} GPUs")
         print(f"Device: {device}")
         print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
         print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
+        print(f"Classes: 0=Flat, 1=PSPL, 2=Binary")
 
     # Load data
     print_rank0(f"\nLoading data from {args.data}...", rank)
@@ -358,23 +368,25 @@ def main():
     if X.ndim == 3:
         X = X.squeeze(1)
     
-    print_rank0(f"Data shape: {X.shape}", rank)
-    print_rank0(f"Classes: Binary={np.sum(y==1)}, PSPL={np.sum(y==0)}", rank)
+    # Check if it's 3-class data
+    n_classes = len(np.unique(y))
+    if rank == 0:
+        print(f"\nData shape: {X.shape}")
+        print(f"Number of classes: {n_classes}")
+        if n_classes == 3:
+            print(f"  Flat:   {(y==0).sum()} ({(y==0).mean()*100:.1f}%)")
+            print(f"  PSPL:   {(y==1).sum()} ({(y==1).mean()*100:.1f}%)")
+            print(f"  Binary: {(y==2).sum()} ({(y==2).mean()*100:.1f}%)")
+        else:
+            print(f"⚠️ WARNING: Dataset has {n_classes} classes, expected 3!")
     
-    # Quick mode
     if args.quick:
         print_rank0("⚡ Quick mode: Using 10000 samples", rank)
         indices = np.random.choice(len(X), min(10000, len(X)), replace=False)
         X = X[indices]
         y = y[indices]
     
-    # Data validation
-    if rank == 0:
-        print("\n🔍 Data Validation:")
-        print(f"  NaN values: {np.isnan(X).sum()}")
-        print(f"  Inf values: {np.isinf(X).sum()}")
-    
-    # Normalize data
+    # Normalize
     print_rank0("\n🔄 Normalizing data...", rank)
     normalizer = StableNormalizer(pad_value=-1.0)
     X_norm = normalizer.fit_transform(X)
@@ -382,7 +394,7 @@ def main():
     if rank == 0:
         print(f"  Normalized range: [{X_norm.min():.2f}, {X_norm.max():.2f}]")
     
-    # Train/val/test split
+    # Split data
     X_train, X_temp, y_train, y_temp = train_test_split(
         X_norm, y, test_size=0.3, stratify=y, random_state=42
     )
@@ -392,12 +404,11 @@ def main():
     
     print_rank0(f"\nSplits: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}", rank)
     
-    # Create datasets
+    # Create datasets and loaders
     train_dataset = MicrolensingDataset(X_train, y_train)
     val_dataset = MicrolensingDataset(X_val, y_val)
     test_dataset = MicrolensingDataset(X_test, y_test)
     
-    # Create distributed samplers
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=rank, shuffle=True
     )
@@ -408,7 +419,6 @@ def main():
         test_dataset, num_replicas=world_size, rank=rank, shuffle=False
     )
     
-    # Create data loaders
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size,
@@ -434,11 +444,11 @@ def main():
         persistent_workers=True
     )
     
-    # Import transformer here to avoid issues
+    # Import transformer
     from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
-    print_rank0("\n🤖 Creating MicrolensingTransformer...", rank)
+    print_rank0("\n🤖 Creating MicrolensingTransformer (3-class)...", rank)
     model = MicrolensingTransformer(
         n_points=X.shape[1],
         d_model=args.d_model,
@@ -449,25 +459,24 @@ def main():
         pad_value=-1.0
     ).to(device)
     
-    # Wrap in DDP
     if world_size > 1:
         model = DDP(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True  # All parameters used with return_all=True
+            find_unused_parameters=True
         )
     
     if rank == 0:
         base_model = model.module if hasattr(model, 'module') else model
         print(f"Model parameters: {count_parameters(base_model):,}")
+        print(f"Output classes: 3 (Flat, PSPL, Binary)")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
     
-    # Scale learning rate by world size
     effective_batch_size = args.batch_size * world_size
-    lr_scale = max(1.0, effective_batch_size / 256)  # Base batch size
+    lr_scale = max(1.0, effective_batch_size / 256)
     scaled_lr = args.lr * lr_scale
     
     optimizer = torch.optim.AdamW(
@@ -478,34 +487,31 @@ def main():
         eps=1e-8
     )
     
-    # Learning rate scheduler with warmup (FIXED - no more division by zero)
+    # LR scheduler
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
-            # Linear warmup
             return (epoch + 1) / max(args.warmup_epochs, 1)
         else:
-            # Cosine annealing after warmup
             total_epochs = max(args.epochs - args.warmup_epochs, 1)
             progress = (epoch - args.warmup_epochs) / total_epochs
             return 0.5 * (1 + np.cos(np.pi * progress))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    
-    # Mixed precision scaler
     scaler = GradScaler() if not args.no_amp else None
     
-    # Create experiment directory (rank 0 only)
+    # Create experiment directory
     if rank == 0:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         exp_dir = Path(f"../results/{args.experiment_name}_{timestamp}")
         exp_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n📁 Experiment directory: {exp_dir}")
         
-        # Save config
         config = vars(args)
         config['world_size'] = world_size
         config['effective_batch_size'] = effective_batch_size
         config['scaled_lr'] = scaled_lr
+        config['n_classes'] = 3
+        config['class_names'] = ['Flat', 'PSPL', 'Binary']
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -516,27 +522,25 @@ def main():
             pickle.dump(normalizer, f)
         print(f"💾 Normalizer saved to: {normalizer_path}")
     
-    # Broadcast experiment directory path to all ranks
+    # Broadcast experiment directory
     if world_size > 1:
         if rank == 0:
             exp_dir_str = str(exp_dir)
         else:
             exp_dir_str = None
         
-        # Create a list to hold the broadcasted value
         exp_dir_list = [exp_dir_str]
         dist.broadcast_object_list(exp_dir_list, src=0)
         if rank != 0:
             exp_dir = Path(exp_dir_list[0])
     
-    # Synchronize all processes
     if world_size > 1:
         dist.barrier()
     
     # Training loop
     if rank == 0:
         print("\n" + "="*70)
-        print("STARTING DISTRIBUTED TRAINING")
+        print("STARTING THREE-CLASS TRAINING")
         print("="*70)
     
     best_val_acc = 0
@@ -544,40 +548,33 @@ def main():
     max_patience = 15
     
     for epoch in range(args.epochs):
-        # Set epoch for distributed sampler
         train_sampler.set_epoch(epoch)
         
         if rank == 0:
             print(f"\nEpoch {epoch+1}/{args.epochs}")
             print("-"*50)
         
-        # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
             device, epoch, rank, world_size, use_amp=not args.no_amp,
             grad_clip=args.grad_clip
         )
         
-        # Step scheduler after training
         scheduler.step()
         
-        # Validate
         val_loss, val_acc = evaluate(
             model, val_loader, criterion, device, rank, world_size
         )
         
-        # Print metrics and handle early stopping (rank 0 only)
         if rank == 0:
             print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc*100:.2f}%")
             print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc*100:.2f}%")
             print(f"LR: {optimizer.param_groups[0]['lr']:.2e}")
             
-            # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
                 
-                # Get base model
                 save_model = model.module if hasattr(model, 'module') else model
                 
                 torch.save({
@@ -587,46 +584,37 @@ def main():
                     'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict() if scaler else None,
                     'val_acc': val_acc,
-                    'val_loss': val_loss
+                    'val_loss': val_loss,
+                    'n_classes': 3
                 }, exp_dir / 'best_model.pt')
                 
                 print(f"✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
             else:
                 patience_counter += 1
             
-            # Check early stopping (rank 0 decides)
             should_stop_now = (patience_counter >= max_patience)
             
             if should_stop_now:
                 print(f"\n⏹️  Early stopping at epoch {epoch+1}")
         else:
-            # Other ranks don't have patience_counter
             should_stop_now = False
         
-        # CRITICAL: Broadcast early stopping decision to ALL ranks
         if world_size > 1:
-            # Create tensor with early stopping flag
             stop_flag = torch.tensor([1 if should_stop_now else 0], 
                                     dtype=torch.long, device=device)
-            # Broadcast from rank 0 to all ranks
             dist.broadcast(stop_flag, src=0)
             
-            # All ranks check the flag
             if stop_flag.item() == 1:
-                # Synchronize before breaking
                 if rank == 0:
                     print("[Rank 0] Broadcasting early stop to all ranks...")
                 sys.stdout.flush()
                 dist.barrier()
                 break
         else:
-            # Single GPU
             if should_stop_now:
                 break
     
-    # ========== AFTER TRAINING LOOP ==========
-    
-    # CRITICAL: Ensure all ranks exit training loop together
+    # After training
     if world_size > 1:
         if rank == 0:
             print("\n[Rank 0] All ranks exited training loop")
@@ -636,30 +624,23 @@ def main():
         print(f"[Rank {rank}] Training sync complete")
         sys.stdout.flush()
     
-    # Training loop completed
     if rank == 0:
         print("\n" + "="*70)
         print("TRAINING COMPLETE")
         print("="*70)
-    
-    # Final evaluation
-    if rank == 0:
         print("\n" + "="*70)
         print("FINAL EVALUATION")
         print("="*70)
     
-    # CRITICAL FIX: ALL ranks must load best model for DDP consistency
+    # Load best model
     if world_size > 1:
-        # Synchronize before loading
         print(f"[Rank {rank}] Waiting before loading checkpoint...")
         sys.stdout.flush()
         dist.barrier()
         
-        # All ranks load the checkpoint
-        print(f"[Rank {rank}] Loading checkpoint from {exp_dir / 'best_model.pt'}...")
+        print(f"[Rank {rank}] Loading checkpoint...")
         sys.stdout.flush()
         
-        # Map checkpoint to correct device for each rank
         map_location = {'cuda:0': f'cuda:{local_rank}'}
         
         try:
@@ -680,19 +661,17 @@ def main():
             cleanup_distributed()
             sys.exit(1)
         
-        # Synchronize after loading
         print(f"[Rank {rank}] Synchronizing after checkpoint load...")
         sys.stdout.flush()
         dist.barrier()
         print(f"[Rank {rank}] Post-load sync complete")
         sys.stdout.flush()
     else:
-        # Single GPU - only rank 0 loads
         checkpoint = torch.load(exp_dir / 'best_model.pt', weights_only=False)
         load_model = model.module if hasattr(model, 'module') else model
         load_model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Evaluate on test set (all ranks participate)
+    # Final evaluation
     print(f"[Rank {rank}] Starting final evaluation...")
     sys.stdout.flush()
     
@@ -703,36 +682,34 @@ def main():
     print(f"[Rank {rank}] Evaluation complete")
     sys.stdout.flush()
     
-    # Only rank 0 prints and saves results
     if rank == 0:
         print(f"\nTest Loss: {test_loss:.4f}")
         print(f"Test Accuracy: {test_acc*100:.2f}%")
         
-        # Save results
         results = {
             'test_loss': float(test_loss),
             'test_acc': float(test_acc),
             'best_val_acc': float(best_val_acc),
             'world_size': world_size,
-            'effective_batch_size': effective_batch_size
+            'effective_batch_size': effective_batch_size,
+            'n_classes': 3,
+            'class_names': ['Flat', 'PSPL', 'Binary']
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
             json.dump(results, f, indent=2)
         
-        # Success message
         print("\n" + "="*70)
         if test_acc > 0.75:
-            print("🌟 EXCELLENT! Model achieved great performance!")
+            print("🌟 EXCELLENT! 3-class model achieved great performance!")
         elif test_acc > 0.70:
-            print("✅ SUCCESS! Model achieved good performance!")
+            print("✅ SUCCESS! 3-class model achieved good performance!")
         else:
-            print("⚠️  Model performance: {:.2f}%".format(test_acc * 100))
+            print(f"⚠️  Model performance: {test_acc*100:.2f}%")
         
         print(f"\n📁 Results saved to: {exp_dir}")
         print("="*70)
     
-    # CRITICAL: Final synchronization before cleanup
     if world_size > 1:
         print(f"[Rank {rank}] Final sync before cleanup...")
         sys.stdout.flush()
@@ -740,7 +717,6 @@ def main():
         print(f"[Rank {rank}] Final sync complete")
         sys.stdout.flush()
     
-    # Clean up distributed training
     print(f"[Rank {rank}] Cleaning up...")
     sys.stdout.flush()
     cleanup_distributed()

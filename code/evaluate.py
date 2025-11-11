@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-PRODUCTION Comprehensive Model Evaluation + u0 Analysis
-========================================================
+PRODUCTION Comprehensive Model Evaluation for 3-CLASS Classification
+====================================================================
+Classes: 0=Flat (no event), 1=PSPL, 2=Binary
 
-ACTUAL FIXES IN THIS VERSION:
-1. Vectorized tensor creation in plot_early_detection (was still using loop)
-2. Memory-efficient batch processing
-3. Removed redundant array indexing
+NEW in v11.0: Complete 3-class support with realistic evolution plots
 
 Author: Kunal Bhatia  
-Version: 10.0 - Production Ready (FIXED)
+Version: 11.0 - Three-Class Classification
 """
 
 import torch
@@ -25,7 +23,7 @@ import pickle
 from tqdm import tqdm
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, roc_curve, confusion_matrix
+    roc_auc_score, roc_curve, confusion_matrix, classification_report
 )
 
 import sys
@@ -76,7 +74,7 @@ class StableNormalizer:
 
 
 class ComprehensiveEvaluator:
-    """Complete evaluation with ALL visualizations and u0 analysis"""
+    """Complete evaluation with 3-class support"""
     
     def __init__(self, model_path, normalizer_path, data_path, output_dir, 
                  device='cuda', batch_size=128, n_samples=None):
@@ -87,12 +85,12 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n{'='*70}")
-        print(f"PRODUCTION EVALUATION + u0 ANALYSIS (v10.1)")
+        print(f"PRODUCTION EVALUATION v11.0 (THREE-CLASS)")
         print(f"{'='*70}")
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
         if n_samples:
-            print(f"Sample limit: {n_samples} events (for faster evaluation)")
+            print(f"Sample limit: {n_samples} events")
         
         print("\n📦 Loading model...")
         self.model = self._load_model(model_path)
@@ -105,7 +103,7 @@ class ComprehensiveEvaluator:
         print("✅ Normalizer loaded successfully!")
         
         print("\n📊 Loading data...")
-        self.X, self.y, self.params, self.timestamps = self._load_data(data_path)
+        self.X, self.y, self.params, self.timestamps, self.n_classes = self._load_data(data_path)
         
         print("\n🔄 Normalizing data...")
         self.X_norm = self.normalizer.transform(self.X)
@@ -183,65 +181,70 @@ class ComprehensiveEvaluator:
         else:
             timestamps = np.linspace(-100, 100, X.shape[1])
         
+        # Detect number of classes
+        if 'n_classes' in data:
+            n_classes = int(data['n_classes'])
+            print(f"   Dataset: {n_classes}-class")
+        else:
+            n_classes = len(np.unique(y))
+            print(f"   Dataset: {n_classes}-class (inferred)")
+        
         params = None
         if 'params_binary_json' in data:
             params_binary = json.loads(str(data['params_binary_json']))
+            params_dict = {'binary': params_binary}
+            
             if 'params_pspl_json' in data:
                 params_pspl = json.loads(str(data['params_pspl_json']))
-                params = {'binary': params_binary, 'pspl': params_pspl}
-            else:
-                params = {'binary': params_binary}
+                params_dict['pspl'] = params_pspl
+            
+            if 'params_flat_json' in data and n_classes == 3:
+                params_flat = json.loads(str(data['params_flat_json']))
+                params_dict['flat'] = params_flat
+            
+            params = params_dict
         
         if self.n_samples is not None and self.n_samples < len(X):
-            print(f"   ⚡ Sampling {self.n_samples} events for faster evaluation...")
+            print(f"   ⚡ Sampling {self.n_samples} events...")
             
-            binary_mask = y == 1
-            pspl_mask = y == 0
+            # Sample from each class
+            indices_per_class = []
+            for c in range(n_classes):
+                class_mask = y == c
+                n_class = min(self.n_samples // n_classes, class_mask.sum())
+                class_indices = np.random.choice(np.where(class_mask)[0], n_class, replace=False)
+                indices_per_class.append(class_indices)
             
-            n_binary = min(self.n_samples // 2, binary_mask.sum())
-            n_pspl = min(self.n_samples // 2, pspl_mask.sum())
-            
-            binary_indices = np.random.choice(np.where(binary_mask)[0], n_binary, replace=False)
-            pspl_indices = np.random.choice(np.where(pspl_mask)[0], n_pspl, replace=False)
-            
-            all_indices = np.concatenate([binary_indices, pspl_indices])
+            all_indices = np.concatenate(indices_per_class)
             np.random.shuffle(all_indices)
             
             X = X[all_indices]
             y = y[all_indices]
             
-            if params is not None and 'binary' in params:
-                all_binary_indices = np.where(binary_mask)[0]
-                
-                binary_param_indices = []
-                for idx in binary_indices:
-                    param_idx = np.where(all_binary_indices == idx)[0][0]
-                    binary_param_indices.append(param_idx)
-                
-                params['binary'] = [params['binary'][i] for i in binary_param_indices]
-                
-                if 'pspl' in params:
-                    all_pspl_indices = np.where(pspl_mask)[0]
-                    pspl_param_indices = []
-                    for idx in pspl_indices:
-                        param_idx = np.where(all_pspl_indices == idx)[0][0]
-                        pspl_param_indices.append(param_idx)
-                    params['pspl'] = [params['pspl'][i] for i in pspl_param_indices]
+            if params is not None:
+                # Sample parameters accordingly
+                for key in params.keys():
+                    if key in ['binary', 'pspl', 'flat']:
+                        class_id = {'flat': 0, 'pspl': 1, 'binary': 2}.get(key, -1)
+                        if class_id >= 0:
+                            class_mask = y == class_id
+                            params[key] = [params[key][i] for i in range(len(params[key])) if i < class_mask.sum()]
         
         print(f"   Events: {len(X)}")
-        print(f"   Binary: {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
-        print(f"   PSPL:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
+        if n_classes == 3:
+            print(f"   Flat:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
+            print(f"   PSPL:   {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
+            print(f"   Binary: {(y == 2).sum()} ({(y == 2).mean()*100:.1f}%)")
+        else:
+            print(f"   PSPL:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
+            print(f"   Binary: {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
         
         if params is not None:
             print(f"   ✅ Parameter data found (u0 analysis enabled)")
-            if 'binary' in params:
-                print(f"      Binary params: {len(params['binary'])}")
-            if 'pspl' in params:
-                print(f"      PSPL params: {len(params['pspl'])}")
         else:
             print("   ⚠️  No parameter data (u0 analysis disabled)")
         
-        return X, y, params, timestamps
+        return X, y, params, timestamps, n_classes
     
     def _get_predictions(self):
         predictions = []
@@ -254,7 +257,7 @@ class ComprehensiveEvaluator:
                 x_batch = torch.tensor(self.X_norm[i:batch_end], dtype=torch.float32).to(self.device)
                 
                 output = self.model(x_batch, return_all=False)
-                logits = output['binary']
+                logits = output['logits'] if 'logits' in output else output['binary']
                 probs = F.softmax(logits, dim=1).cpu().numpy()
                 
                 preds = probs.argmax(axis=1)
@@ -267,47 +270,90 @@ class ComprehensiveEvaluator:
         return np.array(predictions), np.array(confidences), np.vstack(all_probs)
     
     def _compute_metrics(self):
-        tp = ((self.y == 1) & (self.predictions == 1)).sum()
-        tn = ((self.y == 0) & (self.predictions == 0)).sum()
-        fp = ((self.y == 0) & (self.predictions == 1)).sum()
-        fn = ((self.y == 1) & (self.predictions == 0)).sum()
+        # Basic metrics
+        accuracy = accuracy_score(self.y, self.predictions)
+        
+        # Per-class metrics
+        if self.n_classes == 3:
+            target_names = ['Flat', 'PSPL', 'Binary']
+        else:
+            target_names = ['PSPL', 'Binary']
+        
+        report = classification_report(
+            self.y, self.predictions,
+            target_names=target_names,
+            output_dict=True,
+            zero_division=0
+        )
+        
+        # Confusion matrix
+        cm = confusion_matrix(self.y, self.predictions)
         
         metrics = {
-            'accuracy': accuracy_score(self.y, self.predictions),
-            'precision': precision_score(self.y, self.predictions, zero_division=0),
-            'recall': recall_score(self.y, self.predictions, zero_division=0),
-            'f1': f1_score(self.y, self.predictions, zero_division=0),
-            'roc_auc': roc_auc_score(self.y, self.probs[:, 1]),
-            'tp': int(tp), 'tn': int(tn), 'fp': int(fp), 'fn': int(fn)
+            'accuracy': accuracy,
+            'n_classes': self.n_classes,
+            'classification_report': report,
+            'confusion_matrix': cm.tolist()
         }
+        
+        # Add per-class metrics
+        for i, name in enumerate(target_names):
+            metrics[f'{name.lower()}_precision'] = report[name]['precision']
+            metrics[f'{name.lower()}_recall'] = report[name]['recall']
+            metrics[f'{name.lower()}_f1'] = report[name]['f1-score']
         
         return metrics
     
     def _print_summary(self):
-        m = self.metrics
         print(f"\n{'='*70}")
-        print(f"EVALUATION RESULTS")
+        print(f"EVALUATION RESULTS ({self.n_classes}-CLASS)")
         print(f"{'='*70}")
-        print(f"Accuracy:  {m['accuracy']*100:.2f}%")
-        print(f"Precision: {m['precision']*100:.2f}%")
-        print(f"Recall:    {m['recall']*100:.2f}%")
-        print(f"F1 Score:  {m['f1']*100:.2f}%")
-        print(f"ROC AUC:   {m['roc_auc']:.4f}")
-        print(f"\nConfusion Matrix:")
-        print(f"  TP: {m['tp']:5d}  |  FP: {m['fp']:5d}")
-        print(f"  FN: {m['fn']:5d}  |  TN: {m['tn']:5d}")
+        print(f"Overall Accuracy: {self.metrics['accuracy']*100:.2f}%")
+        print(f"\nPer-Class Performance:")
+        
+        if self.n_classes == 3:
+            classes = ['flat', 'pspl', 'binary']
+            names = ['Flat', 'PSPL', 'Binary']
+        else:
+            classes = ['pspl', 'binary']
+            names = ['PSPL', 'Binary']
+        
+        for cls, name in zip(classes, names):
+            prec = self.metrics[f'{cls}_precision']
+            rec = self.metrics[f'{cls}_recall']
+            f1 = self.metrics[f'{cls}_f1']
+            print(f"  {name:8s}: Prec={prec*100:5.1f}%, Rec={rec*100:5.1f}%, F1={f1*100:5.1f}%")
+        
         print(f"{'='*70}\n")
     
     def plot_roc_curve(self):
-        fpr, tpr, _ = roc_curve(self.y, self.probs[:, 1])
-        
+        """Plot ROC curves (one-vs-rest for multi-class)"""
         fig, ax = plt.subplots(figsize=(10, 8))
-        ax.plot(fpr, tpr, 'b-', linewidth=3, label=f'ROC curve (AUC = {self.metrics["roc_auc"]:.3f})')
+        
+        if self.n_classes == 3:
+            class_names = ['Flat', 'PSPL', 'Binary']
+            colors = ['gray', 'darkred', 'darkblue']
+        else:
+            class_names = ['PSPL', 'Binary']
+            colors = ['darkred', 'darkblue']
+        
+        # One-vs-rest ROC curves
+        for i, (name, color) in enumerate(zip(class_names, colors)):
+            y_true_binary = (self.y == i).astype(int)
+            y_score = self.probs[:, i]
+            
+            if len(np.unique(y_true_binary)) > 1:  # Need both classes present
+                fpr, tpr, _ = roc_curve(y_true_binary, y_score)
+                auc = roc_auc_score(y_true_binary, y_score)
+                
+                ax.plot(fpr, tpr, linewidth=3, color=color,
+                       label=f'{name} (AUC = {auc:.3f})')
+        
         ax.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Random classifier')
         
         ax.set_xlabel('False Positive Rate', fontsize=12, fontweight='bold')
         ax.set_ylabel('True Positive Rate', fontsize=12, fontweight='bold')
-        ax.set_title('Receiver Operating Characteristic', fontsize=14, fontweight='bold')
+        ax.set_title(f'ROC Curves ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
         
@@ -317,24 +363,31 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_confusion_matrix(self):
-        cm = confusion_matrix(self.y, self.predictions)
+        """Plot confusion matrix for n-class classification"""
+        cm = np.array(self.metrics['confusion_matrix'])
+        
+        if self.n_classes == 3:
+            labels = ['Flat', 'PSPL', 'Binary']
+        else:
+            labels = ['PSPL', 'Binary']
         
         fig, ax = plt.subplots(figsize=(10, 8))
         im = ax.imshow(cm, cmap='Blues', aspect='auto')
         
-        ax.set_xticks([0, 1])
-        ax.set_yticks([0, 1])
-        ax.set_xticklabels(['PSPL', 'Binary'], fontsize=12)
-        ax.set_yticklabels(['PSPL', 'Binary'], fontsize=12)
+        ax.set_xticks(range(self.n_classes))
+        ax.set_yticks(range(self.n_classes))
+        ax.set_xticklabels(labels, fontsize=12)
+        ax.set_yticklabels(labels, fontsize=12)
         ax.set_xlabel('Predicted label', fontsize=12, fontweight='bold')
         ax.set_ylabel('True label', fontsize=12, fontweight='bold')
-        ax.set_title('Confusion Matrix', fontsize=14, fontweight='bold')
+        ax.set_title(f'Confusion Matrix ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
         
-        for i in range(2):
-            for j in range(2):
+        # Add text annotations
+        for i in range(self.n_classes):
+            for j in range(self.n_classes):
                 text = ax.text(j, i, cm[i, j], ha="center", va="center",
                              color="white" if cm[i, j] > cm.max()/2 else "black",
-                             fontsize=20, fontweight='bold')
+                             fontsize=16, fontweight='bold')
         
         plt.colorbar(im, ax=ax)
         
@@ -344,11 +397,12 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_confidence_distribution(self):
+        """Plot confidence distribution by correctness"""
         correct = self.predictions == self.y
         
         fig, ax = plt.subplots(figsize=(12, 6))
         
-        bins = np.linspace(0.5, 1.0, 50)
+        bins = np.linspace(0.3 if self.n_classes == 3 else 0.5, 1.0, 50)
         ax.hist(self.confidences[correct], bins=bins, alpha=0.7, color='green',
                label=f'Correct (n={correct.sum()})', edgecolor='black')
         ax.hist(self.confidences[~correct], bins=bins, alpha=0.7, color='red',
@@ -356,7 +410,7 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Confidence Score', fontsize=12, fontweight='bold')
         ax.set_ylabel('Count', fontsize=12, fontweight='bold')
-        ax.set_title('Confidence Distribution', fontsize=14, fontweight='bold')
+        ax.set_title(f'Confidence Distribution ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3, axis='y')
         
@@ -366,12 +420,15 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_calibration_curve(self):
+        """Plot calibration curve"""
         correct = self.predictions == self.y
         
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
+        # Left: Calibration bins
         ax = axes[0]
-        conf_bins = np.linspace(0.5, 1.0, 11)
+        conf_min = 0.3 if self.n_classes == 3 else 0.5
+        conf_bins = np.linspace(conf_min, 1.0, 11)
         accuracies, bin_centers, counts = [], [], []
         
         for i in range(len(conf_bins)-1):
@@ -382,21 +439,22 @@ class ComprehensiveEvaluator:
                 counts.append(mask.sum())
         
         if len(bin_centers) > 0:
-            bars = ax.bar(bin_centers, accuracies, width=0.04, alpha=0.7, edgecolor='black', linewidth=1.5)
+            bars = ax.bar(bin_centers, accuracies, width=0.06, alpha=0.7, edgecolor='black', linewidth=1.5)
             for bar, cnt in zip(bars, counts):
                 bar.set_facecolor(plt.cm.Blues(0.3 + 0.7 * cnt / max(counts)))
             
             for bc, acc, cnt in zip(bin_centers, accuracies, counts):
                 ax.text(bc, acc + 0.02, f'n={cnt}', ha='center', fontsize=7)
         
-        ax.plot([0.5, 1.0], [0.5, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect Calibration')
+        ax.plot([conf_min, 1.0], [conf_min, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect Calibration')
         ax.set_xlabel('Confidence Score', fontsize=11, fontweight='bold')
         ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
         ax.set_title('Model Calibration', fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3)
-        ax.set_ylim([0.4, 1.05])
+        ax.set_ylim([0.3 if self.n_classes == 3 else 0.4, 1.05])
         
+        # Right: Scatter plot
         ax = axes[1]
         n_plot = min(5000, len(correct))
         idx = np.random.choice(len(correct), n_plot, replace=False)
@@ -425,43 +483,58 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_example_grid(self, n_per_class=3):
-        print(f"  Generating {n_per_class * 4} example plots (astronomical style)...")
+        """Plot example grid with 3-class results"""
+        print(f"  Generating example plots...")
         
         correct = self.predictions == self.y
-        binary_pred = self.predictions == 1
-        
-        tp = np.where((self.y == 1) & binary_pred & correct)[0]
-        tn = np.where((self.y == 0) & ~binary_pred & correct)[0]
-        fp = np.where((self.y == 0) & binary_pred & ~correct)[0]
-        fn = np.where((self.y == 1) & ~binary_pred & ~correct)[0]
         
         examples = []
-        for idx_arr, label, color in [
-            (tp, 'True Positive\n(Binary → Binary)', 'green'),
-            (tn, 'True Negative\n(PSPL → PSPL)', 'blue'),
-            (fp, 'False Positive\n(PSPL → Binary)', 'orange'),
-            (fn, 'False Negative\n(Binary → PSPL)', 'red')
-        ]:
-            if len(idx_arr) >= n_per_class:
-                conf_sorted = idx_arr[np.argsort(-self.confidences[idx_arr])]
-                selected = conf_sorted[:n_per_class]
-            elif len(idx_arr) > 0:
-                selected = idx_arr[:n_per_class]
-            else:
-                selected = []
-            
-            for idx in selected:
-                examples.append((idx, label, color))
         
-        fig, axes = plt.subplots(3, 4, figsize=(16, 12))
+        if self.n_classes == 3:
+            class_names = ['Flat', 'PSPL', 'Binary']
+            colors = ['gray', 'darkred', 'darkblue']
+        else:
+            class_names = ['PSPL', 'Binary']
+            colors = ['darkred', 'darkblue']
+        
+        # Collect examples for each true class
+        for true_class, class_name, color in zip(range(self.n_classes), class_names, colors):
+            true_mask = self.y == true_class
+            correct_mask = true_mask & correct
+            incorrect_mask = true_mask & ~correct
+            
+            # Get correct predictions
+            if correct_mask.sum() > 0:
+                indices = np.where(correct_mask)[0]
+                conf_sorted = indices[np.argsort(-self.confidences[indices])]
+                selected = conf_sorted[:n_per_class]
+                for idx in selected:
+                    examples.append((idx, f'{class_name} (Correct)', 'green'))
+            
+            # Get incorrect predictions
+            if incorrect_mask.sum() > 0:
+                indices = np.where(incorrect_mask)[0]
+                conf_sorted = indices[np.argsort(-self.confidences[indices])]
+                selected = conf_sorted[:1]  # Just 1 error per class
+                for idx in selected:
+                    pred_name = class_names[self.predictions[idx]]
+                    examples.append((idx, f'{class_name}→{pred_name}', 'red'))
+        
+        # Create figure
+        n_examples = len(examples)
+        n_cols = 4
+        n_rows = (n_examples + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4*n_rows))
+        if n_rows == 1:
+            axes = axes.reshape(1, -1)
         
         for i, (idx, label, color) in enumerate(examples):
-            row = i // 4
-            col = i % 4
+            row = i // n_cols
+            col = i % n_cols
             ax = axes[row, col]
             
             flux = self.X[idx]
-            
             valid_mask = flux != -1.0
             times = self.timestamps[valid_mask]
             fluxes = flux[valid_mask]
@@ -469,53 +542,73 @@ class ComprehensiveEvaluator:
             baseline = 20.0
             magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
             
+            true_name = class_names[self.y[idx]] if self.n_classes == 3 else class_names[self.y[idx]]
+            pred_name = class_names[self.predictions[idx]] if self.n_classes == 3 else class_names[self.predictions[idx]]
+            
             ax.scatter(times, magnitudes, c=color, s=8, alpha=0.7, edgecolors='black', linewidth=0.3)
             ax.invert_yaxis()
             
-            true_label = 'Binary' if self.y[idx] == 1 else 'PSPL'
-            pred_label = 'Binary' if self.predictions[idx] == 1 else 'PSPL'
-            
-            ax.set_title(f'{label}\nTrue: {true_label}, Pred: {pred_label}\nConf: {self.confidences[idx]:.2f}',
+            ax.set_title(f'{label}\nTrue: {true_name}, Pred: {pred_name}\nConf: {self.confidences[idx]:.2f}',
                         fontsize=9, color=color, fontweight='bold')
             ax.set_xlabel('Time (days)', fontsize=8)
             ax.set_ylabel('Magnitude', fontsize=8)
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax.tick_params(labelsize=7)
         
-        plt.suptitle('Example Light Curves (3 per class, astronomical convention)', 
+        # Hide empty subplots
+        for i in range(len(examples), n_rows * n_cols):
+            row = i // n_cols
+            col = i % n_cols
+            axes[row, col].axis('off')
+        
+        plt.suptitle(f'Example Light Curves ({self.n_classes}-Class Classification)', 
                      fontsize=14, fontweight='bold')
         plt.tight_layout()
         
-        output_path = self.output_dir / 'example_grid_3x4_astronomical.png'
+        output_path = self.output_dir / f'example_grid_{self.n_classes}class.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_real_time_evolution(self, event_idx=None, event_type='binary'):
-        """Plot real-time evolution showing BOTH PSPL and Binary probabilities"""
+        """
+        Plot real-time evolution showing ALL class probabilities
+        
+        For 3-class: Shows Flat, PSPL, Binary probabilities
+        For 2-class: Shows PSPL, Binary probabilities
+        """
         if event_idx is None:
-            if event_type == 'binary':
-                binary_correct = np.where((self.y == 1) & (self.predictions == 1) & (self.confidences > 0.8))[0]
-                if len(binary_correct) == 0:
-                    binary_correct = np.where(self.y == 1)[0]
-                if len(binary_correct) == 0:
-                    return
-                event_idx = np.random.choice(binary_correct)
+            # Select a good example
+            if self.n_classes == 3:
+                target_class = {'flat': 0, 'pspl': 1, 'binary': 2}.get(event_type, 2)
             else:
-                pspl_correct = np.where((self.y == 0) & (self.predictions == 0) & (self.confidences > 0.8))[0]
-                if len(pspl_correct) == 0:
-                    pspl_correct = np.where(self.y == 0)[0]
-                if len(pspl_correct) == 0:
-                    return
-                event_idx = np.random.choice(pspl_correct)
+                target_class = {'pspl': 0, 'binary': 1}.get(event_type, 1)
+            
+            good_examples = np.where(
+                (self.y == target_class) & 
+                (self.predictions == target_class) & 
+                (self.confidences > 0.7)
+            )[0]
+            
+            if len(good_examples) == 0:
+                good_examples = np.where(self.y == target_class)[0]
+            
+            if len(good_examples) == 0:
+                return
+            
+            event_idx = np.random.choice(good_examples)
         
         light_curve = self.X[event_idx]
         light_curve_norm = self.X_norm[event_idx]
         true_label = self.y[event_idx]
         
         fractions = np.linspace(0.1, 1.0, 10)
-        binary_probs = []
-        pspl_probs = []
+        
+        if self.n_classes == 3:
+            flat_probs, pspl_probs, binary_probs = [], [], []
+        else:
+            pspl_probs, binary_probs = [], []
+        
         confidences = []
         
         with torch.no_grad():
@@ -526,13 +619,20 @@ class ComprehensiveEvaluator:
                 
                 x = torch.from_numpy(partial_curve).unsqueeze(0).to(self.device)
                 output = self.model(x, return_all=False)
-                logits = output['binary']
+                logits = output['logits'] if 'logits' in output else output['binary']
                 probs = F.softmax(logits, dim=1).cpu().numpy()[0]
                 
-                pspl_probs.append(probs[0])
-                binary_probs.append(probs[1])
+                if self.n_classes == 3:
+                    flat_probs.append(probs[0])
+                    pspl_probs.append(probs[1])
+                    binary_probs.append(probs[2])
+                else:
+                    pspl_probs.append(probs[0])
+                    binary_probs.append(probs[1])
+                
                 confidences.append(probs.max())
         
+        # Create figure
         fig = plt.figure(figsize=(14, 10))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1, 1], hspace=0.3)
         
@@ -544,25 +644,42 @@ class ComprehensiveEvaluator:
         baseline = 20.0
         magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
         
-        color = 'darkblue' if true_label == 1 else 'darkred'
+        if self.n_classes == 3:
+            class_names = ['Flat', 'PSPL', 'Binary']
+            colors = ['gray', 'darkred', 'darkblue']
+        else:
+            class_names = ['PSPL', 'Binary']
+            colors = ['darkred', 'darkblue']
+        
+        color = colors[true_label]
         ax1.scatter(times, magnitudes, c=color, s=15, alpha=0.7, edgecolors='black', linewidth=0.5)
         ax1.invert_yaxis()
         
-        true_str = 'Binary' if true_label == 1 else 'PSPL'
-        pred_str = 'Binary' if self.predictions[event_idx] == 1 else 'PSPL'
+        true_str = class_names[true_label]
+        pred_str = class_names[self.predictions[event_idx]]
         ax1.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
         ax1.set_title(f'Light Curve - True: {true_str}, Predicted: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
                      fontsize=13, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
-        # Middle: BOTH PROBABILITIES
+        # Middle: Class probabilities
         ax2 = fig.add_subplot(gs[1])
         days = fractions * 1500
-        ax2.plot(days, binary_probs, 'o-', linewidth=3, markersize=8, 
-                color='darkblue', label='Binary Probability')
-        ax2.plot(days, pspl_probs, 's-', linewidth=3, markersize=8, 
-                color='darkred', label='PSPL Probability', alpha=0.8)
-        ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, label='Decision Threshold')
+        
+        if self.n_classes == 3:
+            ax2.plot(days, flat_probs, 'o-', linewidth=3, markersize=8, 
+                    color='gray', label='Flat (No Event)', alpha=0.8)
+            ax2.plot(days, pspl_probs, 's-', linewidth=3, markersize=8, 
+                    color='darkred', label='PSPL', alpha=0.8)
+            ax2.plot(days, binary_probs, '^-', linewidth=3, markersize=8, 
+                    color='darkblue', label='Binary', alpha=0.8)
+        else:
+            ax2.plot(days, pspl_probs, 's-', linewidth=3, markersize=8, 
+                    color='darkred', label='PSPL', alpha=0.8)
+            ax2.plot(days, binary_probs, '^-', linewidth=3, markersize=8, 
+                    color='darkblue', label='Binary', alpha=0.8)
+        
+        ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, label='50% Threshold')
         ax2.axhline(y=0.8, color='orange', linestyle=':', linewidth=1.5, alpha=0.7, label='High Confidence')
         
         ax2.fill_between(days, 0.8, 1.0, alpha=0.15, color='green')
@@ -583,26 +700,28 @@ class ComprehensiveEvaluator:
         ax3.set_ylabel('Prediction Confidence', fontsize=12, fontweight='bold')
         ax3.legend(loc='lower right', fontsize=9)
         ax3.grid(True, alpha=0.3)
-        ax3.set_ylim([0.4, 1.05])
         
-        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event', 
+        if self.n_classes == 3:
+            ax3.set_ylim([0.3, 1.05])  # Lower for 3-class
+        else:
+            ax3.set_ylim([0.4, 1.05])
+        
+        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event ({self.n_classes}-Class)', 
                     fontsize=14, fontweight='bold')
         
-        event_type_str = 'binary' if true_label == 1 else 'pspl'
+        event_type_str = event_type.lower()
         output_path = self.output_dir / f'real_time_evolution_{event_type_str}_event_{event_idx}.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_early_detection(self):
-        """
-        FIXED v10.1: Properly vectorized tensor creation
-        """
+        """Compute early detection performance"""
         print("  Computing early detection performance...")
         
         fractions = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
         overall_accs = []
-        binary_recalls = []
+        per_class_recalls = [[] for _ in range(self.n_classes)]
         
         for frac in tqdm(fractions, desc="    Testing fractions"):
             predictions = []
@@ -613,30 +732,46 @@ class ComprehensiveEvaluator:
                     batch_size_actual = batch_end - i
                     n_points = int(1500 * frac)
                     
-                    # PROPERLY VECTORIZED: No loop needed!
                     partial_curves_np = np.full((batch_size_actual, 1500), -1.0, dtype=np.float32)
                     partial_curves_np[:, :n_points] = self.X_norm[i:batch_end, :n_points]
                     
-                    # Convert to tensor
                     x_batch = torch.from_numpy(partial_curves_np).to(self.device)
                     
                     output = self.model(x_batch, return_all=False)
-                    logits = output['binary']
+                    logits = output['logits'] if 'logits' in output else output['binary']
                     probs = F.softmax(logits, dim=1).cpu().numpy()
                     
                     predictions.extend(probs.argmax(axis=1))
             
             predictions = np.array(predictions)
             overall_accs.append(accuracy_score(self.y, predictions))
-            binary_recalls.append(recall_score(self.y, predictions))
+            
+            # Per-class recall
+            for c in range(self.n_classes):
+                class_mask = self.y == c
+                if class_mask.sum() > 0:
+                    class_recall = (predictions[class_mask] == c).mean()
+                    per_class_recalls[c].append(class_recall)
+                else:
+                    per_class_recalls[c].append(0.0)
         
+        # Plot
         fig, ax = plt.subplots(figsize=(12, 7))
         completeness = [f*100 for f in fractions]
         
         ax.plot(completeness, [a*100 for a in overall_accs], 'o-', linewidth=3, markersize=10,
-               color='blue', label='Overall Accuracy')
-        ax.plot(completeness, [r*100 for r in binary_recalls], 's-', linewidth=3, markersize=10,
-               color='red', label='Binary Recall')
+               color='purple', label='Overall Accuracy')
+        
+        if self.n_classes == 3:
+            class_names = ['Flat', 'PSPL', 'Binary']
+            colors = ['gray', 'darkred', 'darkblue']
+        else:
+            class_names = ['PSPL', 'Binary']
+            colors = ['darkred', 'darkblue']
+        
+        for c, (name, color) in enumerate(zip(class_names, colors)):
+            ax.plot(completeness, [r*100 for r in per_class_recalls[c]], 's-', 
+                   linewidth=2.5, markersize=8, color=color, label=f'{name} Recall', alpha=0.7)
         
         ax.axhline(y=70, color='gray', linestyle='--', linewidth=1, alpha=0.5, label='70% threshold')
         ax.axvline(x=50, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='50% observed')
@@ -649,8 +784,8 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Observation Completeness (%)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Early Detection Performance', fontsize=14, fontweight='bold')
-        ax.legend(fontsize=11)
+        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0, 105])
         
@@ -662,16 +797,21 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def analyze_u0_dependency(self, n_bins=10, threshold=0.3):
-        if self.params is None:
-            print("\n⚠️  Skipping u0 analysis (no parameter data)")
+        """Analyze u0 dependency (only for Binary class in 3-class system)"""
+        if self.params is None or 'binary' not in self.params:
+            print("\n⚠️  Skipping u0 analysis (no binary parameter data)")
             return None
         
         print(f"\n{'='*70}")
-        print("u0 DEPENDENCY ANALYSIS")
+        print("u0 DEPENDENCY ANALYSIS (Binary Class Only)")
         print(f"{'='*70}")
         
         binary_params = self.params['binary']
-        binary_mask = self.y == 1
+        
+        if self.n_classes == 3:
+            binary_mask = self.y == 2  # Binary is class 2
+        else:
+            binary_mask = self.y == 1  # Binary is class 1
         
         u0_values = np.array([p['u_0'] for p in binary_params])
         u0_bins = np.linspace(u0_values.min(), u0_values.max(), n_bins + 1)
@@ -702,7 +842,7 @@ class ComprehensiveEvaluator:
         
         print(f"Physical Detection Threshold: u₀ = {threshold}")
         print(f"Accuracy at threshold: {acc_at_threshold*100:.2f}%" if acc_at_threshold else "N/A")
-        print(f"\nEvent Distribution:")
+        print(f"\nBinary Event Distribution:")
         print(f"  Below threshold (u₀ < {threshold}): {n_below} ({n_below/len(u0_values)*100:.1f}%)")
         print(f"  Above threshold (u₀ ≥ {threshold}): {n_above} ({n_above/len(u0_values)*100:.1f}%)")
         
@@ -719,6 +859,7 @@ class ComprehensiveEvaluator:
         }
     
     def plot_u0_dependency(self, u0_results, threshold=0.3):
+        """Plot u0 dependency"""
         if u0_results is None:
             return
         
@@ -737,8 +878,8 @@ class ComprehensiveEvaluator:
                    label=f'Physical Limit (u₀ = {threshold})')
         ax1.axhline(y=70, color='gray', linestyle=':', alpha=0.5, label='Target (70%)')
         
-        ax1.set_ylabel('Classification Accuracy (%)', fontsize=13)
-        ax1.set_title('Binary Classification Accuracy vs. Impact Parameter', 
+        ax1.set_ylabel('Binary Classification Accuracy (%)', fontsize=13)
+        ax1.set_title('Binary Class Accuracy vs. Impact Parameter', 
                      fontsize=14, fontweight='bold')
         ax1.legend(fontsize=11)
         ax1.grid(alpha=0.3)
@@ -754,8 +895,8 @@ class ComprehensiveEvaluator:
                color='#A23B72', alpha=0.7, edgecolor='black')
         ax2.axvline(x=threshold, color='red', linestyle='--', linewidth=2)
         ax2.set_xlabel('Impact Parameter u₀', fontsize=13)
-        ax2.set_ylabel('Number of Events', fontsize=13)
-        ax2.set_title('Distribution of Impact Parameters', fontsize=12)
+        ax2.set_ylabel('Number of Binary Events', fontsize=13)
+        ax2.set_title('Distribution of Impact Parameters (Binary Class Only)', fontsize=12)
         ax2.grid(alpha=0.3, axis='y')
         
         plt.tight_layout()
@@ -767,12 +908,12 @@ class ComprehensiveEvaluator:
     
     def generate_all_plots(self, include_u0=True, include_early=False, n_evolution_per_type=3, 
                           u0_threshold=0.3, u0_bins=10):
-        """Generate all visualizations with BOTH probability plots"""
+        """Generate all visualizations"""
         print(f"\n{'='*70}")
-        print("GENERATING ALL VISUALIZATIONS (v10.1 - PROPERLY FIXED)")
+        print(f"GENERATING ALL VISUALIZATIONS (v11.0 - {self.n_classes}-CLASS)")
         print(f"{'='*70}\n")
         
-        print("1. ROC Curve...")
+        print("1. ROC Curves...")
         self.plot_roc_curve()
         
         print("\n2. Confusion Matrix...")
@@ -784,24 +925,27 @@ class ComprehensiveEvaluator:
         print("\n4. Calibration Curve...")
         self.plot_calibration_curve()
         
-        print("\n5. 3×4 Example Grid (astronomical convention)...")
+        print("\n5. Example Grid...")
         self.plot_example_grid(n_per_class=3)
         
-        print(f"\n6. Real-Time Evolution ({n_evolution_per_type} Binary + {n_evolution_per_type} PSPL examples)...")
-        print("   Generating Binary event evolutions...")
-        for i in range(n_evolution_per_type):
-            self.plot_real_time_evolution(event_type='binary')
+        print(f"\n6. Real-Time Evolution ({n_evolution_per_type} examples per class)...")
         
-        print("   Generating PSPL event evolutions...")
-        for i in range(n_evolution_per_type):
-            self.plot_real_time_evolution(event_type='pspl')
+        if self.n_classes == 3:
+            event_types = ['flat', 'pspl', 'binary']
+        else:
+            event_types = ['pspl', 'binary']
+        
+        for event_type in event_types:
+            print(f"   Generating {event_type.capitalize()} event evolutions...")
+            for i in range(n_evolution_per_type):
+                self.plot_real_time_evolution(event_type=event_type)
         
         if include_early:
-            print("\n7. Early Detection Performance (PROPERLY VECTORIZED)...")
+            print("\n7. Early Detection Performance...")
             self.plot_early_detection()
         
-        if include_u0 and self.params is not None:
-            print("\n8. u0 Dependency Analysis...")
+        if include_u0 and self.params is not None and 'binary' in self.params:
+            print("\n8. u0 Dependency Analysis (Binary class only)...")
             u0_results = self.analyze_u0_dependency(n_bins=u0_bins, threshold=u0_threshold)
             if u0_results:
                 self.plot_u0_dependency(u0_results, threshold=u0_threshold)
@@ -816,12 +960,17 @@ class ComprehensiveEvaluator:
         print(f"{'='*70}\n")
     
     def save_results(self):
+        """Save evaluation results"""
         results = {
-            'metrics': self.metrics,
+            'metrics': {k: float(v) if isinstance(v, (np.floating, float)) else v 
+                       for k, v in self.metrics.items() if k not in ['classification_report', 'confusion_matrix']},
+            'classification_report': self.metrics['classification_report'],
+            'confusion_matrix': self.metrics['confusion_matrix'],
+            'n_classes': self.n_classes,
             'n_samples': int(len(self.y)),
+            'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
-            'high_confidence_95': int((self.confidences >= 0.95).sum()),
-            'has_u0_analysis': self.params is not None
+            'has_u0_analysis': self.params is not None and 'binary' in self.params
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
@@ -833,7 +982,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Production evaluation (v10.1) with proper vectorization'
+        description='Production evaluation v11.0 (3-class support)'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -842,8 +991,7 @@ def main():
     parser.add_argument('--u0_bins', type=int, default=10)
     parser.add_argument('--no_u0', action='store_true')
     parser.add_argument('--early_detection', action='store_true')
-    parser.add_argument('--n_evolution_per_type', type=int, default=3,
-                       help='Number of evolution plots per event type (binary and PSPL)')
+    parser.add_argument('--n_evolution_per_type', type=int, default=3)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--no_cuda', action='store_true')
     
@@ -887,7 +1035,7 @@ def main():
     )
     
     evaluator.save_results()
-    print("\n🎉 Production evaluation complete (v10.1)!\n")
+    print("\n🎉 Production evaluation complete (v11.0)!\n")
 
 
 if __name__ == '__main__':

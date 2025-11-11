@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Production Transformer for 8x H100 Distributed Training (FIXED)
-Optimized for multi-GPU with gradient stability
+Production Transformer for THREE-CLASS Classification
+=====================================================
+Classes: 0=Flat (no event), 1=PSPL, 2=Binary
 
-FIXES APPLIED:
-- Removed double normalization in forward() (data already normalized by train.py)
-- Removed redundant gradient clipping register_hook (train.py handles this)
+NEW in v11.0: Output head updated for 3 classes
 
 Author: Kunal Bhatia
-Version: 10.0 - Production Ready (FIXED)
+Version: 11.0 - Three-Class Classification
 """
 
 import torch
@@ -31,7 +30,6 @@ class StableMultiHeadAttention(nn.Module):
         self.d_k = d_model // nhead
         self.scale = 1.0 / math.sqrt(self.d_k)
         
-        # Linear projections - use bias for stability
         self.w_q = nn.Linear(d_model, d_model, bias=True)
         self.w_k = nn.Linear(d_model, d_model, bias=True)
         self.w_v = nn.Linear(d_model, d_model, bias=True)
@@ -39,14 +37,12 @@ class StableMultiHeadAttention(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
         
-        # Layer norms for Q, K stability
         self.q_norm = nn.LayerNorm(d_model, eps=1e-5)
         self.k_norm = nn.LayerNorm(d_model, eps=1e-5)
         
         self._init_weights()
     
     def _init_weights(self):
-        # Xavier initialization with reduced gain for stability
         gain = 1.0 / math.sqrt(2)
         for module in [self.w_q, self.w_k, self.w_v, self.w_o]:
             nn.init.xavier_uniform_(module.weight, gain=gain)
@@ -56,38 +52,30 @@ class StableMultiHeadAttention(nn.Module):
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, D = x.shape
         
-        # Normalize input for stability
         x = self.q_norm(x)
         
-        # Linear projections
         Q = self.w_q(x).view(B, T, self.nhead, self.d_k).transpose(1, 2)
         K = self.w_k(x).view(B, T, self.nhead, self.d_k).transpose(1, 2)
         V = self.w_v(x).view(B, T, self.nhead, self.d_k).transpose(1, 2)
         
-        # Normalize Q and K to prevent explosion
         Q = F.normalize(Q, p=2, dim=-1, eps=1e-8)
         K = F.normalize(K, p=2, dim=-1, eps=1e-8)
         
-        # Scaled dot-product attention with clamping
         scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
         scores = torch.clamp(scores, min=-10, max=10)
         
-        # Apply mask if provided (True = invalid/padded)
         if mask is not None:
             mask = mask.unsqueeze(1).unsqueeze(2)
-            scores = scores.masked_fill(mask, -1e4)  # Not -inf to avoid NaN
+            scores = scores.masked_fill(mask, -1e4)
         
-        # Stable softmax
         scores = scores - scores.max(dim=-1, keepdim=True)[0]
         attn = F.softmax(scores, dim=-1)
         attn = self.dropout(attn)
         
-        # Apply attention
         out = torch.matmul(attn, V)
         out = out.transpose(1, 2).contiguous().view(B, T, D)
         out = self.w_o(out)
         
-        # Scale output for residual
         return out * 0.5
 
 
@@ -97,13 +85,11 @@ class TransformerBlock(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_ff: int, dropout: float = 0.1):
         super().__init__()
         
-        # Pre-norm architecture (more stable)
         self.norm1 = nn.LayerNorm(d_model, eps=1e-5)
         self.norm2 = nn.LayerNorm(d_model, eps=1e-5)
         
         self.attn = StableMultiHeadAttention(d_model, nhead, dropout)
         
-        # FFN with GELU
         self.ffn = nn.Sequential(
             nn.Linear(d_model, dim_ff),
             nn.GELU(),
@@ -112,7 +98,6 @@ class TransformerBlock(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Learnable gates for stable residuals
         self.alpha = nn.Parameter(torch.tensor(0.1))
         self.beta = nn.Parameter(torch.tensor(0.1))
         
@@ -125,15 +110,12 @@ class TransformerBlock(nn.Module):
                 nn.init.zeros_(m.bias)
     
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Pre-norm + attention
         attn_out = self.attn(self.norm1(x), mask)
         x = x + torch.tanh(self.alpha) * attn_out
         
-        # Pre-norm + FFN
         ffn_out = self.ffn(self.norm2(x))
         x = x + torch.tanh(self.beta) * ffn_out
         
-        # Clamp for stability
         x = torch.clamp(x, min=-100, max=100)
         
         return x
@@ -141,20 +123,20 @@ class TransformerBlock(nn.Module):
 
 class MicrolensingTransformer(nn.Module):
     """
-    Production transformer for microlensing with H100 optimization
-    - Stable gradient flow
-    - Efficient for distributed training
-    - Handles missing data properly
+    Production transformer for THREE-CLASS microlensing classification
     
-    FIXED: Removed double normalization and redundant gradient clipping
+    NEW in v11.0: Output 3 classes instead of 2
+    - Class 0: Flat (no event, baseline only)
+    - Class 1: PSPL (single lens)
+    - Class 2: Binary (binary lens)
     """
     
     def __init__(
         self,
         n_points: int = 1500,
-        d_model: int = 256,      # Larger for H100s
-        nhead: int = 8,          # More heads for H100s
-        num_layers: int = 6,     # Deeper for better performance
+        d_model: int = 256,
+        nhead: int = 8,
+        num_layers: int = 6,
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
         pad_value: float = -1.0,
@@ -167,7 +149,7 @@ class MicrolensingTransformer(nn.Module):
         self.pad_value = pad_value
         self.nhead = nhead
         
-        # Input embedding with feature extraction
+        # Input embedding
         self.input_embed = nn.Sequential(
             nn.Linear(1, d_model // 2),
             nn.LayerNorm(d_model // 2),
@@ -195,31 +177,41 @@ class MicrolensingTransformer(nn.Module):
         # Final norm
         self.norm = nn.LayerNorm(d_model, eps=1e-5)
         
-        # Output heads
-        self.binary_head = nn.Sequential(
+        # ============== UPDATED FOR 3 CLASSES ==============
+        # Main classification head: 3 classes (Flat, PSPL, Binary)
+        self.classification_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 2)
+            nn.Linear(d_model // 2, 3)  # Changed from 2 to 3!
         )
         
+        # Keep "binary" alias for backwards compatibility
+        self.binary_head = self.classification_head
+        
         # Auxiliary heads for multi-task learning
+        # Anomaly detection: higher for PSPL/Binary vs Flat
         self.anomaly_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 1)
         )
         
+        # Caustic detection: only Binary has caustics
         self.caustic_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 1),
             nn.Sigmoid()
         )
         
-        self._init_weights()
+        # NEW: Confidence estimation head
+        self.confidence_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 1),
+            nn.Sigmoid()
+        )
         
-        # FIXED: Removed redundant gradient clipping register_hook
-        # train.py already handles gradient clipping with clip_grad_norm_
+        self._init_weights()
     
     def _init_weights(self):
         """Initialize weights carefully for stability"""
@@ -243,11 +235,9 @@ class MicrolensingTransformer(nn.Module):
         """Compute features about gaps in data"""
         B, T = mask.shape
         
-        # Cumulative gap count
         gaps = mask.float()
         cumulative = gaps.cumsum(dim=1)
         
-        # Normalize by position
         positions = torch.arange(1, T + 1, device=mask.device).unsqueeze(0)
         gap_ratio = cumulative / positions
         
@@ -266,7 +256,15 @@ class MicrolensingTransformer(nn.Module):
             return_all: Return all auxiliary outputs
             
         Returns:
-            Dictionary with model outputs
+            Dictionary with model outputs:
+            - 'logits': Main 3-class classification [B, 3]
+            - 'binary': Alias for 'logits' (backwards compatibility)
+            - 'confidence': Prediction confidence [B]
+            - 'anomaly': Anomaly score [B] (if return_all=True)
+            - 'caustic': Caustic detection [B] (if return_all=True)
+            - 'prob_flat': Flat probability [B] (if return_all=True)
+            - 'prob_pspl': PSPL probability [B] (if return_all=True)
+            - 'prob_binary': Binary probability [B] (if return_all=True)
         """
         # Handle input shape
         if x.dim() == 2:
@@ -278,9 +276,7 @@ class MicrolensingTransformer(nn.Module):
         # Create padding mask
         padding_mask = self.create_padding_mask(x)
         
-        # FIXED: Removed double normalization
-        # Input data 'x' is already normalized by StableNormalizer in train.py
-        # Just zero out padding before embedding
+        # Zero out padding
         x_norm = x.clone()
         x_norm[padding_mask.unsqueeze(-1)] = 0.0
         
@@ -305,32 +301,41 @@ class MicrolensingTransformer(nn.Module):
         # Global pooling (weighted by validity)
         valid_mask = ~padding_mask
         if valid_mask.any():
-            # Masked mean pooling
             valid_expand = valid_mask.unsqueeze(-1).float()
             x_sum = (x_embed * valid_expand).sum(dim=1)
             x_count = valid_expand.sum(dim=1).clamp(min=1)
             x_pooled = x_sum / x_count
             
-            # Also get max pooling
             x_masked = x_embed.masked_fill(padding_mask.unsqueeze(-1), -1e9)
             x_max, _ = x_masked.max(dim=1)
             
-            # Combine
             x_final = x_pooled + 0.1 * x_max
         else:
             x_final = x_embed.mean(dim=1)
         
         # Get outputs
+        logits = self.classification_head(x_final)  # [B, 3]
+        
         outputs = {
-            'binary': self.binary_head(x_final)
+            'logits': logits,
+            'binary': logits,  # Alias for backwards compatibility
+            'confidence': self.confidence_head(x_final).squeeze(-1)
         }
         
         if return_all:
+            # Compute class probabilities
+            probs = F.softmax(logits, dim=-1)
+            outputs['prob_flat'] = probs[:, 0]
+            outputs['prob_pspl'] = probs[:, 1]
+            outputs['prob_binary'] = probs[:, 2]
+            
+            # Auxiliary outputs
             outputs['anomaly'] = self.anomaly_head(x_final).squeeze(-1)
             outputs['caustic'] = self.caustic_head(x_final).squeeze(-1)
         
-        # Clamp outputs to prevent overflow in loss
-        outputs['binary'] = torch.clamp(outputs['binary'], min=-20, max=20)
+        # Clamp outputs
+        outputs['logits'] = torch.clamp(outputs['logits'], min=-20, max=20)
+        outputs['binary'] = outputs['logits']  # Keep alias synced
         
         return outputs
 
@@ -342,7 +347,7 @@ def count_parameters(model):
 
 def test_model():
     """Test model creation and forward pass"""
-    print("Testing MicrolensingTransformer...")
+    print("Testing MicrolensingTransformer v11.0 (3-class)...")
     
     model = MicrolensingTransformer(
         n_points=1500,
@@ -359,8 +364,16 @@ def test_model():
     x = torch.randn(4, 1500)
     x[:, 1000:] = -1.0  # Add padding
     
-    outputs = model(x)
-    print(f"Output shape: {outputs['binary'].shape}")
+    outputs = model(x, return_all=True)
+    print(f"Logits shape: {outputs['logits'].shape}")  # Should be [4, 3]
+    print(f"Number of classes: {outputs['logits'].shape[1]}")
+    
+    if 'prob_flat' in outputs:
+        print(f"✅ Three-class probabilities working!")
+        print(f"   Flat prob: {outputs['prob_flat'][0].item():.3f}")
+        print(f"   PSPL prob: {outputs['prob_pspl'][0].item():.3f}")
+        print(f"   Binary prob: {outputs['prob_binary'][0].item():.3f}")
+    
     print("✅ Model test passed!")
 
 
