@@ -151,7 +151,6 @@ Thesis/
 │
 ├── docs/
 │   ├── RESEARCH_GUIDE.md          # Complete experimental workflow (v10.0)
-│   └── BUG_FIXES_AND_COMPATIBILITY.md  # Debug guide (NEW!)
 │
 ├── requirements.txt               # Python dependencies
 ├── README.md                      # This file (v10.0)
@@ -459,7 +458,6 @@ pip install torch torchvision
    - **After**: All files now v10.0
    - **Tool**: Use `python update_versions.py --version 10.0`
 
-See `BUG_FIXES_AND_COMPATIBILITY.md` for complete details.
 
 ---
 
@@ -507,7 +505,6 @@ python train.py --lr 1e-5 --grad_clip 1.0 --warmup_epochs 10
 ## 📚 Additional Documentation
 
 - **[RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)**: Systematic experimental design and thesis workflow
-- **[BUG_FIXES_AND_COMPATIBILITY.md](BUG_FIXES_AND_COMPATIBILITY.md)**: Complete bug fix log and compatibility guide
 
 ---
 
@@ -553,7 +550,6 @@ Email: kunal29bhatia@gmail.com
 - ✅ Added comprehensive AMD GPU support documentation
 - ✅ Added multi-node DDP setup guide
 - ✅ Created version update script (update_versions.py)
-- ✅ Created bug fix documentation (BUG_FIXES_AND_COMPATIBILITY.md)
 - ✅ Enhanced real-time evolution plots (shows BOTH PSPL and Binary probabilities)
 - ✅ All files updated to v10.0
 
