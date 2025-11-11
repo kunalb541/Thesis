@@ -1,10 +1,10 @@
 """
 Configuration for Real-Time Binary Microlensing Detection
-IMPROVED VERSION - Cleaner, Consistent, No Redundancy
+FIXED VERSION - Complete Backwards Compatibility
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 10.0 - Production Ready
+Version: 10.0 - Production Ready (FIXED)
 """
 
 import math
@@ -50,7 +50,7 @@ class PSPLConfig:
 class BinaryConfig:
     """Binary lens configurations"""
     
-    # Three main configurations (removed redundancy)
+    # Three main configurations
     CONFIGS = {
         'critical': {
             'description': 'Forces caustic crossings for clear detection',
@@ -144,10 +144,9 @@ class BinaryConfig:
 
 class ModelConfig:
     """Transformer architecture parameters"""
-    # FIXED: Match what's actually used in training
-    D_MODEL = 256           # Embedding dimension (was wrongly 64)
-    NHEAD = 8              # Attention heads (was wrongly 4)
-    NUM_LAYERS = 6         # Transformer layers (was wrongly 3)
+    D_MODEL = 256           # Embedding dimension
+    NHEAD = 8              # Attention heads
+    NUM_LAYERS = 6         # Transformer layers
     DIM_FEEDFORWARD = 1024 # FFN dimension (4 * d_model)
     DROPOUT = 0.1          # Dropout rate
     MAX_SEQ_LEN = 2000     # Maximum sequence length
@@ -202,10 +201,6 @@ class EvaluationConfig:
     U0_THRESHOLD = 0.3     # Physical detection limit
     U0_BINS = 10           # Number of bins for analysis
     
-    # Chi-square analysis (NEW!)
-    CHI2_COMPUTE = True    # Enable chi-square evolution
-    CHI2_BINS = 20         # Time bins for chi-square
-    
     # Early detection fractions
     EARLY_FRACTIONS = [0.1, 0.25, 0.5, 0.67, 0.833, 1.0]
     
@@ -239,58 +234,6 @@ class SystemConfig:
     # Logging
     LOG_LEVEL = 'INFO'    # DEBUG, INFO, WARNING, ERROR
     LOG_INTERVAL = 10     # Log every N batches
-
-# ============================================================================
-# CHI-SQUARE CONFIGURATION (NEW!)
-# ============================================================================
-
-class ChiSquareConfig:
-    """Configuration for chi-square goodness-of-fit analysis"""
-    
-    @staticmethod
-    def compute_chi2(observed, model, errors):
-        """
-        Compute chi-square statistic
-        
-        Args:
-            observed: Observed flux values
-            model: Model flux predictions  
-            errors: Measurement uncertainties
-            
-        Returns:
-            chi2: Chi-square value
-            dof: Degrees of freedom
-            reduced_chi2: Reduced chi-square
-        """
-        import numpy as np
-        
-        # Only use valid (non-padded) points
-        valid_mask = observed != -1.0
-        
-        if not valid_mask.any():
-            return np.inf, 0, np.inf
-        
-        obs = observed[valid_mask]
-        mod = model[valid_mask]
-        err = errors[valid_mask] if errors is not None else np.ones_like(obs) * 0.1
-        
-        # Chi-square calculation
-        residuals = (obs - mod) / err
-        chi2 = np.sum(residuals ** 2)
-        
-        # Degrees of freedom
-        n_points = len(obs)
-        n_params = 3  # Simplified: t0, u0, tE for PSPL
-        dof = max(n_points - n_params, 1)
-        
-        # Reduced chi-square
-        reduced_chi2 = chi2 / dof
-        
-        return chi2, dof, reduced_chi2
-    
-    # Thresholds for interpretation
-    GOOD_FIT_THRESHOLD = 1.5      # Reduced chi2 < 1.5 is good
-    ACCEPTABLE_FIT_THRESHOLD = 3.0 # Reduced chi2 < 3.0 is acceptable
 
 # ============================================================================
 # EXPERIMENT PRESETS
@@ -350,6 +293,45 @@ def get_all_configs() -> Dict[str, Any]:
         'experiments': ExperimentPresets.EXPERIMENTS
     }
 
+def print_config_summary():
+    """Print configuration summary"""
+    print("="*70)
+    print("CONFIGURATION SUMMARY - v10.0")
+    print("="*70)
+    
+    sim = SimulationConfig
+    print(f"\n📊 Data Generation:")
+    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
+    print(f"  Points: {sim.N_POINTS}")
+    print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
+    print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
+    
+    print(f"\n🧬 Binary Configurations:")
+    for name, cfg in BinaryConfig.CONFIGS.items():
+        print(f"  {name}: {cfg['description']}")
+        print(f"    u0=[{cfg['u0_range'][0]:.3f}, {cfg['u0_range'][1]:.3f}], "
+              f"Expected: {cfg['expected_accuracy']*100:.0f}%")
+    
+    model = ModelConfig
+    print(f"\n🤖 Model Architecture:")
+    print(f"  Transformer: d={model.D_MODEL}, L={model.NUM_LAYERS}, H={model.NHEAD}")
+    print(f"  Multi-task weights: Binary={model.BINARY_WEIGHT}, "
+          f"Anomaly={model.ANOMALY_WEIGHT}, Caustic={model.CAUSTIC_WEIGHT}")
+    
+    train = TrainingConfig
+    print(f"\n🎯 Training:")
+    print(f"  Batch size: {train.BATCH_SIZE} per GPU")
+    print(f"  Learning rate: {train.LEARNING_RATE}")
+    print(f"  Schedule: {train.LR_SCHEDULE}")
+    print(f"  Early stopping: patience={train.PATIENCE}")
+    
+    eval_cfg = EvaluationConfig
+    print(f"\n📈 Evaluation:")
+    print(f"  u0 threshold: {eval_cfg.U0_THRESHOLD}")
+    print(f"  Target accuracy: {eval_cfg.TARGET_ACCURACY*100:.0f}%")
+    
+    print("="*70)
+
 def validate_config():
     """Validate configuration consistency"""
     issues = []
@@ -384,48 +366,8 @@ def validate_config():
         print("✅ Configuration validated successfully!")
         return True
 
-def print_config_summary():
-    """Print configuration summary"""
-    print("="*70)
-    print("CONFIGURATION SUMMARY - v11.0")
-    print("="*70)
-    
-    sim = SimulationConfig
-    print(f"\n📊 Data Generation:")
-    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
-    print(f"  Points: {sim.N_POINTS}")
-    print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
-    print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
-    
-    print(f"\n🧬 Binary Configurations:")
-    for name, cfg in BinaryConfig.CONFIGS.items():
-        print(f"  {name}: {cfg['description']}")
-        print(f"    u0=[{cfg['u0_range'][0]:.3f}, {cfg['u0_range'][1]:.3f}], "
-              f"Expected: {cfg['expected_accuracy']*100:.0f}%")
-    
-    model = ModelConfig
-    print(f"\n🤖 Model Architecture:")
-    print(f"  Transformer: d={model.D_MODEL}, L={model.NUM_LAYERS}, H={model.NHEAD}")
-    print(f"  Multi-task weights: Binary={model.BINARY_WEIGHT}, "
-          f"Anomaly={model.ANOMALY_WEIGHT}, Caustic={model.CAUSTIC_WEIGHT}")
-    
-    train = TrainingConfig
-    print(f"\n🎯 Training:")
-    print(f"  Batch size: {train.BATCH_SIZE} per GPU")
-    print(f"  Learning rate: {train.LEARNING_RATE}")
-    print(f"  Schedule: {train.LR_SCHEDULE}")
-    print(f"  Early stopping: patience={train.PATIENCE}")
-    
-    eval_cfg = EvaluationConfig
-    print(f"\n📈 Evaluation:")
-    print(f"  u0 threshold: {eval_cfg.U0_THRESHOLD}")
-    print(f"  Chi-square analysis: {eval_cfg.CHI2_COMPUTE}")
-    print(f"  Target accuracy: {eval_cfg.TARGET_ACCURACY*100:.0f}%")
-    
-    print("="*70)
-
 # ============================================================================
-# BACKWARDS COMPATIBILITY
+# BACKWARDS COMPATIBILITY (COMPLETE)
 # ============================================================================
 
 # For existing code that expects old variable names
@@ -433,6 +375,22 @@ N_POINTS = SimulationConfig.N_POINTS
 TIME_MIN = SimulationConfig.TIME_MIN
 TIME_MAX = SimulationConfig.TIME_MAX
 PAD_VALUE = SimulationConfig.PAD_VALUE
+
+# PSPL parameter compatibility
+PSPL_T0_MIN = PSPLConfig.T0_MIN
+PSPL_T0_MAX = PSPLConfig.T0_MAX
+PSPL_U0_MIN = PSPLConfig.U0_MIN
+PSPL_U0_MAX = PSPLConfig.U0_MAX
+PSPL_TE_MIN = PSPLConfig.TE_MIN
+PSPL_TE_MAX = PSPLConfig.TE_MAX
+
+# Observational parameters
+BASELINE_MIN = SimulationConfig.BASELINE_MIN
+BASELINE_MAX = SimulationConfig.BASELINE_MAX
+CADENCE_MASK_PROB = SimulationConfig.CADENCE_MASK_PROB
+MAG_ERROR_STD = SimulationConfig.MAG_ERROR_STD
+VBM_TOLERANCE = SimulationConfig.VBM_TOLERANCE
+MAX_BINARY_ATTEMPTS = SimulationConfig.MAX_BINARY_ATTEMPTS
 
 # Binary param sets for simulate.py compatibility
 BINARY_PARAM_SETS = {
@@ -444,6 +402,11 @@ BINARY_PARAM_SETS = {
 BINARY_PARAM_SETS['distinct'] = BINARY_PARAM_SETS['critical']
 # Add overlapping for compatibility (use challenging instead)  
 BINARY_PARAM_SETS['overlapping'] = BINARY_PARAM_SETS['challenging']
+
+# Helper functions for backwards compatibility
+def get_config_summary():
+    """Wrapper for backwards compatibility"""
+    print_config_summary()
 
 if __name__ == "__main__":
     print_config_summary()

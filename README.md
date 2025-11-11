@@ -543,7 +543,6 @@ Email: kunal29bhatia@gmail.com
 - ✅ Standardized version numbers across all files
 - ✅ Added comprehensive AMD GPU support documentation
 - ✅ Added multi-node DDP setup guide
-- ✅ Created version update script (update_versions.py)
 - ✅ Enhanced real-time evolution plots (shows BOTH PSPL and Binary probabilities)
 - ✅ All files updated to v10.0
 
