@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Production Transformer for 8x H100 Distributed Training
+Production Transformer for 8x H100 Distributed Training (FIXED)
 Optimized for multi-GPU with gradient stability
 
+FIXES APPLIED:
+- Removed double normalization in forward() (data already normalized by train.py)
+- Removed redundant gradient clipping register_hook (train.py handles this)
+
 Author: Kunal Bhatia
-Version: 10.0 
+Version: 10.0 - Production Ready (FIXED)
 """
 
 import torch
@@ -141,6 +145,8 @@ class MicrolensingTransformer(nn.Module):
     - Stable gradient flow
     - Efficient for distributed training
     - Handles missing data properly
+    
+    FIXED: Removed double normalization and redundant gradient clipping
     """
     
     def __init__(
@@ -212,9 +218,8 @@ class MicrolensingTransformer(nn.Module):
         
         self._init_weights()
         
-        # Register backward hook for gradient clipping
-        for param in self.parameters():
-            param.register_hook(lambda grad: torch.clamp(grad, -1.0, 1.0) if grad is not None else grad)
+        # FIXED: Removed redundant gradient clipping register_hook
+        # train.py already handles gradient clipping with clip_grad_norm_
     
     def _init_weights(self):
         """Initialize weights carefully for stability"""
@@ -273,21 +278,11 @@ class MicrolensingTransformer(nn.Module):
         # Create padding mask
         padding_mask = self.create_padding_mask(x)
         
-        # Normalize input (only valid positions)
-        valid_mask = ~padding_mask
-        if valid_mask.any():
-            # Compute statistics on valid data
-            valid_data = x[valid_mask.unsqueeze(-1)].view(-1)
-            mean = valid_data.mean()
-            std = valid_data.std() + 1e-8
-            
-            # Safe normalization
-            x_norm = x.clone()
-            x_norm[valid_mask] = (x[valid_mask] - mean) / std
-            x_norm = torch.clamp(x_norm, min=-10, max=10)
-            x_norm[padding_mask] = 0  # Zero out padding
-        else:
-            x_norm = torch.zeros_like(x)
+        # FIXED: Removed double normalization
+        # Input data 'x' is already normalized by StableNormalizer in train.py
+        # Just zero out padding before embedding
+        x_norm = x.clone()
+        x_norm[padding_mask.unsqueeze(-1)] = 0.0
         
         # Input embedding
         x_embed = self.input_embed(x_norm)
@@ -308,6 +303,7 @@ class MicrolensingTransformer(nn.Module):
         x_embed = self.norm(x_embed)
         
         # Global pooling (weighted by validity)
+        valid_mask = ~padding_mask
         if valid_mask.any():
             # Masked mean pooling
             valid_expand = valid_mask.unsqueeze(-1).float()

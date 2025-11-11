@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Microlensing Event Simulation - Production Version
+Microlensing Event Simulation - Production Version (FIXED)
 ==================================================
 Generates realistic PSPL and binary microlensing light curves.
 Uses VBBinaryLensing for accurate binary magnifications.
 
+FIXES APPLIED:
+- Added --cadence_mask_prob CLI argument
+- Added --mag_error_std CLI argument
+- Updated all function signatures to pass these parameters
+- Fixed version string to v10.0
+
 Author: Kunal Bhatia
-Version: 10.0 - Production Ready
+Version: 10.0 - Production Ready (FIXED)
 """
 
 import numpy as np
@@ -267,18 +273,19 @@ def generate_single_event(args):
     Wrapper for parallel generation
     
     Args:
-        args: (index, params, event_type, timestamps)
+        args: (index, params, event_type, timestamps, cadence, error)
         
     Returns:
         (flux, label, params)
     """
-    idx, params, event_type, timestamps = args
+    # FIXED: Unpack all 6 arguments including cadence and error
+    idx, params, event_type, timestamps, cadence, error = args
     
     # Generate clean light curve
     flux = generate_light_curve(params, event_type, timestamps)
     
-    # Add observational effects
-    flux_obs = add_observational_effects(flux)
+    # FIXED: Pass cadence and error to add_observational_effects
+    flux_obs = add_observational_effects(flux, error_mag=error, cadence_missing=cadence)
     
     # Label: 0 = PSPL, 1 = Binary
     label = 0 if event_type == 'pspl' else 1
@@ -287,7 +294,8 @@ def generate_single_event(args):
 
 
 def simulate_dataset(n_pspl, n_binary, binary_params='baseline', 
-                     num_workers=1, seed=None, save_params=False):
+                     num_workers=1, seed=None, save_params=False,
+                     cadence_mask_prob=None, mag_error_std=None):
     """
     Generate complete dataset
     
@@ -298,6 +306,8 @@ def simulate_dataset(n_pspl, n_binary, binary_params='baseline',
         num_workers: Number of parallel workers
         seed: Random seed
         save_params: Whether to save event parameters
+        cadence_mask_prob: Override CADENCE_MASK_PROB from config (NEW)
+        mag_error_std: Override MAG_ERROR_STD from config (NEW)
         
     Returns:
         X: Light curves (n_events, n_points)
@@ -311,14 +321,18 @@ def simulate_dataset(n_pspl, n_binary, binary_params='baseline',
     # Generate timestamps
     timestamps = np.linspace(TIME_MIN, TIME_MAX, N_POINTS)
     
+    # FIXED: Use overrides if provided, otherwise use config defaults
+    cadence = CADENCE_MASK_PROB if cadence_mask_prob is None else cadence_mask_prob
+    error = MAG_ERROR_STD if mag_error_std is None else mag_error_std
+    
     # Generate parameters
     print(f"\n{'='*70}")
     print(f"GENERATING {n_pspl} PSPL + {n_binary} BINARY EVENTS")
     print(f"{'='*70}")
     print(f"Binary config: {binary_params}")
     print(f"Time window: [{TIME_MIN}, {TIME_MAX}] days")
-    print(f"Cadence mask: {CADENCE_MASK_PROB*100:.0f}% missing")
-    print(f"Photometric error: {MAG_ERROR_STD:.3f}")
+    print(f"Cadence mask: {cadence*100:.0f}% missing")  # FIXED: Use local variable
+    print(f"Photometric error: {error:.3f}")  # FIXED: Use local variable
     
     print("\nGenerating PSPL parameters...")
     params_pspl = generate_pspl_params(n_pspl, seed=seed)
@@ -326,10 +340,10 @@ def simulate_dataset(n_pspl, n_binary, binary_params='baseline',
     print(f"\nGenerating Binary parameters ({binary_params})...")
     params_binary = generate_binary_params(n_binary, params_set=binary_params, seed=seed+1 if seed else None)
     
-    # Prepare arguments for parallel processing
+    # FIXED: Prepare arguments with cadence and error parameters
     args_list = []
-    args_list.extend([(i, p, 'pspl', timestamps) for i, p in enumerate(params_pspl)])
-    args_list.extend([(i, p, 'binary', timestamps) for i, p in enumerate(params_binary)])
+    args_list.extend([(i, p, 'pspl', timestamps, cadence, error) for i, p in enumerate(params_pspl)])
+    args_list.extend([(i, p, 'binary', timestamps, cadence, error) for i, p in enumerate(params_binary)])
     
     # Generate events in parallel
     print(f"\nGenerating light curves ({num_workers} workers)...")
@@ -410,6 +424,13 @@ def main():
                        help='Random seed')
     parser.add_argument('--save_params', action='store_true',
                        help='Save event parameters in output file')
+    
+    # FIXED: Added CLI arguments for experimental control
+    parser.add_argument('--cadence_mask_prob', type=float, default=None,
+                       help='Override CADENCE_MASK_PROB from config (for experiments)')
+    parser.add_argument('--mag_error_std', type=float, default=None,
+                       help='Override MAG_ERROR_STD from config (for experiments)')
+    
     parser.add_argument('--show_config', action='store_true',
                        help='Show configuration and exit')
     
@@ -423,7 +444,7 @@ def main():
         return
     
     print("="*70)
-    print("BINARY MICROLENSING SIMULATION v8.0")
+    print("BINARY MICROLENSING SIMULATION v10.0")  # FIXED: Updated version string
     print("="*70)
     print(f"PSPL events: {args.n_pspl}")
     print(f"Binary events: {args.n_binary}")
@@ -431,20 +452,28 @@ def main():
     print(f"Workers: {args.num_workers}")
     print(f"Save params: {args.save_params}")
     
+    # Show override information if provided
+    if args.cadence_mask_prob is not None:
+        print(f"Cadence override: {args.cadence_mask_prob*100:.0f}% missing")
+    if args.mag_error_std is not None:
+        print(f"Error override: {args.mag_error_std:.3f} mag")
+    
     # Validate configuration
     print("\n" + "="*70)
     if not validate_config():
         print("\n⚠️  Configuration has warnings but will proceed...")
     print("="*70)
     
-    # Generate dataset
+    # FIXED: Generate dataset with override parameters
     X, y, timestamps, params_dict = simulate_dataset(
         n_pspl=args.n_pspl,
         n_binary=args.n_binary,
         binary_params=args.binary_params,
         num_workers=args.num_workers,
         seed=args.seed,
-        save_params=args.save_params
+        save_params=args.save_params,
+        cadence_mask_prob=args.cadence_mask_prob,
+        mag_error_std=args.mag_error_std
     )
     
     # Save
