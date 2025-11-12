@@ -1,6 +1,0 @@
-{
-  "test_acc": 0.7721238732337952,
-  "best_val_acc": 0.7654867172241211,
-  "version": "12.0",
-  "causal": false
-}
