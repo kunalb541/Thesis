@@ -90,9 +90,19 @@ python train.py \
     --num_layers 4
 ```
 
-**Multi-GPU (8 GPUs):**
+**Multi-GPU:**
 ```bash
-torchrun --nproc_per_node=8 train.py \
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
+export MASTER_PORT=29500
+
+srun torchrun \
+  --nnodes=n \
+  --nproc_per_node=n \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  --rdzv_id=$(date +%s) \
+  train.py \
     --data ../data/raw/test.npz \
     --experiment_name test \
     --epochs 10 \
@@ -103,7 +113,7 @@ torchrun --nproc_per_node=8 train.py \
     --num_layers 4
 ```
 
-### 4. Evaluate Model (3-Class Metrics)
+### 4. Evaluate Model 
 
 ```bash
 python evaluate.py \
