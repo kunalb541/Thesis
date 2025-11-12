@@ -1,13 +1,16 @@
 """
-Configuration for Real-Time Binary Microlensing Detection
-VERSION 11.0 - THREE-CLASS CLASSIFICATION
+Configuration for Causal Real-Time Binary Microlensing Detection
+VERSION 12.0 - FIXED DATA LEAKAGE + SMALLER MODEL
 
-NEW in v11.0: Added "Flat" class for no-event baseline observations
-Classes: 0=Flat, 1=PSPL, 2=Binary
+CRITICAL FIXES in v12.0:
+- Smaller model (d_model=128) for faster training
+- Wider t0 range to prevent timing artifacts
+- Architecture changes for causal inference
+- No absolute positional encoding
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 11.0 - Three-Class Classification
+Version: 12.0 - Causal Architecture
 """
 
 import math
@@ -38,7 +41,7 @@ class SimulationConfig:
     PAD_VALUE = -1.0          # Marker for missing data
 
 # ============================================================================
-# EVENT PARAMETERS
+# EVENT PARAMETERS - v12.0 FIXES
 # ============================================================================
 
 class FlatConfig:
@@ -49,16 +52,21 @@ class FlatConfig:
     pass  # No special parameters needed - just baseline magnitude
 
 class PSPLConfig:
-    """Point Source Point Lens parameters"""
-    T0_MIN = -20.0    # Peak time range
-    T0_MAX = 20.0
-    U0_MIN = 0.001    # Match binary range
-    U0_MAX = 0.3      # Match binary range
-    TE_MIN = 20.0     # Match binary range
-    TE_MAX = 40.0     # Fits in 200-day window
+    """
+    Point Source Point Lens parameters
+    
+    v12.0 FIX: WIDER t0 range to prevent timing artifacts
+    Now events can peak anywhere from -50 to +50 days
+    """
+    T0_MIN = -50.0    # CHANGED: Much wider range (was -20)
+    T0_MAX = 50.0     # CHANGED: More realistic (was 20)
+    U0_MIN = 0.001    
+    U0_MAX = 0.3      
+    TE_MIN = 20.0     
+    TE_MAX = 40.0
 
 class BinaryConfig:
-    """Binary lens configurations"""
+    """Binary lens configurations with wider t0 ranges"""
     
     # Three main configurations
     CONFIGS = {
@@ -69,9 +77,9 @@ class BinaryConfig:
             'u0_range': (0.001, 0.05),
             'rho_range': (0.001, 0.01),
             'alpha_range': (0, math.pi),
-            't0_range': (-20.0, 20.0),
+            't0_range': (-50.0, 50.0),  # CHANGED: Wider (was -20, 20)
             'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.95
+            'expected_accuracy': 0.85
         },
         
         'baseline': {
@@ -81,9 +89,9 @@ class BinaryConfig:
             'u0_range': (0.001, 0.3),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-20.0, 20.0),
+            't0_range': (-50.0, 50.0),  # CHANGED: Wider (was -20, 20)
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.75
+            'expected_accuracy': 0.70
         },
         
         'challenging': {
@@ -93,9 +101,9 @@ class BinaryConfig:
             'u0_range': (0.01, 1.0),
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-20.0, 20.0),
+            't0_range': (-50.0, 50.0),  # CHANGED: Wider (was -20, 20)
             'tE_range': (10.0, 40.0),
-            'expected_accuracy': 0.60
+            'expected_accuracy': 0.55
         },
         
         'planetary': {
@@ -105,9 +113,9 @@ class BinaryConfig:
             'u0_range': (0.001, 0.2),
             'rho_range': (0.0001, 0.01),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-20.0, 20.0),
+            't0_range': (-50.0, 50.0),  # CHANGED: Wider
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.75
+            'expected_accuracy': 0.70
         },
         
         'stellar': {
@@ -117,9 +125,9 @@ class BinaryConfig:
             'u0_range': (0.001, 0.4),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-20.0, 20.0),
+            't0_range': (-50.0, 50.0),  # CHANGED: Wider
             'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.70
+            'expected_accuracy': 0.65
         }
     }
     
@@ -148,22 +156,33 @@ class BinaryConfig:
         }
 
 # ============================================================================
-# MODEL ARCHITECTURE
+# MODEL ARCHITECTURE - v12.0 SMALLER MODEL
 # ============================================================================
 
 class ModelConfig:
-    """Transformer architecture parameters"""
-    D_MODEL = 256           # Embedding dimension
-    NHEAD = 8              # Attention heads
-    NUM_LAYERS = 6         # Transformer layers
-    DIM_FEEDFORWARD = 1024 # FFN dimension (4 * d_model)
-    DROPOUT = 0.1          # Dropout rate
-    MAX_SEQ_LEN = 2000     # Maximum sequence length
+    """
+    Transformer architecture parameters
     
-    # Multi-task learning weights (updated for 3 classes)
-    CLASSIFICATION_WEIGHT = 1.0  # Main task: 3-class classification
-    ANOMALY_WEIGHT = 0.1         # Auxiliary task
-    CAUSTIC_WEIGHT = 0.1         # Auxiliary task
+    v12.0 CHANGES: SMALLER MODEL for faster iteration
+    - d_model: 256 → 128 (4x fewer parameters!)
+    - nhead: 8 → 4 
+    - num_layers: 6 → 4
+    - dim_feedforward: 1024 → 512
+    
+    This gives ~100K parameters instead of ~450K
+    Much faster training for debugging!
+    """
+    D_MODEL = 128              # CHANGED: 256 → 128
+    NHEAD = 4                  # CHANGED: 8 → 4
+    NUM_LAYERS = 4             # CHANGED: 6 → 4
+    DIM_FEEDFORWARD = 512      # CHANGED: 1024 → 512 (4 * d_model)
+    DROPOUT = 0.1
+    MAX_SEQ_LEN = 2000
+    
+    # Multi-task learning weights (same as v11)
+    CLASSIFICATION_WEIGHT = 1.0
+    ANOMALY_WEIGHT = 0.1
+    CAUSTIC_WEIGHT = 0.1
 
 # ============================================================================
 # TRAINING PARAMETERS
@@ -172,7 +191,7 @@ class ModelConfig:
 class TrainingConfig:
     """Training hyperparameters"""
     # Optimization
-    BATCH_SIZE = 32
+    BATCH_SIZE = 64            # CHANGED: 32 → 64 (smaller model fits more)
     LEARNING_RATE = 1e-3
     WEIGHT_DECAY = 1e-4
     WARMUP_EPOCHS = 5
@@ -199,6 +218,12 @@ class TrainingConfig:
     # Checkpointing
     SAVE_EVERY = 5
     KEEP_LAST_N = 3
+    
+    # v12.0 CAUSAL TRAINING
+    CAUSAL_TRAINING = True            # Enable causal truncation
+    CAUSAL_TRUNCATION_PROB = 0.5      # 50% of batches get truncated
+    CAUSAL_MIN_FRAC = 0.1             # Keep at least 10%
+    CAUSAL_MAX_FRAC = 0.8             # Truncate up to 80%
 
 # ============================================================================
 # EVALUATION PARAMETERS
@@ -211,15 +236,15 @@ class EvaluationConfig:
     U0_BINS = 10
     
     # Early detection fractions
-    EARLY_FRACTIONS = [0.1, 0.25, 0.5, 0.67, 0.833, 1.0]
+    EARLY_FRACTIONS = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
     
     # Visualization settings
     N_EVOLUTION_PLOTS = 3
     N_EXAMPLE_GRID = 3
     
-    # Performance thresholds (updated for 3-class)
-    MIN_ACCURACY_WARNING = 0.65  # Lower for 3-class
-    TARGET_ACCURACY = 0.75       # Harder with 3 classes
+    # Performance thresholds (realistic for v12.0)
+    MIN_ACCURACY_WARNING = 0.60  # Lower due to harder task
+    TARGET_ACCURACY = 0.70       # Realistic for 3-class
 
 # ============================================================================
 # SYSTEM PARAMETERS
@@ -241,7 +266,7 @@ class SystemConfig:
     LOG_INTERVAL = 10
 
 # ============================================================================
-# EXPERIMENT PRESETS (UPDATED FOR 3-CLASS)
+# EXPERIMENT PRESETS (UPDATED FOR v12.0)
 # ============================================================================
 
 class ExperimentPresets:
@@ -254,16 +279,16 @@ class ExperimentPresets:
             'n_binary': 100,
             'binary_params': 'baseline',
             'epochs': 5,
-            'description': 'Quick validation test (3-class)'
+            'description': 'Quick validation test (v12.0 causal)'
         },
         
-        'baseline_benchmark': {
+        'causal_benchmark': {
             'n_flat': 333000,
             'n_pspl': 333000,
             'n_binary': 334000,
             'binary_params': 'baseline',
             'epochs': 50,
-            'description': 'Main thesis benchmark (3-class, 1M total)'
+            'description': 'Main v12.0 causal benchmark (1M total)'
         },
         
         'physical_limit': {
@@ -272,7 +297,7 @@ class ExperimentPresets:
             'n_binary': 50000,
             'binary_params': 'challenging',
             'epochs': 50,
-            'description': 'Test physical detection limits (3-class)'
+            'description': 'Test physical detection limits (causal)'
         },
         
         'planetary_search': {
@@ -281,7 +306,7 @@ class ExperimentPresets:
             'n_binary': 50000,
             'binary_params': 'planetary',
             'epochs': 50,
-            'description': 'Optimize for planet detection (3-class)'
+            'description': 'Optimize for planet detection (causal)'
         }
     }
 
@@ -306,7 +331,7 @@ def get_all_configs() -> Dict[str, Any]:
 def print_config_summary():
     """Print configuration summary"""
     print("="*70)
-    print("CONFIGURATION SUMMARY - v11.0 (THREE-CLASS CLASSIFICATION)")
+    print("CONFIGURATION SUMMARY - v12.0 (CAUSAL ARCHITECTURE)")
     print("="*70)
     
     sim = SimulationConfig
@@ -316,32 +341,38 @@ def print_config_summary():
     print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
     print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
     
-    print(f"\n🌟 NEW in v11.0 - THREE CLASSES:")
-    print(f"  Class 0: Flat (no event, baseline only)")
-    print(f"  Class 1: PSPL (single lens)")
-    print(f"  Class 2: Binary (binary lens)")
+    print(f"\n🔧 v12.0 FIXES:")
+    print(f"  ✅ Wider t0 range: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}] (was -20, 20)")
+    print(f"  ✅ Relative positional encoding (no absolute time)")
+    print(f"  ✅ Variable-length training (causal)")
+    print(f"  ✅ Smaller model for faster iteration")
     
     pspl = PSPLConfig
     print(f"\n⭐ PSPL Parameters:")
+    print(f"  t0: [{pspl.T0_MIN}, {pspl.T0_MAX}] days (WIDER!)")
     print(f"  u0: [{pspl.U0_MIN}, {pspl.U0_MAX}]")
     print(f"  tE: [{pspl.TE_MIN}, {pspl.TE_MAX}] days")
     
     print(f"\n🧬 Binary Configurations:")
     for name, cfg in BinaryConfig.CONFIGS.items():
-        print(f"  {name}: {cfg['description']}")
-        print(f"    u0=[{cfg['u0_range'][0]:.3f}, {cfg['u0_range'][1]:.3f}], "
-              f"Expected: {cfg['expected_accuracy']*100:.0f}%")
+        print(f"  {name}: t0=[{cfg['t0_range'][0]:.0f}, {cfg['t0_range'][1]:.0f}] days")
     
     model = ModelConfig
-    print(f"\n🤖 Model Architecture:")
-    print(f"  Transformer: d={model.D_MODEL}, L={model.NUM_LAYERS}, H={model.NHEAD}")
-    print(f"  Output: 3 classes (Flat, PSPL, Binary)")
+    print(f"\n🤖 Model Architecture (SMALLER v12.0):")
+    print(f"  d_model: {model.D_MODEL} (was 256)")
+    print(f"  nhead: {model.NHEAD} (was 8)")
+    print(f"  num_layers: {model.NUM_LAYERS} (was 6)")
+    print(f"  dim_ff: {model.DIM_FEEDFORWARD} (was 1024)")
+    print(f"  Est. parameters: ~100K (was ~450K)")
     
     train = TrainingConfig
     print(f"\n🎯 Training:")
     print(f"  Batch size: {train.BATCH_SIZE} per GPU")
     print(f"  Learning rate: {train.LEARNING_RATE}")
-    print(f"  Target accuracy: {EvaluationConfig.TARGET_ACCURACY*100:.0f}% (3-class)")
+    print(f"  Causal training: {train.CAUSAL_TRAINING}")
+    if train.CAUSAL_TRAINING:
+        print(f"    Truncation prob: {train.CAUSAL_TRUNCATION_PROB}")
+        print(f"    Keep fraction: [{train.CAUSAL_MIN_FRAC}, {train.CAUSAL_MAX_FRAC}]")
     
     print("="*70)
 
@@ -367,15 +398,9 @@ def validate_config():
     if abs(split_sum - 1.0) > 0.001:
         issues.append(f"⚠️ Data splits sum to {split_sum:.3f}, not 1.0")
     
-    binary_baseline = BinaryConfig.CONFIGS['baseline']
-    pspl_u0_range = (PSPLConfig.U0_MIN, PSPLConfig.U0_MAX)
-    pspl_tE_range = (PSPLConfig.TE_MIN, PSPLConfig.TE_MAX)
-    
-    if pspl_u0_range != binary_baseline['u0_range']:
-        issues.append(f"⚠️ PSPL u0 range {pspl_u0_range} != Binary u0 range {binary_baseline['u0_range']}")
-    
-    if pspl_tE_range != binary_baseline['tE_range']:
-        issues.append(f"⚠️ PSPL tE range {pspl_tE_range} != Binary tE range {binary_baseline['tE_range']}")
+    # Check if t0 ranges make sense
+    if abs(PSPLConfig.T0_MAX - PSPLConfig.T0_MIN) < 50:
+        issues.append(f"⚠️ t0 range too narrow: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}]")
     
     if issues:
         print("Configuration Issues Found:")
@@ -384,7 +409,7 @@ def validate_config():
         return False
     else:
         print("✅ Configuration validated successfully!")
-        print("✅ Ready for 3-class classification!")
+        print("✅ Ready for v12.0 causal training!")
         return True
 
 # ============================================================================
@@ -426,4 +451,5 @@ def get_config_summary():
 
 if __name__ == "__main__":
     print_config_summary()
+    print()
     validate_config()

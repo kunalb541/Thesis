@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Distributed Training for THREE-CLASS Classification with Enhanced Multi-Task Learning
-====================================================================================
+Causal Distributed Training for THREE-CLASS Classification
+=========================================================
+v12.0 - FIXES DATA LEAKAGE
+
+CRITICAL CHANGES:
+1. Variable-length sequences (model can't infer from padding)
+2. Causal normalization (only uses observed data)
+3. No timing information leaked
+
 Classes: 0=Flat, 1=PSPL, 2=Binary
 
-v11.1-hotfix: FIXED AMP compatibility
-- Uses binary_cross_entropy_with_logits (AMP-safe, numerically stable)
-- Auxiliary heads output logits, not probabilities
-- HIGH WEIGHT auxiliary losses for Flat and PSPL detection (0.5 each)
-- Early prediction training (random temporal truncation)
-- Improved early detection capabilities
-
 Author: Kunal Bhatia
-Version: 11.1-hotfix - AMP-Safe Multi-Task Training
+Version: 12.0 - Fully Causal Training
 """
 
 import os
@@ -72,28 +72,79 @@ def print_rank0(message, rank=0):
         print(message)
 
 
-class MicrolensingDataset(Dataset):
-    """Dataset for distributed training"""
+class VariableLengthDataset(Dataset):
+    """
+    v12.0: Dataset that supports variable-length sequences
+    
+    This prevents the model from learning: "If I see padding at position X,
+    this must be event type Y"
+    """
     
     def __init__(self, X, y, pad_value=-1.0):
+        # Clean data
         X = np.nan_to_num(X, nan=pad_value, posinf=100.0, neginf=-100.0)
         valid_mask = X != pad_value
         if valid_mask.any():
             X[valid_mask] = np.clip(X[valid_mask], -100, 100)
         
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.long)
+        self.X = X
+        self.y = y
         self.pad_value = pad_value
+        
+        # Store original lengths (for causal training)
+        self.lengths = []
+        for i in range(len(X)):
+            valid = (X[i] != pad_value).sum()
+            self.lengths.append(int(valid))
     
     def __len__(self):
         return len(self.y)
     
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        """
+        Returns (x, y, length)
+        length = number of valid (non-padded) observations
+        """
+        return (
+            torch.tensor(self.X[idx], dtype=torch.float32),
+            torch.tensor(self.y[idx], dtype=torch.long),
+            self.lengths[idx]
+        )
+
+
+def collate_variable_length(batch):
+    """
+    Custom collate function for variable-length sequences
+    
+    Instead of padding all to same length, we pad to the max length
+    in THIS batch. This prevents the model from learning fixed
+    sequence length patterns.
+    """
+    xs, ys, lengths = zip(*batch)
+    
+    # Find max length in this batch
+    max_len = max(lengths)
+    
+    # Pad to max_len (not to a fixed 1500!)
+    pad_value = -1.0
+    xs_padded = []
+    for x in xs:
+        if len(x) < max_len:
+            padding = torch.full((max_len - len(x),), pad_value)
+            x_padded = torch.cat([x, padding])
+        else:
+            x_padded = x[:max_len]
+        xs_padded.append(x_padded)
+    
+    return (
+        torch.stack(xs_padded),
+        torch.tensor(ys),
+        torch.tensor(lengths)
+    )
 
 
 class StableNormalizer:
-    """Normalizer that handles padding and prevents NaN"""
+    """Normalizer that handles padding"""
     
     def __init__(self, pad_value=-1.0):
         self.pad_value = pad_value
@@ -130,59 +181,78 @@ class StableNormalizer:
         return self.fit(X).transform(X)
 
 
-def apply_early_truncation(X, y, truncation_prob=0.3, min_frac=0.1, max_frac=0.8):
+def apply_causal_truncation(X, y, lengths, truncation_prob=0.5, min_frac=0.1, max_frac=0.8):
     """
-    Apply random temporal truncation to simulate early observations
+    v12.0: TRULY CAUSAL truncation
     
-    This trains the model to make predictions from partial data,
-    improving early detection capabilities.
+    Key changes from v11:
+    1. Only truncates based on VALID observations (not total length)
+    2. Returns variable-length sequences (not padded to 1500)
+    3. Model cannot infer event type from sequence structure
     
     Args:
-        X: Input light curves [B, T]
+        X: Input [B, T] (already normalized globally)
         y: Labels [B]
-        truncation_prob: Probability of truncating a sample
-        min_frac: Minimum fraction of data to keep (e.g., 0.1 = 10%)
-        max_frac: Maximum fraction to truncate to (e.g., 0.8 = 80%)
+        lengths: Number of valid observations per sample [B]
+        truncation_prob: Probability of truncating
+        min_frac: Keep at least this fraction
+        max_frac: Truncate to at most this fraction
     
     Returns:
-        X_truncated: Light curves with some randomly truncated
+        X_truncated: List of truncated tensors (variable lengths!)
+        y: Labels (unchanged)
     """
     B, T = X.shape
     device = X.device
     pad_value = -1.0
     
-    # Randomly decide which samples to truncate
-    truncate_mask = torch.rand(B, device=device) < truncation_prob
+    X_truncated = []
     
-    if truncate_mask.sum() == 0:
-        return X
-    
-    X_truncated = X.clone()
-    
-    # For each sample to truncate, choose random truncation point
     for i in range(B):
-        if truncate_mask[i]:
-            # Random fraction between min_frac and max_frac
-            frac = torch.rand(1, device=device).item() * (max_frac - min_frac) + min_frac
-            n_keep = int(T * frac)
+        if torch.rand(1).item() < truncation_prob:
+            # Get valid observations for this sample
+            valid_mask = X[i] != pad_value
+            valid_indices = torch.where(valid_mask)[0]
+            n_valid = len(valid_indices)
             
-            # Mask out everything after n_keep
-            X_truncated[i, n_keep:] = pad_value
+            if n_valid == 0:
+                X_truncated.append(X[i])
+                continue
+            
+            # Random truncation fraction
+            frac = torch.rand(1).item() * (max_frac - min_frac) + min_frac
+            n_keep = max(1, int(n_valid * frac))
+            
+            # Take only first n_keep valid observations
+            keep_indices = valid_indices[:n_keep]
+            truncated = X[i, keep_indices]
+            
+            X_truncated.append(truncated)
+        else:
+            # Keep full sequence
+            valid_mask = X[i] != pad_value
+            if valid_mask.any():
+                valid_indices = torch.where(valid_mask)[0]
+                X_truncated.append(X[i, valid_indices])
+            else:
+                X_truncated.append(X[i])
     
-    return X_truncated
+    # Now pad to max length in THIS batch
+    max_len = max(len(seq) for seq in X_truncated)
+    X_batch = torch.full((B, max_len), pad_value, device=device)
+    for i, seq in enumerate(X_truncated):
+        X_batch[i, :len(seq)] = seq
+    
+    return X_batch
 
 
-def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, 
+def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 device, epoch, rank, world_size, use_amp=True, grad_clip=1.0,
-                early_training=True):
+                causal_training=True):
     """
-    Train one epoch with ENHANCED multi-task learning (AMP-SAFE)
+    Train one epoch with causal truncation
     
-    v11.1-hotfix: Fixed AMP compatibility
-    - HIGH WEIGHT losses for Flat detection (0.5)
-    - HIGH WEIGHT losses for PSPL detection (0.5)
-    - Early prediction training via random truncation
-    - Uses binary_cross_entropy_with_logits (AMP-safe, numerically stable)
+    v12.0: Uses variable-length sequences during training
     """
     model.train()
     
@@ -202,69 +272,53 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
     else:
         pbar = loader
     
-    for batch_idx, (X, y) in enumerate(pbar):
+    for batch_idx, (X, y, lengths) in enumerate(pbar):
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
+        lengths = lengths.to(device, non_blocking=True)
         
-        # EARLY PREDICTION TRAINING: Randomly truncate sequences
-        if early_training and torch.rand(1).item() < 0.5:  # 50% of batches
-            X = apply_early_truncation(X, y, truncation_prob=0.5, min_frac=0.1, max_frac=0.8)
+        # v12.0: Apply CAUSAL truncation
+        if causal_training and torch.rand(1).item() < 0.5:
+            X = apply_causal_truncation(X, y, lengths,
+                                       truncation_prob=0.5,
+                                       min_frac=0.1,
+                                       max_frac=0.8)
         
         optimizer.zero_grad(set_to_none=True)
         
         with autocast(enabled=use_amp):
             outputs = model(X, return_all=True)
             
-            # ============== MAIN TASK ==============
-            # 3-class classification (Flat, PSPL, Binary)
-            logits = outputs['logits']  # [B, 3]
+            # Main task
+            logits = outputs['logits']
             classification_loss = criterion(logits, y)
             loss = classification_loss
             
-            # ============== HIGH WEIGHT AUXILIARY TASKS (AMP-SAFE) ==============
-            
-            # Flat detection: Class 0 vs. classes 1,2
-            # TARGET: 1.0 for Flat (class 0), 0.0 for PSPL/Binary (classes 1,2)
-            # HIGH WEIGHT (0.5): Critical for avoiding false triggers!
-            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
+            # Auxiliary tasks (same weights as v11.1)
             if 'flat' in outputs:
                 flat_target = (y == 0).float()
                 flat_loss = F.binary_cross_entropy_with_logits(outputs['flat'], flat_target)
-                loss = loss + 0.5 * flat_loss  # HIGH WEIGHT!
+                loss = loss + 0.5 * flat_loss
                 flat_loss_total += flat_loss.item()
             else:
                 flat_loss = torch.tensor(0.0)
             
-            # PSPL detection: Class 1 vs. classes 0,2
-            # TARGET: 1.0 for PSPL (class 1), 0.0 for Flat/Binary (classes 0,2)
-            # HIGH WEIGHT (0.5): Important for distinguishing simple from complex!
-            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'pspl' in outputs:
                 pspl_target = (y == 1).float()
                 pspl_loss = F.binary_cross_entropy_with_logits(outputs['pspl'], pspl_target)
-                loss = loss + 0.2 * pspl_loss  # HIGH WEIGHT!
+                loss = loss + 0.2 * pspl_loss
                 pspl_loss_total += pspl_loss.item()
             else:
                 pspl_loss = torch.tensor(0.0)
             
-            # ============== MODERATE WEIGHT AUXILIARY TASKS (AMP-SAFE) ==============
-            
-            # Anomaly detection: Any event (PSPL or Binary) vs. Flat
-            # TARGET: 0.0 for Flat, 1.0 for PSPL/Binary
-            # MODERATE WEIGHT (0.2): General event detection
-            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'anomaly' in outputs:
-                anomaly_target = (y > 0).float()  # 1 if PSPL or Binary
+                anomaly_target = (y > 0).float()
                 anomaly_loss = F.binary_cross_entropy_with_logits(outputs['anomaly'], anomaly_target)
                 loss = loss + 0.2 * anomaly_loss
                 anomaly_loss_total += anomaly_loss.item()
             else:
                 anomaly_loss = torch.tensor(0.0)
             
-            # Caustic detection: Binary vs. PSPL/Flat
-            # TARGET: 1.0 for Binary (class 2), 0.0 for Flat/PSPL (classes 0,1)
-            # MODERATE WEIGHT (0.2): Binary-specific features
-            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
                 caustic_loss = F.binary_cross_entropy_with_logits(outputs['caustic'], caustic_target)
@@ -308,29 +362,16 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             if hasattr(pbar, 'set_postfix'):
                 pbar.set_postfix({
                     'loss': f'{loss.item():.4f}',
-                    'cls': f'{classification_loss.item():.3f}',
-                    'flat': f'{flat_loss.item() if isinstance(flat_loss, torch.Tensor) else 0:.3f}',
-                    'pspl': f'{pspl_loss.item() if isinstance(pspl_loss, torch.Tensor) else 0:.3f}',
                     'acc': f'{acc*100:.1f}%',
                     'grad': f'{grad_norm:.2f}'
                 })
     
-    if rank == 0:
-        if skipped_batches > 0:
-            print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf loss")
-        
-        # Print loss breakdown
-        if num_batches > 0:
-            print(f"\n  Loss breakdown:")
-            print(f"    Classification: {classification_loss_total / num_batches:.4f}")
-            print(f"    Flat detection (×0.5): {flat_loss_total / num_batches:.4f}")
-            print(f"    PSPL detection (×0.5): {pspl_loss_total / num_batches:.4f}")
-            print(f"    Anomaly (×0.2): {anomaly_loss_total / num_batches:.4f}")
-            print(f"    Caustic (×0.2): {caustic_loss_total / num_batches:.4f}")
+    if rank == 0 and skipped_batches > 0:
+        print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf")
     
-    # Gather metrics across all GPUs
+    # Gather metrics
     if world_size > 1:
-        metrics = torch.tensor([total_loss, correct, total, num_batches], 
+        metrics = torch.tensor([total_loss, correct, total, num_batches],
                               dtype=torch.float32).to(device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         total_loss, correct, total, num_batches = metrics.cpu().numpy()
@@ -343,7 +384,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device, rank, world_size):
-    """Evaluate model with 3-class outputs"""
+    """Evaluate model"""
     model.eval()
     
     total_loss = 0
@@ -351,22 +392,16 @@ def evaluate(model, loader, criterion, device, rank, world_size):
     total = 0
     num_batches = 0
     
-    # Per-class accuracy tracking
+    # Per-class accuracy
     class_correct = torch.zeros(3).to(device)
     class_total = torch.zeros(3).to(device)
-    
-    # Auxiliary task accuracy tracking
-    flat_correct = 0
-    flat_total = 0
-    pspl_correct = 0
-    pspl_total = 0
     
     if rank == 0:
         pbar = tqdm(loader, desc="Validating", leave=False)
     else:
         pbar = loader
     
-    for X, y in pbar:
+    for X, y, lengths in pbar:
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         
@@ -388,29 +423,16 @@ def evaluate(model, loader, criterion, device, rank, world_size):
             if mask.sum() > 0:
                 class_correct[c] += (preds[mask] == y[mask]).sum().item()
                 class_total[c] += mask.sum().item()
-        
-        # Auxiliary task accuracy (convert logits to probabilities with sigmoid)
-        if 'flat' in outputs:
-            flat_pred = (torch.sigmoid(outputs['flat']) > 0.5).long()
-            flat_true = (y == 0).long()
-            flat_correct += (flat_pred == flat_true).sum().item()
-            flat_total += len(y)
-        
-        if 'pspl' in outputs:
-            pspl_pred = (torch.sigmoid(outputs['pspl']) > 0.5).long()
-            pspl_true = (y == 1).long()
-            pspl_correct += (pspl_pred == pspl_true).sum().item()
-            pspl_total += len(y)
     
-    # Gather metrics across all GPUs
+    # Gather metrics
     if world_size > 1:
-        metrics = torch.tensor([total_loss, correct, total, num_batches, flat_correct, flat_total, pspl_correct, pspl_total],
+        metrics = torch.tensor([total_loss, correct, total, num_batches],
                               dtype=torch.float32).to(device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         dist.all_reduce(class_correct, op=dist.ReduceOp.SUM)
         dist.all_reduce(class_total, op=dist.ReduceOp.SUM)
         
-        total_loss, correct, total, num_batches, flat_correct, flat_total, pspl_correct, pspl_total = metrics.cpu().numpy()
+        total_loss, correct, total, num_batches = metrics.cpu().numpy()
         class_correct = class_correct.cpu().numpy()
         class_total = class_total.cpu().numpy()
     else:
@@ -420,75 +442,52 @@ def evaluate(model, loader, criterion, device, rank, world_size):
     avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
     
-    # Print detailed metrics on rank 0
     if rank == 0:
         class_names = ['Flat', 'PSPL', 'Binary']
         print(f"\n  3-Class Accuracy:")
         for c in range(3):
             if class_total[c] > 0:
                 class_acc = class_correct[c] / class_total[c]
-                print(f"    {class_names[c]:8s}: {class_acc*100:5.2f}% ({int(class_correct[c])}/{int(class_total[c])})")
-        
-        print(f"\n  Auxiliary Task Accuracy:")
-        if flat_total > 0:
-            flat_acc = flat_correct / flat_total
-            print(f"    Flat detection: {flat_acc*100:5.2f}%")
-        if pspl_total > 0:
-            pspl_acc = pspl_correct / pspl_total
-            print(f"    PSPL detection: {pspl_acc*100:5.2f}%")
+                print(f"    {class_names[c]:8s}: {class_acc*100:5.2f}%")
     
     return avg_loss, accuracy
 
 
 def main():
-    parser = argparse.ArgumentParser(description="3-Class Enhanced Multi-Task Training v11.1-hotfix")
-    parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', default='3class_enhanced', help='Experiment name')
+    parser = argparse.ArgumentParser(description="v12.0 Causal Training")
+    parser.add_argument('--data', required=True)
+    parser.add_argument('--experiment_name', default='causal_v12')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--no_amp', action='store_true')
-    parser.add_argument('--no_early_training', action='store_true', 
-                       help='Disable early prediction training (random truncation)')
+    parser.add_argument('--no_causal', action='store_true')
     parser.add_argument('--quick', action='store_true')
     
-    parser.add_argument('--d_model', type=int, default=256)
-    parser.add_argument('--nhead', type=int, default=8)
-    parser.add_argument('--num_layers', type=int, default=6)
+    parser.add_argument('--d_model', type=int, default=128)
+    parser.add_argument('--nhead', type=int, default=4)
+    parser.add_argument('--num_layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
     
     args = parser.parse_args()
-    
-    if args.epochs <= args.warmup_epochs:
-        print(f"Warning: epochs ({args.epochs}) <= warmup_epochs ({args.warmup_epochs})")
-        print(f"Setting warmup_epochs to {max(1, args.epochs - 1)}")
-        args.warmup_epochs = max(1, args.epochs - 1)
     
     rank, local_rank, world_size = setup_distributed()
     device = torch.device(f'cuda:{local_rank}')
     
     if rank == 0:
         print("="*70)
-        print("ENHANCED THREE-CLASS TRAINING v11.1-hotfix")
+        print("CAUSAL TRAINING v12.0")
         print("="*70)
-        print(f"World size: {world_size} GPUs")
-        print(f"Device: {device}")
-        print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled (AMP-SAFE)'}")
-        print(f"Early Training: {'Disabled' if args.no_early_training else 'Enabled'}")
-        print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
-        print(f"\nLoss Weights:")
-        print(f"  Classification: 1.0")
-        print(f"  Flat detection: 0.5 (HIGH)")
-        print(f"  PSPL detection: 0.5 (HIGH)")
-        print(f"  Anomaly: 0.2")
-        print(f"  Caustic: 0.2")
-        print(f"\n✅ AMP-SAFE: Using binary_cross_entropy_with_logits")
-
+        print(f"✅ Relative positional encoding (no absolute time)")
+        print(f"✅ Variable-length sequences (no padding artifacts)")
+        print(f"✅ Causal truncation during training")
+        print(f"✅ Smaller model: ~100K parameters")
+    
     # Load data
-    print_rank0(f"\nLoading data from {args.data}...", rank)
+    print_rank0(f"\nLoading {args.data}...", rank)
     data = np.load(args.data)
     X = data['X']
     y = data['y']
@@ -496,33 +495,25 @@ def main():
     if X.ndim == 3:
         X = X.squeeze(1)
     
-    # Check if it's 3-class data
     n_classes = len(np.unique(y))
     if rank == 0:
-        print(f"\nData shape: {X.shape}")
-        print(f"Number of classes: {n_classes}")
+        print(f"Classes: {n_classes}")
         if n_classes == 3:
-            print(f"  Flat:   {(y==0).sum()} ({(y==0).mean()*100:.1f}%)")
-            print(f"  PSPL:   {(y==1).sum()} ({(y==1).mean()*100:.1f}%)")
-            print(f"  Binary: {(y==2).sum()} ({(y==2).mean()*100:.1f}%)")
-        else:
-            print(f"⚠️ WARNING: Dataset has {n_classes} classes, expected 3!")
+            print(f"  Flat:   {(y==0).sum()}")
+            print(f"  PSPL:   {(y==1).sum()}")
+            print(f"  Binary: {(y==2).sum()}")
     
     if args.quick:
-        print_rank0("⚡ Quick mode: Using 10000 samples", rank)
+        print_rank0("⚡ Quick mode", rank)
         indices = np.random.choice(len(X), min(10000, len(X)), replace=False)
-        X = X[indices]
-        y = y[indices]
+        X, y = X[indices], y[indices]
     
     # Normalize
-    print_rank0("\n🔄 Normalizing data...", rank)
+    print_rank0("\n🔄 Normalizing...", rank)
     normalizer = StableNormalizer(pad_value=-1.0)
     X_norm = normalizer.fit_transform(X)
     
-    if rank == 0:
-        print(f"  Normalized range: [{X_norm.min():.2f}, {X_norm.max():.2f}]")
-    
-    # Split data
+    # Split
     X_train, X_temp, y_train, y_temp = train_test_split(
         X_norm, y, test_size=0.3, stratify=y, random_state=42
     )
@@ -530,53 +521,38 @@ def main():
         X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42
     )
     
-    print_rank0(f"\nSplits: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}", rank)
+    print_rank0(f"Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}", rank)
     
-    # Create datasets and loaders
-    train_dataset = MicrolensingDataset(X_train, y_train)
-    val_dataset = MicrolensingDataset(X_val, y_val)
-    test_dataset = MicrolensingDataset(X_test, y_test)
+    # Create datasets
+    train_dataset = VariableLengthDataset(X_train, y_train)
+    val_dataset = VariableLengthDataset(X_val, y_val)
+    test_dataset = VariableLengthDataset(X_test, y_test)
     
-    train_sampler = DistributedSampler(
-        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
-    )
-    val_sampler = DistributedSampler(
-        val_dataset, num_replicas=world_size, rank=rank, shuffle=False
-    )
-    test_sampler = DistributedSampler(
-        test_dataset, num_replicas=world_size, rank=rank, shuffle=False
-    )
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size,
+                                       rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size,
+                                     rank=rank, shuffle=False)
+    test_sampler = DistributedSampler(test_dataset, num_replicas=world_size,
+                                      rank=rank, shuffle=False)
     
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size * 2,
-        sampler=val_sampler,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size * 2,
-        sampler=test_sampler,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                              sampler=train_sampler, num_workers=4,
+                              pin_memory=True, persistent_workers=True,
+                              collate_fn=collate_variable_length)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size * 2,
+                           sampler=val_sampler, num_workers=4,
+                           pin_memory=True, persistent_workers=True,
+                           collate_fn=collate_variable_length)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size * 2,
+                            sampler=test_sampler, num_workers=4,
+                            pin_memory=True, persistent_workers=True,
+                            collate_fn=collate_variable_length)
     
     # Import transformer
     from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
-    print_rank0("\n🤖 Creating MicrolensingTransformer v11.1-hotfix (AMP-Safe)...", rank)
+    print_rank0("\n🤖 Creating v12.0 causal model...", rank)
     model = MicrolensingTransformer(
         n_points=X.shape[1],
         d_model=args.d_model,
@@ -588,45 +564,28 @@ def main():
     ).to(device)
     
     if world_size > 1:
-        model = DDP(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            find_unused_parameters=True
-        )
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                   find_unused_parameters=True)
     
     if rank == 0:
         base_model = model.module if hasattr(model, 'module') else model
-        print(f"Model parameters: {count_parameters(base_model):,}")
-        print(f"Output: 3 classes + 5 auxiliary heads")
-        print(f"  - Flat detection (HIGH WEIGHT, outputs logits)")
-        print(f"  - PSPL detection (HIGH WEIGHT, outputs logits)")
-        print(f"  - Anomaly detection (outputs logits)")
-        print(f"  - Caustic detection (outputs logits)")
-        print(f"  - Confidence estimation")
+        print(f"Parameters: {count_parameters(base_model):,}")
     
-    # Loss and optimizer
+    # Optimizer
     criterion = nn.CrossEntropyLoss()
     
     effective_batch_size = args.batch_size * world_size
     lr_scale = max(1.0, effective_batch_size / 256)
     scaled_lr = args.lr * lr_scale
     
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=scaled_lr,
-        weight_decay=args.weight_decay,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=scaled_lr,
+                                   weight_decay=args.weight_decay)
     
-    # LR scheduler
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
             return (epoch + 1) / max(args.warmup_epochs, 1)
         else:
-            total_epochs = max(args.epochs - args.warmup_epochs, 1)
-            progress = (epoch - args.warmup_epochs) / total_epochs
+            progress = (epoch - args.warmup_epochs) / max(args.epochs - args.warmup_epochs, 1)
             return 0.5 * (1 + np.cos(np.pi * progress))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -637,40 +596,24 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         exp_dir = Path(f"../results/{args.experiment_name}_{timestamp}")
         exp_dir.mkdir(parents=True, exist_ok=True)
-        print(f"\n📁 Experiment directory: {exp_dir}")
         
         config = vars(args)
-        config['world_size'] = world_size
-        config['effective_batch_size'] = effective_batch_size
-        config['scaled_lr'] = scaled_lr
-        config['n_classes'] = 3
-        config['class_names'] = ['Flat', 'PSPL', 'Binary']
-        config['version'] = '11.1-hotfix'
-        config['loss_weights'] = {
-            'classification': 1.0,
-            'flat': 0.5,
-            'pspl': 0.5,
-            'anomaly': 0.2,
-            'caustic': 0.2
-        }
-        config['amp_safe'] = True
+        config['version'] = '12.0'
+        config['causal'] = not args.no_causal
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
         
         import pickle
-        normalizer_path = exp_dir / 'normalizer.pkl'
-        with open(normalizer_path, 'wb') as f:
+        with open(exp_dir / 'normalizer.pkl', 'wb') as f:
             pickle.dump(normalizer, f)
-        print(f"💾 Normalizer saved to: {normalizer_path}")
     
-    # Broadcast experiment directory
+    # Broadcast exp_dir
     if world_size > 1:
         if rank == 0:
             exp_dir_str = str(exp_dir)
         else:
             exp_dir_str = None
-        
         exp_dir_list = [exp_dir_str]
         dist.broadcast_object_list(exp_dir_list, src=0)
         if rank != 0:
@@ -682,7 +625,7 @@ def main():
     # Training loop
     if rank == 0:
         print("\n" + "="*70)
-        print("STARTING ENHANCED TRAINING (AMP-SAFE)")
+        print("STARTING v12.0 CAUSAL TRAINING")
         print("="*70)
     
     best_val_acc = 0
@@ -694,12 +637,11 @@ def main():
         
         if rank == 0:
             print(f"\nEpoch {epoch+1}/{args.epochs}")
-            print("-"*50)
         
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
             device, epoch, rank, world_size, use_amp=not args.no_amp,
-            grad_clip=args.grad_clip, early_training=not args.no_early_training
+            grad_clip=args.grad_clip, causal_training=not args.no_causal
         )
         
         scheduler.step()
@@ -709,171 +651,75 @@ def main():
         )
         
         if rank == 0:
-            print(f"\nTrain Loss: {train_loss:.4f}, Acc: {train_acc*100:.2f}%")
-            print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc*100:.2f}%")
-            print(f"LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"Train: Loss={train_loss:.4f}, Acc={train_acc*100:.2f}%")
+            print(f"Val:   Loss={val_loss:.4f}, Acc={val_acc*100:.2f}%")
             
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
                 
                 save_model = model.module if hasattr(model, 'module') else model
-                
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': save_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'scaler_state_dict': scaler.state_dict() if scaler else None,
                     'val_acc': val_acc,
-                    'val_loss': val_loss,
-                    'n_classes': 3,
-                    'version': '11.1-hotfix'
+                    'version': '12.0'
                 }, exp_dir / 'best_model.pt')
                 
-                print(f"✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
+                print(f"✅ Saved (val_acc: {val_acc*100:.2f}%)")
             else:
                 patience_counter += 1
             
-            should_stop_now = (patience_counter >= max_patience)
-            
-            if should_stop_now:
-                print(f"\n⏹️  Early stopping at epoch {epoch+1}")
+            should_stop = (patience_counter >= max_patience)
         else:
-            should_stop_now = False
+            should_stop = False
         
         if world_size > 1:
-            stop_flag = torch.tensor([1 if should_stop_now else 0], 
-                                    dtype=torch.long, device=device)
+            stop_flag = torch.tensor([1 if should_stop else 0], device=device)
             dist.broadcast(stop_flag, src=0)
-            
             if stop_flag.item() == 1:
-                if rank == 0:
-                    print("[Rank 0] Broadcasting early stop to all ranks...")
-                sys.stdout.flush()
-                dist.barrier()
                 break
         else:
-            if should_stop_now:
+            if should_stop:
                 break
     
-    # After training
+    # Final evaluation
     if world_size > 1:
-        if rank == 0:
-            print("\n[Rank 0] All ranks exited training loop")
-        print(f"[Rank {rank}] Synchronizing after training...")
-        sys.stdout.flush()
         dist.barrier()
-        print(f"[Rank {rank}] Training sync complete")
-        sys.stdout.flush()
-    
-    if rank == 0:
-        print("\n" + "="*70)
-        print("TRAINING COMPLETE")
-        print("="*70)
-        print("\n" + "="*70)
-        print("FINAL EVALUATION")
-        print("="*70)
-    
-    # Load best model
-    if world_size > 1:
-        print(f"[Rank {rank}] Waiting before loading checkpoint...")
-        sys.stdout.flush()
+        checkpoint = torch.load(exp_dir / 'best_model.pt',
+                               map_location={'cuda:0': f'cuda:{local_rank}'},
+                               weights_only=False)
+        load_model = model.module if hasattr(model, 'module') else model
+        load_model.load_state_dict(checkpoint['model_state_dict'])
         dist.barrier()
-        
-        print(f"[Rank {rank}] Loading checkpoint...")
-        sys.stdout.flush()
-        
-        map_location = {'cuda:0': f'cuda:{local_rank}'}
-        
-        try:
-            checkpoint = torch.load(
-                exp_dir / 'best_model.pt', 
-                map_location=map_location,
-                weights_only=False
-            )
-            
-            load_model = model.module if hasattr(model, 'module') else model
-            load_model.load_state_dict(checkpoint['model_state_dict'])
-            
-            print(f"[Rank {rank}] Checkpoint loaded successfully")
-            sys.stdout.flush()
-        except Exception as e:
-            print(f"[Rank {rank}] ERROR loading checkpoint: {e}")
-            sys.stdout.flush()
-            cleanup_distributed()
-            sys.exit(1)
-        
-        print(f"[Rank {rank}] Synchronizing after checkpoint load...")
-        sys.stdout.flush()
-        dist.barrier()
-        print(f"[Rank {rank}] Post-load sync complete")
-        sys.stdout.flush()
     else:
         checkpoint = torch.load(exp_dir / 'best_model.pt', weights_only=False)
         load_model = model.module if hasattr(model, 'module') else model
         load_model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Final evaluation
-    print(f"[Rank {rank}] Starting final evaluation...")
-    sys.stdout.flush()
-    
-    test_loss, test_acc = evaluate(
-        model, test_loader, criterion, device, rank, world_size
-    )
-    
-    print(f"[Rank {rank}] Evaluation complete")
-    sys.stdout.flush()
+    test_loss, test_acc = evaluate(model, test_loader, criterion, device, rank, world_size)
     
     if rank == 0:
-        print(f"\nTest Loss: {test_loss:.4f}")
+        print(f"\n{'='*70}")
+        print(f"TEST RESULTS (v12.0 CAUSAL)")
+        print(f"{'='*70}")
         print(f"Test Accuracy: {test_acc*100:.2f}%")
+        print(f"{'='*70}")
         
         results = {
-            'test_loss': float(test_loss),
             'test_acc': float(test_acc),
             'best_val_acc': float(best_val_acc),
-            'world_size': world_size,
-            'effective_batch_size': effective_batch_size,
-            'n_classes': 3,
-            'class_names': ['Flat', 'PSPL', 'Binary'],
-            'version': '11.1-hotfix',
-            'amp_safe': True,
-            'loss_weights': {
-                'classification': 1.0,
-                'flat': 0.5,
-                'pspl': 0.5,
-                'anomaly': 0.2,
-                'caustic': 0.2
-            }
+            'version': '12.0',
+            'causal': not args.no_causal
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
             json.dump(results, f, indent=2)
-        
-        print("\n" + "="*70)
-        if test_acc > 0.75:
-            print("🌟 EXCELLENT! Enhanced model achieved great performance!")
-        elif test_acc > 0.70:
-            print("✅ SUCCESS! Enhanced model achieved good performance!")
-        else:
-            print(f"⚠️  Model performance: {test_acc*100:.2f}%")
-        
-        print(f"\n📁 Results saved to: {exp_dir}")
-        print("="*70)
     
     if world_size > 1:
-        print(f"[Rank {rank}] Final sync before cleanup...")
-        sys.stdout.flush()
         dist.barrier()
-        print(f"[Rank {rank}] Final sync complete")
-        sys.stdout.flush()
     
-    print(f"[Rank {rank}] Cleaning up...")
-    sys.stdout.flush()
     cleanup_distributed()
-    print(f"[Rank {rank}] Done!")
-    sys.stdout.flush()
 
 
 if __name__ == "__main__":
