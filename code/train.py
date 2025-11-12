@@ -4,13 +4,15 @@ Distributed Training for THREE-CLASS Classification with Enhanced Multi-Task Lea
 ====================================================================================
 Classes: 0=Flat, 1=PSPL, 2=Binary
 
-NEW in v11.1:
+v11.1-hotfix: FIXED AMP compatibility
+- Uses binary_cross_entropy_with_logits (AMP-safe, numerically stable)
+- Auxiliary heads output logits, not probabilities
 - HIGH WEIGHT auxiliary losses for Flat and PSPL detection (0.5 each)
 - Early prediction training (random temporal truncation)
 - Improved early detection capabilities
 
 Author: Kunal Bhatia
-Version: 11.1 - Enhanced Multi-Task Training
+Version: 11.1-hotfix - AMP-Safe Multi-Task Training
 """
 
 import os
@@ -174,12 +176,13 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 device, epoch, rank, world_size, use_amp=True, grad_clip=1.0,
                 early_training=True):
     """
-    Train one epoch with ENHANCED multi-task learning
+    Train one epoch with ENHANCED multi-task learning (AMP-SAFE)
     
-    NEW in v11.1:
+    v11.1-hotfix: Fixed AMP compatibility
     - HIGH WEIGHT losses for Flat detection (0.5)
     - HIGH WEIGHT losses for PSPL detection (0.5)
     - Early prediction training via random truncation
+    - Uses binary_cross_entropy_with_logits (AMP-safe, numerically stable)
     """
     model.train()
     
@@ -218,14 +221,15 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             classification_loss = criterion(logits, y)
             loss = classification_loss
             
-            # ============== HIGH WEIGHT AUXILIARY TASKS ==============
+            # ============== HIGH WEIGHT AUXILIARY TASKS (AMP-SAFE) ==============
             
             # Flat detection: Class 0 vs. classes 1,2
             # TARGET: 1.0 for Flat (class 0), 0.0 for PSPL/Binary (classes 1,2)
             # HIGH WEIGHT (0.5): Critical for avoiding false triggers!
+            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'flat' in outputs:
                 flat_target = (y == 0).float()
-                flat_loss = F.binary_cross_entropy(outputs['flat'], flat_target)
+                flat_loss = F.binary_cross_entropy_with_logits(outputs['flat'], flat_target)
                 loss = loss + 0.5 * flat_loss  # HIGH WEIGHT!
                 flat_loss_total += flat_loss.item()
             else:
@@ -234,22 +238,24 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             # PSPL detection: Class 1 vs. classes 0,2
             # TARGET: 1.0 for PSPL (class 1), 0.0 for Flat/Binary (classes 0,2)
             # HIGH WEIGHT (0.5): Important for distinguishing simple from complex!
+            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'pspl' in outputs:
                 pspl_target = (y == 1).float()
-                pspl_loss = F.binary_cross_entropy(outputs['pspl'], pspl_target)
+                pspl_loss = F.binary_cross_entropy_with_logits(outputs['pspl'], pspl_target)
                 loss = loss + 0.5 * pspl_loss  # HIGH WEIGHT!
                 pspl_loss_total += pspl_loss.item()
             else:
                 pspl_loss = torch.tensor(0.0)
             
-            # ============== MODERATE WEIGHT AUXILIARY TASKS ==============
+            # ============== MODERATE WEIGHT AUXILIARY TASKS (AMP-SAFE) ==============
             
             # Anomaly detection: Any event (PSPL or Binary) vs. Flat
             # TARGET: 0.0 for Flat, 1.0 for PSPL/Binary
             # MODERATE WEIGHT (0.2): General event detection
+            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'anomaly' in outputs:
                 anomaly_target = (y > 0).float()  # 1 if PSPL or Binary
-                anomaly_loss = F.binary_cross_entropy(outputs['anomaly'], anomaly_target)
+                anomaly_loss = F.binary_cross_entropy_with_logits(outputs['anomaly'], anomaly_target)
                 loss = loss + 0.2 * anomaly_loss
                 anomaly_loss_total += anomaly_loss.item()
             else:
@@ -258,9 +264,10 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             # Caustic detection: Binary vs. PSPL/Flat
             # TARGET: 1.0 for Binary (class 2), 0.0 for Flat/PSPL (classes 0,1)
             # MODERATE WEIGHT (0.2): Binary-specific features
+            # FIXED: Using BCEWithLogitsLoss (AMP-safe, numerically stable)
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
-                caustic_loss = F.binary_cross_entropy(outputs['caustic'], caustic_target)
+                caustic_loss = F.binary_cross_entropy_with_logits(outputs['caustic'], caustic_target)
                 loss = loss + 0.2 * caustic_loss
                 caustic_loss_total += caustic_loss.item()
             else:
@@ -382,15 +389,15 @@ def evaluate(model, loader, criterion, device, rank, world_size):
                 class_correct[c] += (preds[mask] == y[mask]).sum().item()
                 class_total[c] += mask.sum().item()
         
-        # Auxiliary task accuracy
+        # Auxiliary task accuracy (convert logits to probabilities with sigmoid)
         if 'flat' in outputs:
-            flat_pred = (outputs['flat'] > 0.5).long()
+            flat_pred = (torch.sigmoid(outputs['flat']) > 0.5).long()
             flat_true = (y == 0).long()
             flat_correct += (flat_pred == flat_true).sum().item()
             flat_total += len(y)
         
         if 'pspl' in outputs:
-            pspl_pred = (outputs['pspl'] > 0.5).long()
+            pspl_pred = (torch.sigmoid(outputs['pspl']) > 0.5).long()
             pspl_true = (y == 1).long()
             pspl_correct += (pspl_pred == pspl_true).sum().item()
             pspl_total += len(y)
@@ -434,7 +441,7 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="3-Class Enhanced Multi-Task Training v11.1")
+    parser = argparse.ArgumentParser(description="3-Class Enhanced Multi-Task Training v11.1-hotfix")
     parser.add_argument('--data', required=True, help='Path to dataset')
     parser.add_argument('--experiment_name', default='3class_enhanced', help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
@@ -465,11 +472,11 @@ def main():
     
     if rank == 0:
         print("="*70)
-        print("ENHANCED THREE-CLASS TRAINING v11.1")
+        print("ENHANCED THREE-CLASS TRAINING v11.1-hotfix")
         print("="*70)
         print(f"World size: {world_size} GPUs")
         print(f"Device: {device}")
-        print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
+        print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled (AMP-SAFE)'}")
         print(f"Early Training: {'Disabled' if args.no_early_training else 'Enabled'}")
         print(f"Batch size: {args.batch_size} per GPU ({args.batch_size * world_size} total)")
         print(f"\nLoss Weights:")
@@ -478,6 +485,7 @@ def main():
         print(f"  PSPL detection: 0.5 (HIGH)")
         print(f"  Anomaly: 0.2")
         print(f"  Caustic: 0.2")
+        print(f"\n✅ AMP-SAFE: Using binary_cross_entropy_with_logits")
 
     # Load data
     print_rank0(f"\nLoading data from {args.data}...", rank)
@@ -568,7 +576,7 @@ def main():
     from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
-    print_rank0("\n🤖 Creating MicrolensingTransformer v11.1 (Enhanced Multi-Task)...", rank)
+    print_rank0("\n🤖 Creating MicrolensingTransformer v11.1-hotfix (AMP-Safe)...", rank)
     model = MicrolensingTransformer(
         n_points=X.shape[1],
         d_model=args.d_model,
@@ -591,10 +599,10 @@ def main():
         base_model = model.module if hasattr(model, 'module') else model
         print(f"Model parameters: {count_parameters(base_model):,}")
         print(f"Output: 3 classes + 5 auxiliary heads")
-        print(f"  - Flat detection (HIGH WEIGHT)")
-        print(f"  - PSPL detection (HIGH WEIGHT)")
-        print(f"  - Anomaly detection")
-        print(f"  - Caustic detection")
+        print(f"  - Flat detection (HIGH WEIGHT, outputs logits)")
+        print(f"  - PSPL detection (HIGH WEIGHT, outputs logits)")
+        print(f"  - Anomaly detection (outputs logits)")
+        print(f"  - Caustic detection (outputs logits)")
         print(f"  - Confidence estimation")
     
     # Loss and optimizer
@@ -637,7 +645,7 @@ def main():
         config['scaled_lr'] = scaled_lr
         config['n_classes'] = 3
         config['class_names'] = ['Flat', 'PSPL', 'Binary']
-        config['version'] = '11.1'
+        config['version'] = '11.1-hotfix'
         config['loss_weights'] = {
             'classification': 1.0,
             'flat': 0.5,
@@ -645,6 +653,7 @@ def main():
             'anomaly': 0.2,
             'caustic': 0.2
         }
+        config['amp_safe'] = True
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -673,7 +682,7 @@ def main():
     # Training loop
     if rank == 0:
         print("\n" + "="*70)
-        print("STARTING ENHANCED TRAINING")
+        print("STARTING ENHANCED TRAINING (AMP-SAFE)")
         print("="*70)
     
     best_val_acc = 0
@@ -719,7 +728,7 @@ def main():
                     'val_acc': val_acc,
                     'val_loss': val_loss,
                     'n_classes': 3,
-                    'version': '11.1'
+                    'version': '11.1-hotfix'
                 }, exp_dir / 'best_model.pt')
                 
                 print(f"✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
@@ -828,7 +837,8 @@ def main():
             'effective_batch_size': effective_batch_size,
             'n_classes': 3,
             'class_names': ['Flat', 'PSPL', 'Binary'],
-            'version': '11.1',
+            'version': '11.1-hotfix',
+            'amp_safe': True,
             'loss_weights': {
                 'classification': 1.0,
                 'flat': 0.5,
