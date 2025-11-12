@@ -77,19 +77,6 @@ python simulate.py \
 
 ### 3. Train Model
 
-**Single GPU:**
-```bash
-python train.py \
-    --data ../data/raw/test.npz \
-    --experiment_name test \
-    --epochs 10 \
-    --batch_size 64 \
-    --lr 1e-3 \
-    --d_model 128 \
-    --nhead 4 \
-    --num_layers 4
-```
-
 **Multi-GPU:**
 ```bash
 
