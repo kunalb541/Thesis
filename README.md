@@ -1,4 +1,4 @@
-# Real-Time Three-Class Microlensing Classification with Transformers
+## Real-Time Three-Class Microlensing Classification with Transformers
 
 **MSc Thesis Project - From Light Curves to Labels: Machine Learning in Microlensing**
 
