@@ -1,11 +1,10 @@
-## Real-Time Three-Class Microlensing Classification with Transformers
+## Real-Time Microlensing Classification with Transformers
 
 **MSc Thesis Project - From Light Curves to Labels: Machine Learning in Microlensing**
 
 Author: Kunal Bhatia  
 Supervisor: Prof. Dr. Joachim Wambsganß  
 Institution: University of Heidelberg  
-**Version: 12.0-beta - ARCHITECTURAL FIX (DATA LEAKAGE RESOLVED)**  
 Date: November 2025
 
 ---
@@ -13,8 +12,6 @@ Date: November 2025
 ## Overview
 
 This repository implements a **transformer architecture with relative positional encoding** for real-time three-class classification of astronomical time series: distinguishing baseline observations (Flat), simple microlensing events (PSPL), and complex binary microlensing events (Binary).
-
-**v12.0-beta represents a critical scientific improvement**: After discovering that v11 was "cheating" via positional encoding, we redesigned the architecture to use relative positional encoding. This results in more realistic (lower) early-detection performance, but represents genuine learned patterns rather than temporal artifacts.
 
 Designed for next-generation survey operations (LSST, Roman Space Telescope) requiring sub-second inference on alert streams with robust rejection of non-events.
 
@@ -63,41 +60,28 @@ pip install -r requirements.txt
 pip install VBMicrolensing
 ```
 
-### 2. Generate Test Dataset (3-Class, v12.0-beta)
+### 2. Generate Test Dataset
 
 ```bash
 cd code
 
-# Quick test dataset (300 events: 100 Flat + 100 PSPL + 100 Binary)
-# v12.0-beta: Note the wider t0 range!
 python simulate.py \
     --n_flat 100 \
     --n_pspl 100 \
     --n_binary 100 \
     --binary_params baseline \
-    --output ../data/raw/test_3class_v12beta_300.npz \
+    --output ../data/raw/test.npz \
     --num_workers 4 \
     --save_params
 ```
 
-**Output**:
-```
-GENERATING 100 FLAT + 100 PSPL + 100 BINARY EVENTS
-v12.0-beta: t0 range = [-50, 50] days (WIDER than v11!)
-THREE-CLASS CLASSIFICATION: 0=Flat, 1=PSPL, 2=Binary
-Total events: 300
-  Flat:   100 (33.3%)
-  PSPL:   100 (33.3%)
-  Binary: 100 (33.3%)
-```
-
-### 3. Train Model (v12.0-beta Architecture)
+### 3. Train Model
 
 **Single GPU:**
 ```bash
 python train.py \
-    --data ../data/raw/test_3class_v12beta_300.npz \
-    --experiment_name test_v12beta \
+    --data ../data/raw/test.npz \
+    --experiment_name test \
     --epochs 10 \
     --batch_size 64 \
     --lr 1e-3 \
@@ -109,8 +93,8 @@ python train.py \
 **Multi-GPU (8 GPUs):**
 ```bash
 torchrun --nproc_per_node=8 train.py \
-    --data ../data/raw/test_3class_v12beta_300.npz \
-    --experiment_name test_v12beta_8gpu \
+    --data ../data/raw/test.npz \
+    --experiment_name test \
     --epochs 10 \
     --batch_size 64 \
     --lr 1e-3 \
@@ -123,19 +107,19 @@ torchrun --nproc_per_node=8 train.py \
 
 ```bash
 python evaluate.py \
-    --experiment_name test_v12beta \
-    --data ../data/raw/test_3class_v12beta_300.npz \
+    --experiment_name test \
+    --data ../data/raw/test.npz \
     --early_detection \
     --n_samples 10000
 ```
 
-**Outputs** (in `results/test_v12beta_TIMESTAMP/evaluation/`):
+**Outputs** (in `results/test/evaluation/`):
 - `roc_curve.png` - One-vs-rest ROC curves for all 3 classes
 - `confusion_matrix.png` - 3×3 confusion matrix
 - `confidence_distribution.png` - Confidence by correctness
 - `calibration.png` - Model calibration analysis
 - `u0_dependency.png` - Accuracy vs. impact parameter (Binary class only)
-- `early_detection.png` - **REALISTIC** performance vs. completeness
+- `early_detection.png` -  Performance vs. Completeness
 - `real_time_evolution_*.png` - Shows ALL 3 class probabilities evolving
 - `example_grid_3class.png` - Example light curves from each class
 - `evaluation_summary.json` - All metrics
@@ -145,7 +129,7 @@ python evaluate.py \
 
 ## 🏗️ Model Architecture
 
-### MicrolensingTransformer v12.0-beta (Architecture-Based Solution)
+### MicrolensingTransformer
 
 **Main Task**: 3-class classification
 - **Class 0**: Flat (no event, baseline only)
@@ -173,7 +157,7 @@ python evaluate.py \
    - Single output with sigmoid (0-1 range)
    - Self-assessment of prediction quality
 
-**Architecture Details (v12.0-beta - SMALLER)**:
+**Architecture Details**:
 ```python
 MicrolensingTransformer(
     n_points=1500,
@@ -184,14 +168,6 @@ MicrolensingTransformer(
 )
 
 ```
-
-**Key Features**:
-- **Relative Positional Encoding**: Only knows observation count & gaps
-- **Stable Multi-Head Attention**: Normalized Q/K projections
-- **Pre-Norm Architecture**: Improved training stability
-- **Gap Embedding**: Handles missing observations explicitly
-- **Variable-Length Support**: No fixed padding patterns
-- **Auxiliary Heads Output Logits**: AMP-safe, numerically stable
 
 ---
 

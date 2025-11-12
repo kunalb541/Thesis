@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-PRODUCTION Comprehensive Model Evaluation for 3-CLASS Classification
-====================================================================
+Comprehensive Model Evaluation for 3-Class Classification
+==========================================================
 Classes: 0=Flat (no event), 1=PSPL, 2=Binary
 
-v12.0 CAUSAL ARCHITECTURE - REALISTIC PERFORMANCE
-- Evaluates models with relative positional encoding
-- Realistic early detection curves (no data leakage)
-- Performance expectations adjusted for honest evaluation
+Architectural Fix: Relative positional encoding prevents data leakage
+- Model only knows observation count, not absolute time
+- Realistic early detection performance
+- Full sequences preserve PSPL features
 
-Author: Kunal Bhatia  
-Version: 12.0 - Causal Architecture Evaluation
+Author: Kunal Bhatia
+Version: 12.0-beta - Architectural Fix Only
 """
 
 import torch
@@ -77,7 +77,7 @@ class StableNormalizer:
 
 
 class ComprehensiveEvaluator:
-    """Complete evaluation with 3-class support for v12.0 causal architecture"""
+    """Complete evaluation with 3-class support"""
     
     def __init__(self, model_path, normalizer_path, data_path, output_dir, 
                  device='cuda', batch_size=128, n_samples=None):
@@ -88,12 +88,9 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n{'='*70}")
-        print(f"PRODUCTION EVALUATION v12.0 (CAUSAL ARCHITECTURE)")
+        print(f"COMPREHENSIVE MODEL EVALUATION")
         print(f"{'='*70}")
-        print(f"🔬 Evaluating causal model with:")
-        print(f"   - Relative positional encoding")
-        print(f"   - Variable-length sequence support")
-        print(f"   - Realistic early detection expectations")
+        print(f"🔬 Evaluating model:")
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
         if n_samples:
@@ -130,19 +127,14 @@ class ComprehensiveEvaluator:
             with open(config_path) as f:
                 config = json.load(f)
             
-            # v12.0: Smaller default model
-            d_model = config.get('d_model', 128)  # CHANGED: 256 → 128
-            nhead = config.get('nhead', 4)        # CHANGED: 8 → 4
-            num_layers = config.get('num_layers', 4)  # CHANGED: 6 → 4
+            d_model = config.get('d_model', 128)
+            nhead = config.get('nhead', 4)
+            num_layers = config.get('num_layers', 4)
             dropout = config.get('dropout', 0.1)
-            
-            version = config.get('version', 'unknown')
-            if version != 'unknown':
-                print(f"   Model version: {version}")
             
             print(f"   Using config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
         else:
-            print("   Warning: config.json not found, using v12.0 defaults")
+            print("   Warning: config.json not found, using defaults")
             d_model = 128
             nhead = 4
             num_layers = 4
@@ -201,13 +193,6 @@ class ComprehensiveEvaluator:
             n_classes = len(np.unique(y))
             print(f"   Dataset: {n_classes}-class (inferred)")
         
-        # Check for v12.0 dataset indicators
-        if 'version' in data:
-            data_version = str(data['version'])
-            print(f"   Data version: {data_version}")
-            if '12' in data_version:
-                print(f"   ✅ v12.0 dataset detected (wider t0 range)")
-        
         params = None
         if 'params_binary_json' in data:
             params_binary = json.loads(str(data['params_binary_json']))
@@ -241,7 +226,6 @@ class ComprehensiveEvaluator:
             y = y[all_indices]
             
             if params is not None:
-                # Sample parameters accordingly
                 for key in params.keys():
                     if key in ['binary', 'pspl', 'flat']:
                         class_id = {'flat': 0, 'pspl': 1, 'binary': 2}.get(key, -1)
@@ -325,10 +309,10 @@ class ComprehensiveEvaluator:
     
     def _print_summary(self):
         print(f"\n{'='*70}")
-        print(f"EVALUATION RESULTS ({self.n_classes}-CLASS, v12.0 CAUSAL)")
+        print(f"EVALUATION RESULTS ({self.n_classes}-CLASS)")
         print(f"{'='*70}")
         print(f"Overall Accuracy: {self.metrics['accuracy']*100:.2f}%")
-        print(f"\nv12.0 Performance Expectations:")
+        print(f"\nExpected Performance (architectural fix):")
         print(f"  Baseline (100% observed): 70-75%")
         print(f"  Early (10% observed): ~40% (near random)")
         print(f"  Early (50% observed): ~70%")
@@ -365,7 +349,7 @@ class ComprehensiveEvaluator:
             y_true_binary = (self.y == i).astype(int)
             y_score = self.probs[:, i]
             
-            if len(np.unique(y_true_binary)) > 1:  # Need both classes present
+            if len(np.unique(y_true_binary)) > 1:
                 fpr, tpr, _ = roc_curve(y_true_binary, y_score)
                 auc = roc_auc_score(y_true_binary, y_score)
                 
@@ -376,7 +360,7 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('False Positive Rate', fontsize=12, fontweight='bold')
         ax.set_ylabel('True Positive Rate', fontsize=12, fontweight='bold')
-        ax.set_title(f'ROC Curves ({self.n_classes}-Class, v12.0 Causal)', 
+        ax.set_title(f'ROC Curves ({self.n_classes}-Class)', 
                      fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
@@ -404,7 +388,7 @@ class ComprehensiveEvaluator:
         ax.set_yticklabels(labels, fontsize=12)
         ax.set_xlabel('Predicted label', fontsize=12, fontweight='bold')
         ax.set_ylabel('True label', fontsize=12, fontweight='bold')
-        ax.set_title(f'Confusion Matrix ({self.n_classes}-Class, v12.0 Causal)', 
+        ax.set_title(f'Confusion Matrix ({self.n_classes}-Class)', 
                      fontsize=14, fontweight='bold')
         
         # Add text annotations
@@ -435,7 +419,7 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Confidence Score', fontsize=12, fontweight='bold')
         ax.set_ylabel('Count', fontsize=12, fontweight='bold')
-        ax.set_title(f'Confidence Distribution ({self.n_classes}-Class, v12.0 Causal)', 
+        ax.set_title(f'Confidence Distribution ({self.n_classes}-Class)', 
                      fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3, axis='y')
@@ -475,7 +459,7 @@ class ComprehensiveEvaluator:
         ax.plot([conf_min, 1.0], [conf_min, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect Calibration')
         ax.set_xlabel('Confidence Score', fontsize=11, fontweight='bold')
         ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
-        ax.set_title('Model Calibration (v12.0 Causal)', fontweight='bold')
+        ax.set_title('Model Calibration', fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0.3 if self.n_classes == 3 else 0.4, 1.05])
@@ -541,7 +525,7 @@ class ComprehensiveEvaluator:
             if incorrect_mask.sum() > 0:
                 indices = np.where(incorrect_mask)[0]
                 conf_sorted = indices[np.argsort(-self.confidences[indices])]
-                selected = conf_sorted[:1]  # Just 1 error per class
+                selected = conf_sorted[:1]
                 for idx in selected:
                     pred_name = class_names[self.predictions[idx]]
                     examples.append((idx, f'{class_name}→{pred_name}', 'red'))
@@ -587,7 +571,7 @@ class ComprehensiveEvaluator:
             col = i % n_cols
             axes[row, col].axis('off')
         
-        plt.suptitle(f'Example Light Curves ({self.n_classes}-Class, v12.0 Causal)', 
+        plt.suptitle(f'Example Light Curves ({self.n_classes}-Class)', 
                      fontsize=14, fontweight='bold')
         plt.tight_layout()
         
@@ -603,7 +587,7 @@ class ComprehensiveEvaluator:
         For 3-class: Shows Flat, PSPL, Binary probabilities
         For 2-class: Shows PSPL, Binary probabilities
         
-        v12.0: Should show realistic evolution (not instant high confidence!)
+        Realistic evolution with architectural fix
         """
         if event_idx is None:
             # Select a good example
@@ -630,7 +614,7 @@ class ComprehensiveEvaluator:
         light_curve_norm = self.X_norm[event_idx]
         true_label = self.y[event_idx]
         
-        # v12.0: Test more fractions for realistic curve
+        # Test more fractions for realistic curve
         fractions = np.linspace(0.1, 1.0, 10)
         
         if self.n_classes == 3:
@@ -687,7 +671,7 @@ class ComprehensiveEvaluator:
         true_str = class_names[true_label]
         pred_str = class_names[self.predictions[event_idx]]
         ax1.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
-        ax1.set_title(f'Light Curve (v12.0 Causal) - True: {true_str}, Predicted: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
+        ax1.set_title(f'Light Curve - True: {true_str}, Predicted: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
                      fontsize=13, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
@@ -721,7 +705,7 @@ class ComprehensiveEvaluator:
         ax2.set_ylim([-0.05, 1.05])
         
         # Add note about realistic evolution
-        ax2.text(0.02, 0.98, 'v12.0: Realistic causal evolution\n(No instant high confidence!)', 
+        ax2.text(0.02, 0.98, 'Realistic evolution (architectural fix)\nNo instant high confidence', 
                 transform=ax2.transAxes, fontsize=8, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
@@ -736,11 +720,11 @@ class ComprehensiveEvaluator:
         ax3.grid(True, alpha=0.3)
         
         if self.n_classes == 3:
-            ax3.set_ylim([0.3, 1.05])  # Lower for 3-class
+            ax3.set_ylim([0.3, 1.05])
         else:
             ax3.set_ylim([0.4, 1.05])
         
-        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event ({self.n_classes}-Class, v12.0 Causal)', 
+        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event ({self.n_classes}-Class)', 
                     fontsize=14, fontweight='bold')
         
         event_type_str = event_type.lower()
@@ -753,12 +737,9 @@ class ComprehensiveEvaluator:
         """
         Compute early detection performance
         
-        v12.0: Should show REALISTIC curve!
-        - 10% observed → ~40% accuracy (near random)
-        - 50% observed → ~70% accuracy
-        - 100% observed → ~85% accuracy
+        Realistic curve with architectural fix
         """
-        print("  Computing early detection performance (v12.0 realistic expectations)...")
+        print("  Computing early detection performance (realistic expectations)...")
         
         fractions = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
         overall_accs = []
@@ -814,23 +795,23 @@ class ComprehensiveEvaluator:
             ax.plot(completeness, [r*100 for r in per_class_recalls[c]], 's-', 
                    linewidth=2.5, markersize=8, color=color, label=f'{name} Recall', alpha=0.7)
         
-        # v12.0: Add realistic thresholds
+        # Add realistic thresholds
         ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', linestyle='--', 
                   linewidth=1, alpha=0.5, label='Random (3-class)' if self.n_classes == 3 else 'Random (2-class)')
         ax.axhline(y=70, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='Target (70%)')
         ax.axvline(x=50, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='50% observed')
         
-        # v12.0: Add annotations showing realistic performance
+        # Add annotations showing realistic performance
         idx_10 = fractions.index(0.1)
         idx_50 = fractions.index(0.5)
         
-        ax.annotate(f'{overall_accs[idx_10]*100:.1f}%\n(near random!)',
+        ax.annotate(f'{overall_accs[idx_10]*100:.1f}%\n(near random)',
                    xy=(10, overall_accs[idx_10]*100),
                    xytext=(15, overall_accs[idx_10]*100 + 5),
                    fontsize=9, fontweight='bold', color='red',
                    arrowprops=dict(arrowstyle='->', color='red'))
         
-        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%\n(realistic!)',
+        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%\n(realistic)',
                    xy=(50, overall_accs[idx_50]*100),
                    xytext=(55, overall_accs[idx_50]*100 - 5),
                    fontsize=9, fontweight='bold', color='green',
@@ -838,16 +819,12 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Observation Completeness (%)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
-        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class, v12.0 CAUSAL)\nRealistic curve - no data leakage!', 
+        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class)\nRealistic curve - architectural fix', 
                      fontsize=14, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0, 105])
-        
-        # Add text box explaining v12.0
-        textstr = 'v12.0: Physically realistic performance\n• Low at 10% (near random)\n• Rises as magnification emerges\n• No temporal position cheating!'
-        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=9,
-               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
         
         plt.tight_layout()
         
@@ -863,15 +840,15 @@ class ComprehensiveEvaluator:
             return None
         
         print(f"\n{'='*70}")
-        print("u0 DEPENDENCY ANALYSIS (Binary Class Only, v12.0)")
+        print("u0 DEPENDENCY ANALYSIS (Binary Class Only)")
         print(f"{'='*70}")
         
         binary_params = self.params['binary']
         
         if self.n_classes == 3:
-            binary_mask = self.y == 2  # Binary is class 2
+            binary_mask = self.y == 2
         else:
-            binary_mask = self.y == 1  # Binary is class 1
+            binary_mask = self.y == 1
         
         u0_values = np.array([p['u_0'] for p in binary_params])
         u0_bins = np.linspace(u0_values.min(), u0_values.max(), n_bins + 1)
@@ -901,11 +878,10 @@ class ComprehensiveEvaluator:
         n_above = int((u0_values >= threshold).sum())
         
         print(f"Physical Detection Threshold: u₀ = {threshold}")
-        print(f"Accuracy at threshold: {acc_at_threshold*100:.2f}%" if acc_at_threshold else "N/A")
+        print(f"Accuracy at threshold: {acc_at_threshold*100:.1f}%" if acc_at_threshold else "N/A")
         print(f"\nBinary Event Distribution:")
         print(f"  Below threshold (u₀ < {threshold}): {n_below} ({n_below/len(u0_values)*100:.1f}%)")
         print(f"  Above threshold (u₀ ≥ {threshold}): {n_above} ({n_above/len(u0_values)*100:.1f}%)")
-        print(f"\nv12.0: Same u0 dependency as v11 (this is physical, not a bug!)")
         
         return {
             'u0_bins': [float(x) for x in u0_bins],
@@ -940,7 +916,7 @@ class ComprehensiveEvaluator:
         ax1.axhline(y=70, color='gray', linestyle=':', alpha=0.5, label='Target (70%)')
         
         ax1.set_ylabel('Binary Classification Accuracy (%)', fontsize=13)
-        ax1.set_title('Binary Class Accuracy vs. Impact Parameter (v12.0 Causal)', 
+        ax1.set_title('Binary Class Accuracy vs. Impact Parameter', 
                      fontsize=14, fontweight='bold')
         ax1.legend(fontsize=11)
         ax1.grid(alpha=0.3)
@@ -971,7 +947,7 @@ class ComprehensiveEvaluator:
                           u0_threshold=0.3, u0_bins=10):
         """Generate all visualizations"""
         print(f"\n{'='*70}")
-        print(f"GENERATING ALL VISUALIZATIONS (v12.0 - {self.n_classes}-CLASS CAUSAL)")
+        print(f"GENERATING ALL VISUALIZATIONS ({self.n_classes}-CLASS)")
         print(f"{'='*70}\n")
         
         print("1. ROC Curves...")
@@ -1002,7 +978,7 @@ class ComprehensiveEvaluator:
                 self.plot_real_time_evolution(event_type=event_type)
         
         if include_early:
-            print("\n7. Early Detection Performance (v12.0 REALISTIC!)...")
+            print("\n7. Early Detection Performance...")
             self.plot_early_detection()
         
         if include_u0 and self.params is not None and 'binary' in self.params:
@@ -1019,8 +995,6 @@ class ComprehensiveEvaluator:
         print(f"\n{'='*70}")
         print(f"✅ ALL VISUALIZATIONS SAVED TO: {self.output_dir}")
         print(f"{'='*70}\n")
-        print("v12.0 Note: Early detection curves should be REALISTIC")
-        print("  (Not artificially high like v11 due to data leakage)")
     
     def save_results(self):
         """Save evaluation results"""
@@ -1034,8 +1008,7 @@ class ComprehensiveEvaluator:
             'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
             'has_u0_analysis': self.params is not None and 'binary' in self.params,
-            'version': '12.0',
-            'architecture': 'causal'
+            'architecture': 'v12'
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
@@ -1047,7 +1020,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Production evaluation v12.0 (causal architecture)'
+        description='Comprehensive evaluation'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -1056,7 +1029,7 @@ def main():
     parser.add_argument('--u0_bins', type=int, default=10)
     parser.add_argument('--no_u0', action='store_true')
     parser.add_argument('--early_detection', action='store_true',
-                       help='Compute early detection curve (v12.0: realistic!)')
+                       help='Compute early detection curve')
     parser.add_argument('--n_evolution_per_type', type=int, default=3)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--no_cuda', action='store_true')
@@ -1101,8 +1074,7 @@ def main():
     )
     
     evaluator.save_results()
-    print("\n🎉 Production evaluation complete (v12.0 CAUSAL)!")
-    print("Remember: v12.0 shows realistic performance (no data leakage!)\n")
+    print("\n🎉 Evaluation complete!")
 
 
 if __name__ == '__main__':

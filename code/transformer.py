@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Causal Transformer for THREE-CLASS Classification - NO DATA LEAKAGE
-====================================================================
+Transformer Architecture for THREE-CLASS Classification - ARCHITECTURAL FIX
+===========================================================================
 Classes: 0=Flat (no event), 1=PSPL, 2=Binary
 
-v12.0 CRITICAL FIXES:
+v12.0-beta ARCHITECTURAL FIX:
 - Relative positional encoding (no absolute time knowledge)
 - Model only knows: "I've seen N observations" not "I'm at day -50"
 - Variable-length sequence support
-- Causal normalization
+- NO causal truncation needed (tested and rejected)
 
 This PREVENTS the model from "cheating" by inferring event type
-from temporal position!
+from temporal position. The architectural fix alone is sufficient.
 
 Author: Kunal Bhatia
-Version: 12.0 - Fully Causal Architecture
+Version: 12.0-beta - Architectural Fix
 """
 
 import torch
@@ -27,7 +27,7 @@ from typing import Dict, Optional, Tuple
 
 class RelativePositionalEncoding(nn.Module):
     """
-    CAUSAL positional encoding that only knows:
+    ARCHITECTURAL FIX: Positional encoding that only knows:
     1. How many valid observations seen so far
     2. Relative time gaps between observations
     
@@ -43,7 +43,7 @@ class RelativePositionalEncoding(nn.Module):
         super().__init__()
         self.d_model = d_model
         
-        # Embedding for "number of observations seen so far" (causal!)
+        # Embedding for "number of observations seen so far"
         self.obs_count_encoding = nn.Embedding(max_observations, d_model // 2)
         
         # Encoding for relative gaps (time since last observation)
@@ -63,7 +63,7 @@ class RelativePositionalEncoding(nn.Module):
         padding_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute causal positional encoding
+        Compute relative positional encoding (architectural fix)
         
         Args:
             x: Input tensor [B, T, D]
@@ -75,7 +75,7 @@ class RelativePositionalEncoding(nn.Module):
         B, T, D = x.shape
         device = x.device
         
-        # Compute cumulative observation count (causal!)
+        # Compute cumulative observation count
         valid_mask = ~padding_mask
         obs_count = torch.cumsum(valid_mask.long(), dim=1) - 1  # [B, T]
         obs_count = torch.clamp(
@@ -87,7 +87,7 @@ class RelativePositionalEncoding(nn.Module):
         # Embedding: "I have seen N observations so far"
         count_embed = self.obs_count_encoding(obs_count)  # [B, T, D/2]
         
-        # Compute relative gaps (causal!)
+        # Compute relative gaps
         gaps = torch.zeros(B, T, 1, device=device)
         for b in range(B):
             valid_indices = torch.where(valid_mask[b])[0]
@@ -101,7 +101,7 @@ class RelativePositionalEncoding(nn.Module):
         # Encode gaps
         gap_embed = self.gap_encoding(gaps)  # [B, T, D/2]
         
-        # Concatenate both sources of causal information
+        # Concatenate both sources of information
         pos_encoding = torch.cat([count_embed, gap_embed], dim=-1)  # [B, T, D]
         
         return pos_encoding
@@ -238,9 +238,9 @@ class TransformerBlock(nn.Module):
 
 class MicrolensingTransformer(nn.Module):
     """
-    CAUSAL Transformer for microlensing classification
+    Transformer for microlensing classification with architectural fix
     
-    v12.0 CRITICAL CHANGES:
+    v12.0-beta ARCHITECTURAL FIX:
     1. Uses RelativePositionalEncoding (no absolute time)
     2. Only knows: "I've seen N observations"
     3. Cannot infer event type from temporal position
@@ -258,10 +258,10 @@ class MicrolensingTransformer(nn.Module):
     def __init__(
         self,
         n_points: int = 1500,
-        d_model: int = 128,           # v12.0: Smaller (was 256)
-        nhead: int = 4,               # v12.0: Smaller (was 8)
-        num_layers: int = 4,          # v12.0: Smaller (was 6)
-        dim_feedforward: int = 512,   # v12.0: Smaller (was 1024)
+        d_model: int = 128,           # v12.0-beta: Smaller (was 256)
+        nhead: int = 4,               # v12.0-beta: Smaller (was 8)
+        num_layers: int = 4,          # v12.0-beta: Smaller (was 6)
+        dim_feedforward: int = 512,   # v12.0-beta: Smaller (was 1024)
         dropout: float = 0.1,
         pad_value: float = -1.0,
         max_seq_len: int = 2000
@@ -282,7 +282,7 @@ class MicrolensingTransformer(nn.Module):
             nn.Linear(d_model // 2, d_model)
         )
         
-        # v12.0: RELATIVE positional encoding (causal!)
+        # v12.0-beta: RELATIVE positional encoding (architectural fix!)
         self.pos_encoding = RelativePositionalEncoding(
             d_model=d_model,
             max_observations=max_seq_len
@@ -389,7 +389,7 @@ class MicrolensingTransformer(nn.Module):
         return_all: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass with causal positional encoding
+        Forward pass with relative positional encoding (architectural fix)
         
         Args:
             x: Input light curves [B, T] or [B, T, 1]
@@ -424,7 +424,7 @@ class MicrolensingTransformer(nn.Module):
         gap_embed = self.gap_embed(gap_features)
         x_embed = x_embed + 0.1 * gap_embed
         
-        # v12.0: Add RELATIVE positional encoding (causal!)
+        # v12.0-beta: Add RELATIVE positional encoding (architectural fix!)
         pos_encoding = self.pos_encoding(x_embed, padding_mask)
         x_embed = x_embed + pos_encoding
         
@@ -492,9 +492,9 @@ def count_parameters(model):
 
 
 def test_model():
-    """Test v12.0 causal model"""
+    """Test v12.0-beta model with architectural fix"""
     print("="*70)
-    print("Testing MicrolensingTransformer v12.0 (CAUSAL)")
+    print("Testing MicrolensingTransformer")
     print("="*70)
     
     model = MicrolensingTransformer(
@@ -507,12 +507,9 @@ def test_model():
     )
     
     print(f"\nModel parameters: {count_parameters(model):,}")
-    print(f"  (v11 had ~450K parameters)")
-    print(f"  (v12 has ~100K parameters - 4.5x smaller!)")
-    
     # Test with variable-length sequences
     print("\n" + "="*70)
-    print("Testing variable-length sequences (causal):")
+    print("Testing variable-length sequences:")
     print("="*70)
     
     # Batch with different lengths
@@ -532,7 +529,7 @@ def test_model():
         print(f"  Confidence:  {outputs['confidence'][0]:.3f}")
     
     print("\n" + "="*70)
-    print("✅ v12.0 Causal model test passed!")
+    print("✅ Test passed!")
     print("="*70)
 
 

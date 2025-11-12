@@ -1,16 +1,16 @@
 """
-Configuration for Causal Real-Time Binary Microlensing Detection
-VERSION 12.0 - FIXED DATA LEAKAGE + SMALLER MODEL
+Configuration for Real-Time Binary Microlensing Detection
+VERSION 12.0-beta - ARCHITECTURAL FIX (NO CAUSAL TRAINING)
 
-CRITICAL FIXES in v12.0:
+CRITICAL CHANGES in v12.0-beta:
 - Smaller model (d_model=128) for faster training
 - Wider t0 range to prevent timing artifacts
-- Architecture changes for causal inference
-- No absolute positional encoding
+- Relative positional encoding (architecture fix)
+- NO causal truncation (tested and rejected - hurts PSPL performance)
 
 Author: Kunal Bhatia
 Date: November 2025
-Version: 12.0 - Causal Architecture
+Version: 12.0-beta - Architectural Fix
 """
 
 import math
@@ -41,7 +41,7 @@ class SimulationConfig:
     PAD_VALUE = -1.0          # Marker for missing data
 
 # ============================================================================
-# EVENT PARAMETERS - v12.0 FIXES
+# EVENT PARAMETERS - v12.0-beta FIXES
 # ============================================================================
 
 class FlatConfig:
@@ -55,7 +55,7 @@ class PSPLConfig:
     """
     Point Source Point Lens parameters
     
-    v12.0 FIX: WIDER t0 range to prevent timing artifacts
+    v12.0-beta FIX: WIDER t0 range to prevent timing artifacts
     Now events can peak anywhere from -50 to +50 days
     """
     T0_MIN = -50.0    # CHANGED: Much wider range (was -20)
@@ -156,14 +156,14 @@ class BinaryConfig:
         }
 
 # ============================================================================
-# MODEL ARCHITECTURE - v12.0 SMALLER MODEL
+# MODEL ARCHITECTURE - v12.0-beta SMALLER MODEL
 # ============================================================================
 
 class ModelConfig:
     """
     Transformer architecture parameters
     
-    v12.0 CHANGES: SMALLER MODEL for faster iteration
+    v12.0-beta CHANGES: SMALLER MODEL for faster iteration
     - d_model: 256 → 128 (4x fewer parameters!)
     - nhead: 8 → 4 
     - num_layers: 6 → 4
@@ -218,12 +218,7 @@ class TrainingConfig:
     # Checkpointing
     SAVE_EVERY = 5
     KEEP_LAST_N = 3
-    
-    # v12.0 CAUSAL TRAINING
-    CAUSAL_TRAINING = True            # Enable causal truncation
-    CAUSAL_TRUNCATION_PROB = 0.5      # 50% of batches get truncated
-    CAUSAL_MIN_FRAC = 0.1             # Keep at least 10%
-    CAUSAL_MAX_FRAC = 0.8             # Truncate up to 80%
+    CAUSAL_TRAINING = False  # DISABLED - architectural fix is better
 
 # ============================================================================
 # EVALUATION PARAMETERS
@@ -242,7 +237,7 @@ class EvaluationConfig:
     N_EVOLUTION_PLOTS = 3
     N_EXAMPLE_GRID = 3
     
-    # Performance thresholds (realistic for v12.0)
+    # Performance thresholds (realistic for v12.0-beta)
     MIN_ACCURACY_WARNING = 0.60  # Lower due to harder task
     TARGET_ACCURACY = 0.70       # Realistic for 3-class
 
@@ -266,7 +261,7 @@ class SystemConfig:
     LOG_INTERVAL = 10
 
 # ============================================================================
-# EXPERIMENT PRESETS (UPDATED FOR v12.0)
+# EXPERIMENT PRESETS (UPDATED FOR v12.0-beta)
 # ============================================================================
 
 class ExperimentPresets:
@@ -279,16 +274,16 @@ class ExperimentPresets:
             'n_binary': 100,
             'binary_params': 'baseline',
             'epochs': 5,
-            'description': 'Quick validation test (v12.0 causal)'
+            'description': 'Quick validation test (v12.0-beta architectural fix)'
         },
         
-        'causal_benchmark': {
+        'baseline_1M': {
             'n_flat': 333000,
             'n_pspl': 333000,
             'n_binary': 334000,
             'binary_params': 'baseline',
             'epochs': 50,
-            'description': 'Main v12.0 causal benchmark (1M total)'
+            'description': 'Main v12.0-beta benchmark (1M total, architectural fix)'
         },
         
         'physical_limit': {
@@ -297,7 +292,7 @@ class ExperimentPresets:
             'n_binary': 50000,
             'binary_params': 'challenging',
             'epochs': 50,
-            'description': 'Test physical detection limits (causal)'
+            'description': 'Test physical detection limits (architectural fix)'
         },
         
         'planetary_search': {
@@ -306,7 +301,7 @@ class ExperimentPresets:
             'n_binary': 50000,
             'binary_params': 'planetary',
             'epochs': 50,
-            'description': 'Optimize for planet detection (causal)'
+            'description': 'Optimize for planet detection (architectural fix)'
         }
     }
 
@@ -331,7 +326,7 @@ def get_all_configs() -> Dict[str, Any]:
 def print_config_summary():
     """Print configuration summary"""
     print("="*70)
-    print("CONFIGURATION SUMMARY - v12.0 (CAUSAL ARCHITECTURE)")
+    print("CONFIGURATION SUMMARY - v12.0-beta (ARCHITECTURAL FIX)")
     print("="*70)
     
     sim = SimulationConfig
@@ -341,10 +336,11 @@ def print_config_summary():
     print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
     print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
     
-    print(f"\n🔧 v12.0 FIXES:")
+    print(f"\n🔧 v12.0-beta FIXES:")
     print(f"  ✅ Wider t0 range: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}] (was -20, 20)")
     print(f"  ✅ Relative positional encoding (no absolute time)")
-    print(f"  ✅ Variable-length training (causal)")
+    print(f"  ✅ Variable-length training (no padding artifacts)")
+    print(f"  ✅ NO causal truncation (preserves PSPL features)")
     print(f"  ✅ Smaller model for faster iteration")
     
     pspl = PSPLConfig
@@ -358,7 +354,7 @@ def print_config_summary():
         print(f"  {name}: t0=[{cfg['t0_range'][0]:.0f}, {cfg['t0_range'][1]:.0f}] days")
     
     model = ModelConfig
-    print(f"\n🤖 Model Architecture (SMALLER v12.0):")
+    print(f"\n🤖 Model Architecture (SMALLER v12.0-beta):")
     print(f"  d_model: {model.D_MODEL} (was 256)")
     print(f"  nhead: {model.NHEAD} (was 8)")
     print(f"  num_layers: {model.NUM_LAYERS} (was 6)")
@@ -371,8 +367,12 @@ def print_config_summary():
     print(f"  Learning rate: {train.LEARNING_RATE}")
     print(f"  Causal training: {train.CAUSAL_TRAINING}")
     if train.CAUSAL_TRAINING:
-        print(f"    Truncation prob: {train.CAUSAL_TRUNCATION_PROB}")
-        print(f"    Keep fraction: [{train.CAUSAL_MIN_FRAC}, {train.CAUSAL_MAX_FRAC}]")
+        print(f"    WARNING: Causal training is enabled!")
+        print(f"    This was tested and found to hurt PSPL performance.")
+        print(f"    Recommended: Keep disabled (architectural fix is sufficient)")
+    else:
+        print(f"    ✅ DISABLED (architectural fix is sufficient)")
+        print(f"    Full sequences preserve PSPL features")
     
     print("="*70)
 
@@ -402,6 +402,12 @@ def validate_config():
     if abs(PSPLConfig.T0_MAX - PSPLConfig.T0_MIN) < 50:
         issues.append(f"⚠️ t0 range too narrow: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}]")
     
+    # Warn if causal training is enabled
+    if train.CAUSAL_TRAINING:
+        issues.append(f"⚠️ WARNING: Causal training is enabled!")
+        issues.append(f"   This was tested and found to degrade PSPL performance (77% → <60%)")
+        issues.append(f"   Recommendation: Disable causal training (architectural fix is sufficient)")
+    
     if issues:
         print("Configuration Issues Found:")
         for issue in issues:
@@ -409,7 +415,7 @@ def validate_config():
         return False
     else:
         print("✅ Configuration validated successfully!")
-        print("✅ Ready for v12.0 causal training!")
+        print("✅ Ready for v12.0-beta training (architectural fix)!")
         return True
 
 # ============================================================================

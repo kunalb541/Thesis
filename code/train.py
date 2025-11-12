@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Causal Distributed Training for THREE-CLASS Classification
-=========================================================
-v12.0 - FIXES DATA LEAKAGE
+Distributed Training for THREE-CLASS Classification
+===================================================
+v12.0-beta - ARCHITECTURAL FIX (NO CAUSAL TRAINING)
 
-CRITICAL CHANGES:
+CRITICAL CHANGES in v12.0-beta:
 1. Variable-length sequences (model can't infer from padding)
-2. Causal normalization (only uses observed data)
-3. No timing information leaked
+2. Relative positional encoding (only knows observation count)
+3. NO causal truncation (tested and rejected - hurts PSPL)
+
+The architectural fix (RelativePositionalEncoding) alone prevents
+data leakage. Full-sequence training preserves PSPL features.
 
 Classes: 0=Flat, 1=PSPL, 2=Binary
 
 Author: Kunal Bhatia
-Version: 12.0 - Fully Causal Training
+Version: 12.0-beta - Architectural Fix Only
 """
 
 import os
@@ -74,7 +77,7 @@ def print_rank0(message, rank=0):
 
 class VariableLengthDataset(Dataset):
     """
-    v12.0: Dataset that supports variable-length sequences
+    v12.0-beta: Dataset that supports variable-length sequences
     
     This prevents the model from learning: "If I see padding at position X,
     this must be event type Y"
@@ -91,7 +94,7 @@ class VariableLengthDataset(Dataset):
         self.y = y
         self.pad_value = pad_value
         
-        # Store original lengths (for causal training)
+        # Store original lengths
         self.lengths = []
         for i in range(len(X)):
             valid = (X[i] != pad_value).sum()
@@ -181,78 +184,12 @@ class StableNormalizer:
         return self.fit(X).transform(X)
 
 
-def apply_causal_truncation(X, y, lengths, truncation_prob=0.5, min_frac=0.1, max_frac=0.8):
-    """
-    v12.0: TRULY CAUSAL truncation
-    
-    Key changes from v11:
-    1. Only truncates based on VALID observations (not total length)
-    2. Returns variable-length sequences (not padded to 1500)
-    3. Model cannot infer event type from sequence structure
-    
-    Args:
-        X: Input [B, T] (already normalized globally)
-        y: Labels [B]
-        lengths: Number of valid observations per sample [B]
-        truncation_prob: Probability of truncating
-        min_frac: Keep at least this fraction
-        max_frac: Truncate to at most this fraction
-    
-    Returns:
-        X_truncated: List of truncated tensors (variable lengths!)
-        y: Labels (unchanged)
-    """
-    B, T = X.shape
-    device = X.device
-    pad_value = -1.0
-    
-    X_truncated = []
-    
-    for i in range(B):
-        if torch.rand(1).item() < truncation_prob:
-            # Get valid observations for this sample
-            valid_mask = X[i] != pad_value
-            valid_indices = torch.where(valid_mask)[0]
-            n_valid = len(valid_indices)
-            
-            if n_valid == 0:
-                X_truncated.append(X[i])
-                continue
-            
-            # Random truncation fraction
-            frac = torch.rand(1).item() * (max_frac - min_frac) + min_frac
-            n_keep = max(1, int(n_valid * frac))
-            
-            # Take only first n_keep valid observations
-            keep_indices = valid_indices[:n_keep]
-            truncated = X[i, keep_indices]
-            
-            X_truncated.append(truncated)
-        else:
-            # Keep full sequence
-            valid_mask = X[i] != pad_value
-            if valid_mask.any():
-                valid_indices = torch.where(valid_mask)[0]
-                X_truncated.append(X[i, valid_indices])
-            else:
-                X_truncated.append(X[i])
-    
-    # Now pad to max length in THIS batch
-    max_len = max(len(seq) for seq in X_truncated)
-    X_batch = torch.full((B, max_len), pad_value, device=device)
-    for i, seq in enumerate(X_truncated):
-        X_batch[i, :len(seq)] = seq
-    
-    return X_batch
-
-
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
-                device, epoch, rank, world_size, use_amp=True, grad_clip=1.0,
-                causal_training=True):
+                device, epoch, rank, world_size, use_amp=True, grad_clip=1.0):
     """
-    Train one epoch with causal truncation
+    Train one epoch with standard full-sequence training
     
-    v12.0: Uses variable-length sequences during training
+    v12.0-beta: NO causal truncation - architectural fix is sufficient
     """
     model.train()
     
@@ -277,12 +214,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         y = y.to(device, non_blocking=True)
         lengths = lengths.to(device, non_blocking=True)
         
-        # v12.0: Apply CAUSAL truncation
-        if causal_training and torch.rand(1).item() < 0.5:
-            X = apply_causal_truncation(X, y, lengths,
-                                       truncation_prob=0.3,
-                                       min_frac=0.5,
-                                       max_frac=0.9)
+        # v12.0-beta: NO causal truncation
+        # Just use the full sequences as-is
+        # The RelativePositionalEncoding prevents data leakage
         
         optimizer.zero_grad(set_to_none=True)
         
@@ -454,9 +388,9 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="v12.0 Causal Training")
+    parser = argparse.ArgumentParser(description="Training")
     parser.add_argument('--data', required=True)
-    parser.add_argument('--experiment_name', default='causal_v12')
+    parser.add_argument('--experiment_name', default='v12beta')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
@@ -464,7 +398,6 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--no_amp', action='store_true')
-    parser.add_argument('--no_causal', action='store_true')
     parser.add_argument('--quick', action='store_true')
     
     parser.add_argument('--d_model', type=int, default=128)
@@ -477,14 +410,6 @@ def main():
     rank, local_rank, world_size = setup_distributed()
     device = torch.device(f'cuda:{local_rank}')
     
-    if rank == 0:
-        print("="*70)
-        print("CAUSAL TRAINING v12.0")
-        print("="*70)
-        print(f"✅ Relative positional encoding (no absolute time)")
-        print(f"✅ Variable-length sequences (no padding artifacts)")
-        print(f"✅ Causal truncation during training")
-        print(f"✅ Smaller model: ~100K parameters")
     
     # Load data
     print_rank0(f"\nLoading {args.data}...", rank)
@@ -552,7 +477,7 @@ def main():
     from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
-    print_rank0("\n🤖 Creating v12.0 causal model...", rank)
+    print_rank0("\n🤖 Creating model...", rank)
     model = MicrolensingTransformer(
         n_points=X.shape[1],
         d_model=args.d_model,
@@ -598,8 +523,8 @@ def main():
         exp_dir.mkdir(parents=True, exist_ok=True)
         
         config = vars(args)
-        config['version'] = '12.0'
-        config['causal'] = not args.no_causal
+        config['version'] = '12.0-beta'
+        config['causal_training'] = False  # Always false in v12.0-beta
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -625,7 +550,7 @@ def main():
     # Training loop
     if rank == 0:
         print("\n" + "="*70)
-        print("STARTING v12.0 CAUSAL TRAINING")
+        print("STARTING TRAINING")
         print("="*70)
     
     best_val_acc = 0
@@ -641,7 +566,7 @@ def main():
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
             device, epoch, rank, world_size, use_amp=not args.no_amp,
-            grad_clip=args.grad_clip, causal_training=not args.no_causal
+            grad_clip=args.grad_clip
         )
         
         scheduler.step()
@@ -663,7 +588,7 @@ def main():
                     'epoch': epoch,
                     'model_state_dict': save_model.state_dict(),
                     'val_acc': val_acc,
-                    'version': '12.0'
+                    'version': '12.0-beta'
                 }, exp_dir / 'best_model.pt')
                 
                 print(f"✅ Saved (val_acc: {val_acc*100:.2f}%)")
@@ -701,7 +626,7 @@ def main():
     
     if rank == 0:
         print(f"\n{'='*70}")
-        print(f"TEST RESULTS (v12.0 CAUSAL)")
+        print(f"TEST RESULTS")
         print(f"{'='*70}")
         print(f"Test Accuracy: {test_acc*100:.2f}%")
         print(f"{'='*70}")
@@ -709,8 +634,7 @@ def main():
         results = {
             'test_acc': float(test_acc),
             'best_val_acc': float(best_val_acc),
-            'version': '12.0',
-            'causal': not args.no_causal
+            'version': '12.0-beta',
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
