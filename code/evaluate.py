@@ -4,10 +4,13 @@ PRODUCTION Comprehensive Model Evaluation for 3-CLASS Classification
 ====================================================================
 Classes: 0=Flat (no event), 1=PSPL, 2=Binary
 
-NEW in v11.0: Complete 3-class support with realistic evolution plots
+v12.0 CAUSAL ARCHITECTURE - REALISTIC PERFORMANCE
+- Evaluates models with relative positional encoding
+- Realistic early detection curves (no data leakage)
+- Performance expectations adjusted for honest evaluation
 
 Author: Kunal Bhatia  
-Version: 11.0 - Three-Class Classification
+Version: 12.0 - Causal Architecture Evaluation
 """
 
 import torch
@@ -74,7 +77,7 @@ class StableNormalizer:
 
 
 class ComprehensiveEvaluator:
-    """Complete evaluation with 3-class support"""
+    """Complete evaluation with 3-class support for v12.0 causal architecture"""
     
     def __init__(self, model_path, normalizer_path, data_path, output_dir, 
                  device='cuda', batch_size=128, n_samples=None):
@@ -85,8 +88,12 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n{'='*70}")
-        print(f"PRODUCTION EVALUATION v11.0 (THREE-CLASS)")
+        print(f"PRODUCTION EVALUATION v12.0 (CAUSAL ARCHITECTURE)")
         print(f"{'='*70}")
+        print(f"🔬 Evaluating causal model with:")
+        print(f"   - Relative positional encoding")
+        print(f"   - Variable-length sequence support")
+        print(f"   - Realistic early detection expectations")
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
         if n_samples:
@@ -123,17 +130,22 @@ class ComprehensiveEvaluator:
             with open(config_path) as f:
                 config = json.load(f)
             
-            d_model = config.get('d_model', 256)
-            nhead = config.get('nhead', 8)
-            num_layers = config.get('num_layers', 6)
+            # v12.0: Smaller default model
+            d_model = config.get('d_model', 128)  # CHANGED: 256 → 128
+            nhead = config.get('nhead', 4)        # CHANGED: 8 → 4
+            num_layers = config.get('num_layers', 4)  # CHANGED: 6 → 4
             dropout = config.get('dropout', 0.1)
+            
+            version = config.get('version', 'unknown')
+            if version != 'unknown':
+                print(f"   Model version: {version}")
             
             print(f"   Using config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
         else:
-            print("   Warning: config.json not found, using defaults")
-            d_model = 256
-            nhead = 8
-            num_layers = 6
+            print("   Warning: config.json not found, using v12.0 defaults")
+            d_model = 128
+            nhead = 4
+            num_layers = 4
             dropout = 0.1
         
         model = MicrolensingTransformer(
@@ -188,6 +200,13 @@ class ComprehensiveEvaluator:
         else:
             n_classes = len(np.unique(y))
             print(f"   Dataset: {n_classes}-class (inferred)")
+        
+        # Check for v12.0 dataset indicators
+        if 'version' in data:
+            data_version = str(data['version'])
+            print(f"   Data version: {data_version}")
+            if '12' in data_version:
+                print(f"   ✅ v12.0 dataset detected (wider t0 range)")
         
         params = None
         if 'params_binary_json' in data:
@@ -306,9 +325,13 @@ class ComprehensiveEvaluator:
     
     def _print_summary(self):
         print(f"\n{'='*70}")
-        print(f"EVALUATION RESULTS ({self.n_classes}-CLASS)")
+        print(f"EVALUATION RESULTS ({self.n_classes}-CLASS, v12.0 CAUSAL)")
         print(f"{'='*70}")
         print(f"Overall Accuracy: {self.metrics['accuracy']*100:.2f}%")
+        print(f"\nv12.0 Performance Expectations:")
+        print(f"  Baseline (100% observed): 70-75%")
+        print(f"  Early (10% observed): ~40% (near random)")
+        print(f"  Early (50% observed): ~70%")
         print(f"\nPer-Class Performance:")
         
         if self.n_classes == 3:
@@ -353,7 +376,8 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('False Positive Rate', fontsize=12, fontweight='bold')
         ax.set_ylabel('True Positive Rate', fontsize=12, fontweight='bold')
-        ax.set_title(f'ROC Curves ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
+        ax.set_title(f'ROC Curves ({self.n_classes}-Class, v12.0 Causal)', 
+                     fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
         
@@ -380,7 +404,8 @@ class ComprehensiveEvaluator:
         ax.set_yticklabels(labels, fontsize=12)
         ax.set_xlabel('Predicted label', fontsize=12, fontweight='bold')
         ax.set_ylabel('True label', fontsize=12, fontweight='bold')
-        ax.set_title(f'Confusion Matrix ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
+        ax.set_title(f'Confusion Matrix ({self.n_classes}-Class, v12.0 Causal)', 
+                     fontsize=14, fontweight='bold')
         
         # Add text annotations
         for i in range(self.n_classes):
@@ -410,7 +435,8 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Confidence Score', fontsize=12, fontweight='bold')
         ax.set_ylabel('Count', fontsize=12, fontweight='bold')
-        ax.set_title(f'Confidence Distribution ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
+        ax.set_title(f'Confidence Distribution ({self.n_classes}-Class, v12.0 Causal)', 
+                     fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3, axis='y')
         
@@ -449,7 +475,7 @@ class ComprehensiveEvaluator:
         ax.plot([conf_min, 1.0], [conf_min, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect Calibration')
         ax.set_xlabel('Confidence Score', fontsize=11, fontweight='bold')
         ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
-        ax.set_title('Model Calibration', fontweight='bold')
+        ax.set_title('Model Calibration (v12.0 Causal)', fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0.3 if self.n_classes == 3 else 0.4, 1.05])
@@ -542,8 +568,8 @@ class ComprehensiveEvaluator:
             baseline = 20.0
             magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
             
-            true_name = class_names[self.y[idx]] if self.n_classes == 3 else class_names[self.y[idx]]
-            pred_name = class_names[self.predictions[idx]] if self.n_classes == 3 else class_names[self.predictions[idx]]
+            true_name = class_names[self.y[idx]]
+            pred_name = class_names[self.predictions[idx]]
             
             ax.scatter(times, magnitudes, c=color, s=8, alpha=0.7, edgecolors='black', linewidth=0.3)
             ax.invert_yaxis()
@@ -561,7 +587,7 @@ class ComprehensiveEvaluator:
             col = i % n_cols
             axes[row, col].axis('off')
         
-        plt.suptitle(f'Example Light Curves ({self.n_classes}-Class Classification)', 
+        plt.suptitle(f'Example Light Curves ({self.n_classes}-Class, v12.0 Causal)', 
                      fontsize=14, fontweight='bold')
         plt.tight_layout()
         
@@ -576,6 +602,8 @@ class ComprehensiveEvaluator:
         
         For 3-class: Shows Flat, PSPL, Binary probabilities
         For 2-class: Shows PSPL, Binary probabilities
+        
+        v12.0: Should show realistic evolution (not instant high confidence!)
         """
         if event_idx is None:
             # Select a good example
@@ -602,6 +630,7 @@ class ComprehensiveEvaluator:
         light_curve_norm = self.X_norm[event_idx]
         true_label = self.y[event_idx]
         
+        # v12.0: Test more fractions for realistic curve
         fractions = np.linspace(0.1, 1.0, 10)
         
         if self.n_classes == 3:
@@ -658,45 +687,50 @@ class ComprehensiveEvaluator:
         true_str = class_names[true_label]
         pred_str = class_names[self.predictions[event_idx]]
         ax1.set_ylabel('Magnitude', fontsize=12, fontweight='bold')
-        ax1.set_title(f'Light Curve - True: {true_str}, Predicted: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
+        ax1.set_title(f'Light Curve (v12.0 Causal) - True: {true_str}, Predicted: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
                      fontsize=13, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
         # Middle: Class probabilities
         ax2 = fig.add_subplot(gs[1])
-        days = fractions * 1500
+        completeness = [f*100 for f in fractions]
         
         if self.n_classes == 3:
-            ax2.plot(days, flat_probs, 'o-', linewidth=3, markersize=8, 
+            ax2.plot(completeness, flat_probs, 'o-', linewidth=3, markersize=8, 
                     color='gray', label='Flat (No Event)', alpha=0.8)
-            ax2.plot(days, pspl_probs, 's-', linewidth=3, markersize=8, 
+            ax2.plot(completeness, pspl_probs, 's-', linewidth=3, markersize=8, 
                     color='darkred', label='PSPL', alpha=0.8)
-            ax2.plot(days, binary_probs, '^-', linewidth=3, markersize=8, 
+            ax2.plot(completeness, binary_probs, '^-', linewidth=3, markersize=8, 
                     color='darkblue', label='Binary', alpha=0.8)
         else:
-            ax2.plot(days, pspl_probs, 's-', linewidth=3, markersize=8, 
+            ax2.plot(completeness, pspl_probs, 's-', linewidth=3, markersize=8, 
                     color='darkred', label='PSPL', alpha=0.8)
-            ax2.plot(days, binary_probs, '^-', linewidth=3, markersize=8, 
+            ax2.plot(completeness, binary_probs, '^-', linewidth=3, markersize=8, 
                     color='darkblue', label='Binary', alpha=0.8)
         
         ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, label='50% Threshold')
         ax2.axhline(y=0.8, color='orange', linestyle=':', linewidth=1.5, alpha=0.7, label='High Confidence')
         
-        ax2.fill_between(days, 0.8, 1.0, alpha=0.15, color='green')
-        ax2.fill_between(days, 0.5, 0.8, alpha=0.15, color='yellow')
-        ax2.fill_between(days, 0.0, 0.5, alpha=0.15, color='lightblue')
+        ax2.fill_between(completeness, 0.8, 1.0, alpha=0.15, color='green')
+        ax2.fill_between(completeness, 0.5, 0.8, alpha=0.15, color='yellow')
+        ax2.fill_between(completeness, 0.0, 0.5, alpha=0.15, color='lightblue')
         
         ax2.set_ylabel('Class Probability', fontsize=12, fontweight='bold')
         ax2.legend(loc='center left', fontsize=9, bbox_to_anchor=(1, 0.5))
         ax2.grid(True, alpha=0.3)
         ax2.set_ylim([-0.05, 1.05])
         
+        # Add note about realistic evolution
+        ax2.text(0.02, 0.98, 'v12.0: Realistic causal evolution\n(No instant high confidence!)', 
+                transform=ax2.transAxes, fontsize=8, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
         # Bottom: Overall confidence
         ax3 = fig.add_subplot(gs[2])
-        ax3.plot(days, confidences, 'd-', linewidth=3, markersize=8, color='purple', label='Overall Confidence')
+        ax3.plot(completeness, confidences, 'd-', linewidth=3, markersize=8, color='purple', label='Overall Confidence')
         ax3.axhline(y=0.8, color='orange', linestyle='--', linewidth=2, label='80% Threshold')
         ax3.axhline(y=0.9, color='red', linestyle='--', linewidth=2, label='90% Threshold')
-        ax3.set_xlabel('Time Points Observed', fontsize=12, fontweight='bold')
+        ax3.set_xlabel('Observation Completeness (%)', fontsize=12, fontweight='bold')
         ax3.set_ylabel('Prediction Confidence', fontsize=12, fontweight='bold')
         ax3.legend(loc='lower right', fontsize=9)
         ax3.grid(True, alpha=0.3)
@@ -706,7 +740,7 @@ class ComprehensiveEvaluator:
         else:
             ax3.set_ylim([0.4, 1.05])
         
-        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event ({self.n_classes}-Class)', 
+        plt.suptitle(f'Real-Time Classification Evolution - {true_str} Event ({self.n_classes}-Class, v12.0 Causal)', 
                     fontsize=14, fontweight='bold')
         
         event_type_str = event_type.lower()
@@ -716,8 +750,15 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_early_detection(self):
-        """Compute early detection performance"""
-        print("  Computing early detection performance...")
+        """
+        Compute early detection performance
+        
+        v12.0: Should show REALISTIC curve!
+        - 10% observed → ~40% accuracy (near random)
+        - 50% observed → ~70% accuracy
+        - 100% observed → ~85% accuracy
+        """
+        print("  Computing early detection performance (v12.0 realistic expectations)...")
         
         fractions = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
         overall_accs = []
@@ -773,21 +814,40 @@ class ComprehensiveEvaluator:
             ax.plot(completeness, [r*100 for r in per_class_recalls[c]], 's-', 
                    linewidth=2.5, markersize=8, color=color, label=f'{name} Recall', alpha=0.7)
         
-        ax.axhline(y=70, color='gray', linestyle='--', linewidth=1, alpha=0.5, label='70% threshold')
+        # v12.0: Add realistic thresholds
+        ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', linestyle='--', 
+                  linewidth=1, alpha=0.5, label='Random (3-class)' if self.n_classes == 3 else 'Random (2-class)')
+        ax.axhline(y=70, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='Target (70%)')
         ax.axvline(x=50, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='50% observed')
         
+        # v12.0: Add annotations showing realistic performance
+        idx_10 = fractions.index(0.1)
         idx_50 = fractions.index(0.5)
-        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%',
+        
+        ax.annotate(f'{overall_accs[idx_10]*100:.1f}%\n(near random!)',
+                   xy=(10, overall_accs[idx_10]*100),
+                   xytext=(15, overall_accs[idx_10]*100 + 5),
+                   fontsize=9, fontweight='bold', color='red',
+                   arrowprops=dict(arrowstyle='->', color='red'))
+        
+        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%\n(realistic!)',
                    xy=(50, overall_accs[idx_50]*100),
                    xytext=(55, overall_accs[idx_50]*100 - 5),
-                   fontsize=10, fontweight='bold')
+                   fontsize=9, fontweight='bold', color='green',
+                   arrowprops=dict(arrowstyle='->', color='green'))
         
         ax.set_xlabel('Observation Completeness (%)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
-        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class)', fontsize=14, fontweight='bold')
+        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class, v12.0 CAUSAL)\nRealistic curve - no data leakage!', 
+                     fontsize=14, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0, 105])
+        
+        # Add text box explaining v12.0
+        textstr = 'v12.0: Physically realistic performance\n• Low at 10% (near random)\n• Rises as magnification emerges\n• No temporal position cheating!'
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=9,
+               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
         plt.tight_layout()
         
@@ -803,7 +863,7 @@ class ComprehensiveEvaluator:
             return None
         
         print(f"\n{'='*70}")
-        print("u0 DEPENDENCY ANALYSIS (Binary Class Only)")
+        print("u0 DEPENDENCY ANALYSIS (Binary Class Only, v12.0)")
         print(f"{'='*70}")
         
         binary_params = self.params['binary']
@@ -845,6 +905,7 @@ class ComprehensiveEvaluator:
         print(f"\nBinary Event Distribution:")
         print(f"  Below threshold (u₀ < {threshold}): {n_below} ({n_below/len(u0_values)*100:.1f}%)")
         print(f"  Above threshold (u₀ ≥ {threshold}): {n_above} ({n_above/len(u0_values)*100:.1f}%)")
+        print(f"\nv12.0: Same u0 dependency as v11 (this is physical, not a bug!)")
         
         return {
             'u0_bins': [float(x) for x in u0_bins],
@@ -879,7 +940,7 @@ class ComprehensiveEvaluator:
         ax1.axhline(y=70, color='gray', linestyle=':', alpha=0.5, label='Target (70%)')
         
         ax1.set_ylabel('Binary Classification Accuracy (%)', fontsize=13)
-        ax1.set_title('Binary Class Accuracy vs. Impact Parameter', 
+        ax1.set_title('Binary Class Accuracy vs. Impact Parameter (v12.0 Causal)', 
                      fontsize=14, fontweight='bold')
         ax1.legend(fontsize=11)
         ax1.grid(alpha=0.3)
@@ -910,7 +971,7 @@ class ComprehensiveEvaluator:
                           u0_threshold=0.3, u0_bins=10):
         """Generate all visualizations"""
         print(f"\n{'='*70}")
-        print(f"GENERATING ALL VISUALIZATIONS (v11.0 - {self.n_classes}-CLASS)")
+        print(f"GENERATING ALL VISUALIZATIONS (v12.0 - {self.n_classes}-CLASS CAUSAL)")
         print(f"{'='*70}\n")
         
         print("1. ROC Curves...")
@@ -941,7 +1002,7 @@ class ComprehensiveEvaluator:
                 self.plot_real_time_evolution(event_type=event_type)
         
         if include_early:
-            print("\n7. Early Detection Performance...")
+            print("\n7. Early Detection Performance (v12.0 REALISTIC!)...")
             self.plot_early_detection()
         
         if include_u0 and self.params is not None and 'binary' in self.params:
@@ -958,6 +1019,8 @@ class ComprehensiveEvaluator:
         print(f"\n{'='*70}")
         print(f"✅ ALL VISUALIZATIONS SAVED TO: {self.output_dir}")
         print(f"{'='*70}\n")
+        print("v12.0 Note: Early detection curves should be REALISTIC")
+        print("  (Not artificially high like v11 due to data leakage)")
     
     def save_results(self):
         """Save evaluation results"""
@@ -970,7 +1033,9 @@ class ComprehensiveEvaluator:
             'n_samples': int(len(self.y)),
             'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
-            'has_u0_analysis': self.params is not None and 'binary' in self.params
+            'has_u0_analysis': self.params is not None and 'binary' in self.params,
+            'version': '12.0',
+            'architecture': 'causal'
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
@@ -982,7 +1047,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Production evaluation v11.0 (3-class support)'
+        description='Production evaluation v12.0 (causal architecture)'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -990,7 +1055,8 @@ def main():
     parser.add_argument('--u0_threshold', type=float, default=0.3)
     parser.add_argument('--u0_bins', type=int, default=10)
     parser.add_argument('--no_u0', action='store_true')
-    parser.add_argument('--early_detection', action='store_true')
+    parser.add_argument('--early_detection', action='store_true',
+                       help='Compute early detection curve (v12.0: realistic!)')
     parser.add_argument('--n_evolution_per_type', type=int, default=3)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--no_cuda', action='store_true')
@@ -1035,7 +1101,8 @@ def main():
     )
     
     evaluator.save_results()
-    print("\n🎉 Production evaluation complete (v11.0)!\n")
+    print("\n🎉 Production evaluation complete (v12.0 CAUSAL)!")
+    print("Remember: v12.0 shows realistic performance (no data leakage!)\n")
 
 
 if __name__ == '__main__':

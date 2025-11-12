@@ -8,7 +8,7 @@ NEW in v11.0: Added Flat class (no event, just baseline)
 Classes: 0=Flat, 1=PSPL, 2=Binary
 
 Author: Kunal Bhatia
-Version: 11.0 - Three-Class Classification
+Version: 12.0 - Three-Class Classification
 """
 
 import numpy as np
