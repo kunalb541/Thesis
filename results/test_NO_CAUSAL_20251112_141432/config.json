@@ -1,0 +1,19 @@
+{
+  "data": "../data/raw/test.npz",
+  "experiment_name": "test_NO_CAUSAL",
+  "epochs": 10,
+  "batch_size": 64,
+  "lr": 0.001,
+  "warmup_epochs": 5,
+  "weight_decay": 0.0001,
+  "grad_clip": 1.0,
+  "no_amp": false,
+  "no_causal": true,
+  "quick": false,
+  "d_model": 128,
+  "nhead": 4,
+  "num_layers": 4,
+  "dropout": 0.1,
+  "version": "12.0",
+  "causal": false
+}

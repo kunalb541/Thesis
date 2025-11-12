@@ -280,9 +280,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         # v12.0: Apply CAUSAL truncation
         if causal_training and torch.rand(1).item() < 0.5:
             X = apply_causal_truncation(X, y, lengths,
-                                       truncation_prob=0.5,
-                                       min_frac=0.1,
-                                       max_frac=0.8)
+                                       truncation_prob=0.3,
+                                       min_frac=0.5,
+                                       max_frac=0.9)
         
         optimizer.zero_grad(set_to_none=True)
         
@@ -322,7 +322,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
                 caustic_loss = F.binary_cross_entropy_with_logits(outputs['caustic'], caustic_target)
-                loss = loss + 0.4 * caustic_loss
+                loss = loss + 0.2 * caustic_loss
                 caustic_loss_total += caustic_loss.item()
             else:
                 caustic_loss = torch.tensor(0.0)
