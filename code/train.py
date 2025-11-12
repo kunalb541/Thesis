@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """
-OPTIMIZED Distributed Training for THREE-CLASS Classification
-=============================================================
-v12.0-beta-OPTIMIZED - Production-Ready with All Optimizations
+Distributed Training for Microlensing Classification
+====================================================
 
-OPTIMIZATIONS:
-1. Efficient data loading with pre-computed features
-2. Optimized collate function (minimal copying)
-3. Persistent workers (reduces overhead)
-4. Gradient accumulation (for large effective batch sizes)
-5. Mixed precision with optimal scaler settings
-6. Efficient distributed training (minimal synchronization)
-7. Memory-efficient evaluation
-8. Smart learning rate scheduling
+Trains transformer model for three-class classification (Flat/PSPL/Binary).
 
-Classes: 0=Flat, 1=PSPL, 2=Binary
+Supports:
+- Single GPU and multi-GPU distributed training (DDP)
+- Mixed precision training (AMP)
+- Gradient checkpointing for memory efficiency
+- AMD (ROCm) and NVIDIA (CUDA) GPUs
 
 Author: Kunal Bhatia
-Version: 12.0-beta-OPTIMIZED
+Version: 13.0
 """
 
 import os
@@ -77,19 +72,19 @@ def print_rank0(message, rank=0):
         print(message)
 
 
-class OptimizedDataset(Dataset):
+class MicrolensingDataset(Dataset):
     """
-    OPTIMIZED Dataset with pre-computed features
+    Dataset for microlensing light curves
     
-    Key optimizations:
-    1. Pre-compute all gap features during initialization
-    2. Store data in most efficient format
-    3. Minimal operations in __getitem__
+    Features:
+    - Pre-computed sequence lengths
+    - Efficient data loading
+    - Handles missing data (pad_value=-1.0)
     """
     
     def __init__(self, X, y, pad_value=-1.0):
         """
-        Initialize with pre-computation
+        Initialize dataset
         
         Args:
             X: Light curves [N, T]
@@ -106,43 +101,35 @@ class OptimizedDataset(Dataset):
         self.y = y
         self.pad_value = pad_value
         
-        # Pre-compute lengths (used for batching efficiency)
+        # Pre-compute lengths
         self.lengths = np.sum(X != pad_value, axis=1).astype(np.int32)
         
         print(f"      Dataset: {len(X)} events")
-        print(f"      Valid obs: {self.lengths.mean():.0f} ± {self.lengths.std():.0f}")
+        print(f"      Valid observations: {self.lengths.mean():.0f} ± {self.lengths.std():.0f}")
     
     def __len__(self):
         return len(self.y)
     
     def __getitem__(self, idx):
         """
-        Minimal operations for speed
+        Get single item
         
         Returns:
             (x, y, length)
         """
         return (
-            self.X[idx],  # Return numpy (converted to tensor in collate)
+            self.X[idx],
             self.y[idx],
             self.lengths[idx]
         )
 
 
-def optimized_collate_fn(batch):
-    """
-    OPTIMIZED collate function
-    
-    Key optimizations:
-    1. Minimize tensor copying
-    2. Use most efficient tensor creation
-    3. Batch operations where possible
-    """
-    # Unpack batch (list of tuples)
+def collate_fn(batch):
+    """Collate batch for DataLoader"""
+    # Unpack batch
     xs, ys, lengths = zip(*batch)
     
-    # Convert to tensors efficiently
-    # stack is faster than cat for arrays of same shape
+    # Convert to tensors
     x_tensor = torch.from_numpy(np.stack(xs)).float()
     y_tensor = torch.from_numpy(np.array(ys)).long()
     lengths_tensor = torch.from_numpy(np.array(lengths)).long()
@@ -190,15 +177,7 @@ class StableNormalizer:
 
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 device, epoch, rank, world_size, use_amp=True, grad_clip=1.0):
-    """
-    OPTIMIZED training epoch
-    
-    Key optimizations:
-    1. Efficient gradient accumulation
-    2. Minimal synchronization in DDP
-    3. Optimal mixed precision usage
-    4. Memory-efficient operations
-    """
+    """Training epoch with distributed support"""
     model.train()
     
     total_loss = 0
@@ -222,13 +201,13 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         pbar = loader
     
     for batch_idx, (X, y, lengths) in enumerate(pbar):
-        # Move to device (non_blocking for efficiency)
+        # Move to device
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         
-        optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
-        # Mixed precision forward pass
+        # Forward pass with mixed precision
         with autocast(enabled=use_amp):
             outputs = model(X, return_all=True)
             
@@ -237,7 +216,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             classification_loss = criterion(logits, y)
             loss = classification_loss
             
-            # Auxiliary losses (with proper weights)
+            # Auxiliary losses with proper weights
             if 'flat' in outputs:
                 flat_target = (y == 0).float()
                 flat_loss = F.binary_cross_entropy_with_logits(
@@ -293,7 +272,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             )
             optimizer.step()
         
-        # Update metrics (use .item() to avoid GPU-CPU sync issues)
+        # Update metrics
         total_loss += loss.item()
         classification_loss_total += classification_loss.item()
         num_batches += 1
@@ -334,14 +313,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device, rank, world_size):
-    """
-    OPTIMIZED evaluation
-    
-    Key optimizations:
-    1. No gradient computation
-    2. Efficient batching
-    3. Minimal GPU-CPU synchronization
-    """
+    """Evaluation with distributed support"""
     model.eval()
     
     total_loss = 0
@@ -415,10 +387,10 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OPTIMIZED Distributed Training"
+        description="Distributed training for microlensing classification"
     )
     parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', default='v12beta_opt', 
+    parser.add_argument('--experiment_name', default='microlensing_transformer', 
                        help='Experiment name')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
@@ -437,7 +409,7 @@ def main():
     parser.add_argument('--num_layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
     
-    # Optimization options
+    # Training options
     parser.add_argument('--gradient_checkpointing', action='store_true',
                        help='Enable gradient checkpointing (saves memory)')
     parser.add_argument('--num_workers', type=int, default=4,
@@ -457,17 +429,17 @@ def main():
     # Print configuration
     if rank == 0:
         print("="*70)
-        print("OPTIMIZED DISTRIBUTED TRAINING")
+        print("TRAINING MICROLENSING TRANSFORMER")
         print("="*70)
-        print(f"World size: {world_size} GPUs")
+        print(f"GPUs: {world_size}")
         print(f"Device: {device}")
-        print(f"Mixed Precision: {'Disabled' if args.no_amp else 'Enabled'}")
-        print(f"Batch size: {args.batch_size} per GPU")
-        print(f"Effective batch: {args.batch_size * world_size}")
+        print(f"Mixed precision: {'Enabled' if not args.no_amp else 'Disabled'}")
+        print(f"Batch size per GPU: {args.batch_size}")
+        print(f"Effective batch size: {args.batch_size * world_size}")
         print(f"Gradient checkpointing: {args.gradient_checkpointing}")
     
     # Load data
-    print_rank0(f"\n📦 Loading {args.data}...", rank)
+    print_rank0(f"\nLoading {args.data}...", rank)
     data = np.load(args.data)
     X = data['X']
     y = data['y']
@@ -485,12 +457,12 @@ def main():
     
     # Quick mode
     if args.quick:
-        print_rank0("⚡ Quick mode: Using 10k samples", rank)
+        print_rank0("Quick mode: Using 10k samples", rank)
         indices = np.random.choice(len(X), min(10000, len(X)), replace=False)
         X, y = X[indices], y[indices]
     
     # Normalize data
-    print_rank0("\n🔄 Normalizing data...", rank)
+    print_rank0("\nNormalizing data...", rank)
     normalizer = StableNormalizer(pad_value=-1.0)
     X_norm = normalizer.fit_transform(X)
     
@@ -499,7 +471,7 @@ def main():
         print(f"   Std:  {normalizer.std:.3f}")
     
     # Split data
-    print_rank0("\n✂️  Splitting data...", rank)
+    print_rank0("\nSplitting data...", rank)
     X_train, X_temp, y_train, y_temp = train_test_split(
         X_norm, y, test_size=0.3, stratify=y, random_state=42
     )
@@ -513,10 +485,10 @@ def main():
         print(f"   Test:  {len(X_test)}")
     
     # Create datasets
-    print_rank0("\n📊 Creating datasets...", rank)
-    train_dataset = OptimizedDataset(X_train, y_train)
-    val_dataset = OptimizedDataset(X_val, y_val)
-    test_dataset = OptimizedDataset(X_test, y_test)
+    print_rank0("\nCreating datasets...", rank)
+    train_dataset = MicrolensingDataset(X_train, y_train)
+    val_dataset = MicrolensingDataset(X_val, y_val)
+    test_dataset = MicrolensingDataset(X_test, y_test)
     
     # Create samplers
     train_sampler = DistributedSampler(
@@ -529,26 +501,26 @@ def main():
         test_dataset, num_replicas=world_size, rank=rank, shuffle=False
     )
     
-    # Create dataloaders with optimizations
+    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        persistent_workers=True,  # Keeps workers alive (faster)
-        collate_fn=optimized_collate_fn,
-        prefetch_factor=2  # Prefetch batches
+        persistent_workers=True,
+        collate_fn=collate_fn,
+        prefetch_factor=2
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size * 2,  # Can use larger batch for eval
+        batch_size=args.batch_size * 2,
         sampler=val_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
         persistent_workers=True,
-        collate_fn=optimized_collate_fn,
+        collate_fn=collate_fn,
         prefetch_factor=2
     )
     
@@ -559,15 +531,15 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True,
         persistent_workers=True,
-        collate_fn=optimized_collate_fn,
+        collate_fn=collate_fn,
         prefetch_factor=2
     )
     
-    # Import optimized transformer
+    # Import transformer
     from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
-    print_rank0("\n🤖 Creating model...", rank)
+    print_rank0("\nCreating model...", rank)
     model = MicrolensingTransformer(
         n_points=X.shape[1],
         d_model=args.d_model,
@@ -629,11 +601,10 @@ def main():
         exp_dir = Path(f"../results/{args.experiment_name}_{timestamp}")
         exp_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"\n📁 Experiment: {exp_dir.name}")
+        print(f"\nExperiment: {exp_dir.name}")
         
         # Save config
         config = vars(args)
-        config['version'] = '12.0-beta-optimized'
         config['world_size'] = world_size
         config['effective_batch_size'] = effective_batch_size
         config['scaled_lr'] = scaled_lr
@@ -693,7 +664,7 @@ def main():
         )
         
         if rank == 0:
-            print(f"\n📊 Results:")
+            print(f"\nResults:")
             print(f"   Train: Loss={train_loss:.4f}, Acc={train_acc*100:.2f}%")
             print(f"   Val:   Loss={val_loss:.4f}, Acc={val_acc*100:.2f}%")
             
@@ -708,11 +679,10 @@ def main():
                     'model_state_dict': save_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_acc': val_acc,
-                    'val_loss': val_loss,
-                    'version': '12.0-beta-optimized'
+                    'val_loss': val_loss
                 }, exp_dir / 'best_model.pt')
                 
-                print(f"   ✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
+                print(f"   Saved best model (val_acc: {val_acc*100:.2f}%)")
             else:
                 patience_counter += 1
                 print(f"   Patience: {patience_counter}/{max_patience}")
@@ -727,11 +697,11 @@ def main():
             dist.broadcast(stop_flag, src=0)
             if stop_flag.item() == 1:
                 if rank == 0:
-                    print(f"\n⏹️  Early stopping at epoch {epoch+1}")
+                    print(f"\nEarly stopping at epoch {epoch+1}")
                 break
         else:
             if should_stop:
-                print(f"\n⏹️  Early stopping at epoch {epoch+1}")
+                print(f"\nEarly stopping at epoch {epoch+1}")
                 break
     
     # Final evaluation
@@ -776,15 +746,14 @@ def main():
             'test_acc': float(test_acc),
             'test_loss': float(test_loss),
             'best_val_acc': float(best_val_acc),
-            'version': '12.0-beta-optimized',
             'total_epochs': epoch + 1
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
             json.dump(results, f, indent=2)
         
-        print(f"\n✅ Training complete!")
-        print(f"📁 Results saved to: {exp_dir}")
+        print(f"\nTraining complete!")
+        print(f"Results saved to: {exp_dir}")
     
     # Cleanup
     if world_size > 1:

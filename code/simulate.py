@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Microlensing Event Simulation - THREE-CLASS VERSION
-==================================================
-Generates realistic Flat, PSPL, and Binary microlensing light curves.
+Microlensing Event Simulation
+==============================
 
-NEW in v11.0: Added Flat class (no event, just baseline)
-Classes: 0=Flat, 1=PSPL, 2=Binary
+Generates realistic gravitational microlensing light curves for three classes:
+- Flat (0): No event, baseline flux only
+- PSPL (1): Point Source Point Lens
+- Binary (2): Binary lens (planetary or stellar companion)
+
+Uses VBBinaryLensing for physically accurate binary lens calculations.
 
 Author: Kunal Bhatia
-Version: 12.0-beta - Three-Class Classification
+Version: 13.0
 """
 
 import numpy as np
@@ -262,7 +265,7 @@ def simulate_dataset(n_flat, n_pspl, n_binary, binary_params='baseline',
                      num_workers=1, seed=None, save_params=False,
                      cadence_mask_prob=None, mag_error_std=None):
     """
-    Generate complete dataset with THREE classes
+    Generate complete dataset with three classes
     
     Args:
         n_flat: Number of flat (no event) light curves
@@ -292,22 +295,27 @@ def simulate_dataset(n_flat, n_pspl, n_binary, binary_params='baseline',
     error = MAG_ERROR_STD if mag_error_std is None else mag_error_std
     
     # Generate parameters
-    print(f"\n{'='*70}")
-    print(f"GENERATING {n_flat} FLAT + {n_pspl} PSPL + {n_binary} BINARY EVENTS")
-    print(f"{'='*70}")
-    print(f"THREE-CLASS CLASSIFICATION: 0=Flat, 1=PSPL, 2=Binary")
-    print(f"Binary config: {binary_params}")
+    print("="*70)
+    print("MICROLENSING EVENT SIMULATION")
+    print("="*70)
+    print(f"Dataset composition:")
+    print(f"  Flat:   {n_flat}")
+    print(f"  PSPL:   {n_pspl}")
+    print(f"  Binary: {n_binary}")
+    print(f"  Total:  {n_flat + n_pspl + n_binary}")
+    print(f"Binary topology: {binary_params}")
     print(f"Time window: [{TIME_MIN}, {TIME_MAX}] days")
-    print(f"Cadence mask: {cadence*100:.0f}% missing")
-    print(f"Photometric error: {error:.3f}")
+    print(f"Cadence: {cadence*100:.0f}% missing observations")
+    print(f"Photometric error: {error:.3f} mag")
+    print(f"Parallel workers: {num_workers}")
     
     print("\nGenerating Flat parameters...")
     params_flat = generate_flat_params(n_flat, seed=seed)
     
-    print("\nGenerating PSPL parameters...")
+    print("Generating PSPL parameters...")
     params_pspl = generate_pspl_params(n_pspl, seed=seed+1 if seed else None)
     
-    print(f"\nGenerating Binary parameters ({binary_params})...")
+    print(f"Generating Binary parameters ({binary_params})...")
     params_binary = generate_binary_params(n_binary, params_set=binary_params, 
                                           seed=seed+2 if seed else None)
     
@@ -364,9 +372,9 @@ def simulate_dataset(n_flat, n_pspl, n_binary, binary_params='baseline',
     if binary_mag:
         binary_mag = np.array(binary_mag)
         print(f"\nBinary Statistics:")
-        print(f"  Max mag mean: {binary_mag.mean():.1f}")
-        print(f"  Max mag median: {np.median(binary_mag):.1f}")
-        print(f"  Max mag range: [{binary_mag.min():.1f}, {binary_mag.max():.1f}]")
+        print(f"  Max magnification mean: {binary_mag.mean():.1f}")
+        print(f"  Max magnification median: {np.median(binary_mag):.1f}")
+        print(f"  Max magnification range: [{binary_mag.min():.1f}, {binary_mag.max():.1f}]")
     
     # Prepare return
     params_dict = None
@@ -385,7 +393,7 @@ def simulate_dataset(n_flat, n_pspl, n_binary, binary_params='baseline',
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate 3-class microlensing dataset (Flat, PSPL, Binary)'
+        description='Generate microlensing dataset (Flat, PSPL, Binary)'
     )
     parser.add_argument('--n_flat', type=int, default=10000,
                        help='Number of flat (no event) light curves')
@@ -419,17 +427,6 @@ def main():
         validate_config()
         return
     
-    print("="*70)
-    print("THREE-CLASS MICROLENSING SIMULATION")
-    print("="*70)
-    print(f"Flat events: {args.n_flat}")
-    print(f"PSPL events: {args.n_pspl}")
-    print(f"Binary events: {args.n_binary}")
-    print(f"Total: {args.n_flat + args.n_pspl + args.n_binary}")
-    print(f"Binary config: {args.binary_params}")
-    print(f"Workers: {args.num_workers}")
-    print(f"Save params: {args.save_params}")
-    
     if args.cadence_mask_prob is not None:
         print(f"Cadence override: {args.cadence_mask_prob*100:.0f}% missing")
     if args.mag_error_std is not None:
@@ -437,8 +434,8 @@ def main():
     
     print("\n" + "="*70)
     if not validate_config():
-        print("\n⚠️  Configuration has warnings but will proceed...")
-    print("="*70)
+        print("\nConfiguration has warnings but will proceed...")
+    print("="*70 + "\n")
     
     # Generate dataset
     X, y, timestamps, params_dict = simulate_dataset(
@@ -461,8 +458,8 @@ def main():
         'X': X,
         'y': y,
         'timestamps': timestamps,
-        'n_classes': 3,  # NEW: Mark as 3-class dataset
-        'class_names': ['Flat', 'PSPL', 'Binary']  # NEW: Class names
+        'n_classes': 3,
+        'class_names': ['Flat', 'PSPL', 'Binary']
     }
     
     if params_dict:
@@ -474,9 +471,9 @@ def main():
     
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"\n{'='*70}")
-    print(f"✅ Dataset saved to: {output_path}")
-    print(f"   Size: {file_size_mb:.1f} MB")
-    print(f"   Classes: 0=Flat, 1=PSPL, 2=Binary")
+    print(f"Dataset saved to: {output_path}")
+    print(f"Size: {file_size_mb:.1f} MB")
+    print(f"Classes: 0=Flat, 1=PSPL, 2=Binary")
     print(f"{'='*70}\n")
 
 

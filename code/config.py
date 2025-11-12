@@ -1,15 +1,18 @@
 """
-Configuration for Real-Time Binary Microlensing Classification
+Configuration for Microlensing Classification
+==============================================
 
-Three-Class System: 0=Flat (no event), 1=PSPL, 2=Binary
+Defines all parameters for data generation, model architecture, training, and evaluation.
 
-Key architectural feature: Relative positional encoding prevents
-temporal information leakage. Model learns from magnification patterns,
-not absolute time positions.
+Physical Parameters:
+- Impact parameter (u₀): Most critical - determines caustic crossing probability
+- Separation (s): Binary component distance
+- Mass ratio (q): m₂/m₁ (companion/primary)
+- Source size (rho): Angular radius/Einstein radius  
+- Einstein timescale (tE): Event duration
 
 Author: Kunal Bhatia
-Institution: University of Heidelberg
-Thesis: From Light Curves to Labels - Machine Learning in Microlensing
+Version: 13.0
 """
 
 import math
@@ -20,8 +23,7 @@ from typing import Dict, Any
 # ============================================================================
 
 class SimulationConfig:
-    """Data generation parameters for realistic microlensing observations"""
-    
+    """Data generation parameters"""
     # Temporal sampling
     N_POINTS = 1500          # Full temporal resolution
     TIME_MIN = -100          # Days before peak
@@ -31,9 +33,9 @@ class SimulationConfig:
     VBM_TOLERANCE = 1e-4
     MAX_BINARY_ATTEMPTS = 10
     
-    # Observational effects (baseline)
+    # Observational effects
     CADENCE_MASK_PROB = 0.20  # 20% missing (LSST nominal)
-    MAG_ERROR_STD = 0.10       # 0.10 mag (ground-based)
+    MAG_ERROR_STD = 0.10       # Ground-based photometry
     BASELINE_MIN = 19.0        # Source magnitude range
     BASELINE_MAX = 22.0
     
@@ -47,74 +49,69 @@ class SimulationConfig:
 class FlatConfig:
     """
     Flat (no event) parameters
-    Just constant baseline flux with photometric scatter
+    Just constant baseline flux
     """
-    pass  # No special parameters - uses baseline magnitude only
+    pass  # No special parameters needed
 
 class PSPLConfig:
     """
     Point Source Point Lens parameters
     
-    Wide t0 range prevents temporal information leakage
+    Wide t₀ range prevents temporal artifacts
     """
-    T0_MIN = -50.0    # Wide range to prevent timing artifacts
-    T0_MAX = 50.0
-    U0_MIN = 0.001    # Close to very far approaches
-    U0_MAX = 0.3      # Focus on detectable events
-    TE_MIN = 20.0     # Typical timescales
+    T0_MIN = -50.0    # Wide range (prevents timing artifacts)
+    T0_MAX = 50.0     
+    U0_MIN = 0.001    
+    U0_MAX = 0.3      
+    TE_MIN = 20.0     
     TE_MAX = 40.0
 
 class BinaryConfig:
-    """
-    Binary lens configurations across different physical regimes
-    
-    Configurations span from clear caustic crossings (distinct) to
-    near-physical detection limits (challenging).
-    """
+    """Binary lens configurations"""
     
     CONFIGS = {
-        'distinct': {
-            'description': 'Clear caustic crossings for unambiguous detection',
-            's_range': (0.7, 1.5),      # Optimal caustic topology
-            'q_range': (0.01, 0.5),     # Moderate to high mass ratios
-            'u0_range': (0.001, 0.05),  # Close approaches only
-            'rho_range': (0.001, 0.01), # Sharp features
-            'alpha_range': (0, math.pi),
-            't0_range': (-50.0, 50.0),  # Wide temporal range
-            'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.85
-        },
-        
         'baseline': {
-            'description': 'Realistic mixed population for benchmarking',
-            's_range': (0.1, 2.5),      # Wide separation range
-            'q_range': (0.001, 1.0),    # All mass ratios
-            'u0_range': (0.001, 0.3),   # Mix of close/far
-            'rho_range': (0.001, 0.05), # Typical source sizes
+            'description': 'Realistic mixed population',
+            's_range': (0.1, 2.5),
+            'q_range': (0.001, 1.0),
+            'u0_range': (0.001, 0.3),
+            'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-50.0, 50.0),
             'tE_range': (20.0, 40.0),
             'expected_accuracy': 0.70
         },
         
+        'distinct': {
+            'description': 'Clear caustics for training',
+            's_range': (0.7, 1.5),
+            'q_range': (0.01, 0.5),
+            'u0_range': (0.001, 0.05),
+            'rho_range': (0.001, 0.01),
+            'alpha_range': (0, math.pi),
+            't0_range': (-50.0, 50.0),
+            'tE_range': (30.0, 40.0),
+            'expected_accuracy': 0.85
+        },
+        
         'challenging': {
-            'description': 'Near physical detection limit - includes indistinguishable events',
-            's_range': (0.1, 3.0),      # Very wide separations
-            'q_range': (0.0001, 1.0),   # All mass ratios
-            'u0_range': (0.01, 1.0),    # Includes large u0 (PSPL-like)
-            'rho_range': (0.001, 0.1),  # Large source sizes (smooth features)
+            'description': 'Includes undetectable events (u₀ > 0.3)',
+            's_range': (0.1, 3.0),
+            'q_range': (0.0001, 1.0),
+            'u0_range': (0.01, 1.0),  # Includes fundamentally undetectable
+            'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-50.0, 50.0),
             'tE_range': (10.0, 40.0),
-            'expected_accuracy': 0.55   # Lower due to physical ambiguity
+            'expected_accuracy': 0.55
         },
         
         'planetary': {
-            'description': 'Planet detection focus - low mass ratio systems',
-            's_range': (0.5, 2.0),      # Typical planetary separations
-            'q_range': (0.0001, 0.01),  # Planetary mass ratios
-            'u0_range': (0.001, 0.2),   # Moderate approaches
-            'rho_range': (0.0001, 0.01),# Small sources (sharp features)
+            'description': 'Exoplanet detection focus',
+            's_range': (0.5, 2.0),
+            'q_range': (0.0001, 0.01),
+            'u0_range': (0.001, 0.2),
+            'rho_range': (0.0001, 0.01),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-50.0, 50.0),
             'tE_range': (20.0, 40.0),
@@ -122,11 +119,11 @@ class BinaryConfig:
         },
         
         'stellar': {
-            'description': 'Stellar binary focus - comparable mass systems',
-            's_range': (0.3, 3.0),      # Wide range of separations
-            'q_range': (0.3, 1.0),      # Near equal mass
-            'u0_range': (0.001, 0.4),   # Various impact parameters
-            'rho_range': (0.001, 0.05), # Typical sources
+            'description': 'Binary stars focus',
+            's_range': (0.3, 3.0),
+            'q_range': (0.3, 1.0),
+            'u0_range': (0.001, 0.4),
+            'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-50.0, 50.0),
             'tE_range': (30.0, 40.0),
@@ -136,7 +133,7 @@ class BinaryConfig:
     
     @classmethod
     def get_config(cls, name: str) -> Dict[str, Any]:
-        """Get configuration formatted for simulate.py"""
+        """Get configuration with proper format for simulate.py"""
         if name not in cls.CONFIGS:
             raise ValueError(f"Unknown config: {name}. Choose from: {list(cls.CONFIGS.keys())}")
         
@@ -163,21 +160,24 @@ class BinaryConfig:
 # ============================================================================
 
 class ModelConfig:
-    """Transformer architecture parameters"""
+    """
+    Transformer architecture parameters
     
-    D_MODEL = 128              # Embedding dimension
+    Compact model for fast training and inference
+    """
+    D_MODEL = 128              # Model dimension
     NHEAD = 4                  # Attention heads
     NUM_LAYERS = 4             # Transformer blocks
-    DIM_FEEDFORWARD = 512      # FFN hidden dimension (4 × d_model)
+    DIM_FEEDFORWARD = 512      # FFN dimension (4 * d_model)
     DROPOUT = 0.1
-    MAX_SEQ_LEN = 2000        # Maximum sequence length
+    MAX_SEQ_LEN = 2000
     
     # Multi-task learning weights
     CLASSIFICATION_WEIGHT = 1.0
-    FLAT_WEIGHT = 0.5          # Flat detection (high priority)
-    PSPL_WEIGHT = 0.5          # PSPL detection (high priority)
-    ANOMALY_WEIGHT = 0.2       # General event detection
-    CAUSTIC_WEIGHT = 0.2       # Binary-specific features
+    FLAT_WEIGHT = 0.5
+    PSPL_WEIGHT = 0.5
+    ANOMALY_WEIGHT = 0.2
+    CAUSTIC_WEIGHT = 0.2
 
 # ============================================================================
 # TRAINING PARAMETERS
@@ -185,7 +185,6 @@ class ModelConfig:
 
 class TrainingConfig:
     """Training hyperparameters"""
-    
     # Optimization
     BATCH_SIZE = 64
     LEARNING_RATE = 1e-3
@@ -200,7 +199,7 @@ class TrainingConfig:
     
     # Gradient handling
     GRAD_CLIP = 1.0
-    USE_AMP = True             # Mixed precision training
+    USE_AMP = True
     
     # Early stopping
     PATIENCE = 15
@@ -221,9 +220,8 @@ class TrainingConfig:
 
 class EvaluationConfig:
     """Evaluation and analysis parameters"""
-    
-    # Impact parameter analysis
-    U0_THRESHOLD = 0.3         # Physical detection limit
+    # u₀ dependency analysis
+    U0_THRESHOLD = 0.3
     U0_BINS = 10
     
     # Early detection fractions
@@ -243,7 +241,6 @@ class EvaluationConfig:
 
 class SystemConfig:
     """System and path configuration"""
-    
     DATA_DIR = "../data"
     RESULTS_DIR = "../results"
     
@@ -262,10 +259,9 @@ class SystemConfig:
 # ============================================================================
 
 class ExperimentPresets:
-    """Pre-configured experimental setups for systematic thesis research"""
+    """Pre-configured experiment settings"""
     
     EXPERIMENTS = {
-        # Quick validation
         'quick_test': {
             'n_flat': 100,
             'n_pspl': 100,
@@ -275,36 +271,43 @@ class ExperimentPresets:
             'description': 'Quick validation test'
         },
         
-        # Main benchmark
         'baseline_1M': {
             'n_flat': 333000,
             'n_pspl': 333000,
             'n_binary': 334000,
             'binary_params': 'baseline',
             'epochs': 50,
-            'description': 'Main benchmark - realistic parameter distribution'
+            'description': 'Main benchmark (1M events, realistic mix)'
         },
         
-        # Binary topology suite
-        'distinct': {
+        'distinct_1M': {
+            'n_flat': 333000,
+            'n_pspl': 333000,
+            'n_binary': 334000,
+            'binary_params': 'distinct',
+            'epochs': 50,
+            'description': 'Clear caustics (train on easy cases)'
+        },
+        
+        'physical_limit': {
             'n_flat': 50000,
             'n_pspl': 50000,
             'n_binary': 50000,
-            'binary_params': 'distinct',
+            'binary_params': 'challenging',
             'epochs': 50,
-            'description': 'Clear caustic crossings'
+            'description': 'Test physical detection limits (includes u₀ > 0.3)'
         },
         
-        'planetary': {
+        'planetary_search': {
             'n_flat': 50000,
             'n_pspl': 50000,
             'n_binary': 50000,
             'binary_params': 'planetary',
             'epochs': 50,
-            'description': 'Exoplanet detection focus'
+            'description': 'Exoplanet detection optimization'
         },
         
-        'stellar': {
+        'stellar_binary': {
             'n_flat': 50000,
             'n_pspl': 50000,
             'n_binary': 50000,
@@ -313,85 +316,76 @@ class ExperimentPresets:
             'description': 'Equal-mass binary systems'
         },
         
-        'challenging': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
-            'binary_params': 'challenging',
-            'epochs': 50,
-            'description': 'Near physical detection limit'
-        },
-        
         # Cadence experiments
-        'cadence_05': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'cadence_dense': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'cadence_mask_prob': 0.05,
             'epochs': 50,
-            'description': 'Dense cadence (5% missing) - intensive follow-up'
+            'description': 'Dense cadence (5% missing, intensive follow-up)'
         },
         
-        'cadence_20': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'cadence_nominal': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'cadence_mask_prob': 0.20,
             'epochs': 50,
-            'description': 'LSST nominal cadence (20% missing)'
+            'description': 'Nominal cadence (20% missing, LSST standard)'
         },
         
-        'cadence_30': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'cadence_sparse': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'cadence_mask_prob': 0.30,
             'epochs': 50,
-            'description': 'Sparse cadence (30% missing) - poor weather'
+            'description': 'Sparse cadence (30% missing, poor weather)'
         },
         
-        'cadence_40': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'cadence_very_sparse': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'cadence_mask_prob': 0.40,
             'epochs': 50,
-            'description': 'Very sparse cadence (40% missing) - limited coverage'
+            'description': 'Very sparse (40% missing, limited coverage)'
         },
         
         # Photometric error experiments
-        'error_05': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'error_space': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'mag_error_std': 0.05,
             'epochs': 50,
-            'description': 'Low photometric error (0.05 mag) - space-based quality'
+            'description': 'Space-based quality (0.05 mag, Roman/HST)'
         },
         
-        'error_10': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'error_ground': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'mag_error_std': 0.10,
             'epochs': 50,
-            'description': 'Medium photometric error (0.10 mag) - ground-based quality'
+            'description': 'Ground-based quality (0.10 mag, LSST/OGLE)'
         },
         
-        'error_20': {
-            'n_flat': 50000,
-            'n_pspl': 50000,
-            'n_binary': 50000,
+        'error_poor': {
+            'n_flat': 100000,
+            'n_pspl': 100000,
+            'n_binary': 100000,
             'binary_params': 'baseline',
             'mag_error_std': 0.20,
             'epochs': 50,
-            'description': 'High photometric error (0.20 mag) - poor conditions'
+            'description': 'Poor quality (0.20 mag, degraded conditions)'
         }
     }
 
@@ -400,107 +394,101 @@ class ExperimentPresets:
 # ============================================================================
 
 def get_all_configs() -> Dict[str, Any]:
-    """Get all configuration as dictionary"""
+    """Get all configuration as a dictionary"""
     return {
-        'simulation': vars(SimulationConfig),
-        'flat': vars(FlatConfig),
-        'pspl': vars(PSPLConfig),
+        'simulation': SimulationConfig.__dict__,
+        'flat': FlatConfig.__dict__,
+        'pspl': PSPLConfig.__dict__,
         'binary': BinaryConfig.CONFIGS,
-        'model': vars(ModelConfig),
-        'training': vars(TrainingConfig),
-        'evaluation': vars(EvaluationConfig),
-        'system': vars(SystemConfig),
+        'model': ModelConfig.__dict__,
+        'training': TrainingConfig.__dict__,
+        'evaluation': EvaluationConfig.__dict__,
+        'system': SystemConfig.__dict__,
         'experiments': ExperimentPresets.EXPERIMENTS
     }
 
 def print_config_summary():
-    """Print human-readable configuration summary"""
+    """Print configuration summary"""
     print("="*70)
     print("CONFIGURATION SUMMARY")
     print("="*70)
     
     sim = SimulationConfig
-    print(f"\n📊 Temporal Sampling:")
-    print(f"  Window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
+    print(f"\n📊 Data Generation:")
+    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
     print(f"  Points: {sim.N_POINTS}")
-    
-    print(f"\n🔭 Observational Effects (Baseline):")
-    print(f"  Cadence: {sim.CADENCE_MASK_PROB*100:.0f}% missing")
-    print(f"  Photometry: {sim.MAG_ERROR_STD:.2f} mag")
-    print(f"  Baseline: [{sim.BASELINE_MIN}, {sim.BASELINE_MAX}] mag")
+    print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
+    print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
     
     pspl = PSPLConfig
     print(f"\n⭐ PSPL Parameters:")
-    print(f"  t0: [{pspl.T0_MIN}, {pspl.T0_MAX}] days (wide to prevent leakage)")
-    print(f"  u0: [{pspl.U0_MIN}, {pspl.U0_MAX}]")
+    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days")
+    print(f"  u₀: [{pspl.U0_MIN}, {pspl.U0_MAX}]")
     print(f"  tE: [{pspl.TE_MIN}, {pspl.TE_MAX}] days")
     
     print(f"\n🧬 Binary Configurations:")
     for name, cfg in BinaryConfig.CONFIGS.items():
-        print(f"  {name:12s}: t0=[{cfg['t0_range'][0]:4.0f}, {cfg['t0_range'][1]:4.0f}] days, "
-              f"expected accuracy={cfg['expected_accuracy']*100:.0f}%")
+        u0_range = cfg['u0_range']
+        print(f"  {name:12s}: u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
+              f"expected {cfg['expected_accuracy']*100:.0f}% accuracy")
     
     model = ModelConfig
     print(f"\n🤖 Model Architecture:")
     print(f"  d_model: {model.D_MODEL}")
     print(f"  nhead: {model.NHEAD}")
     print(f"  num_layers: {model.NUM_LAYERS}")
-    print(f"  dim_feedforward: {model.DIM_FEEDFORWARD}")
+    print(f"  dim_ff: {model.DIM_FEEDFORWARD}")
     print(f"  Parameters: ~100K")
     
     train = TrainingConfig
     print(f"\n🎯 Training:")
     print(f"  Batch size: {train.BATCH_SIZE} per GPU")
     print(f"  Learning rate: {train.LEARNING_RATE}")
-    print(f"  Mixed precision: {train.USE_AMP}")
+    print(f"  Warmup: {train.WARMUP_EPOCHS} epochs")
     print(f"  Max epochs: {train.MAX_EPOCHS}")
     
-    print(f"\n📊 Available Experiments: {len(ExperimentPresets.EXPERIMENTS)}")
     print("="*70)
 
 def validate_config():
     """Validate configuration consistency"""
     issues = []
     
-    # Check temporal window vs. event duration
     sim = SimulationConfig
     pspl = PSPLConfig
+    
     time_window = sim.TIME_MAX - sim.TIME_MIN
     max_event_duration = pspl.TE_MAX * 4
     
     if max_event_duration > time_window:
-        issues.append(f"⚠️  Event duration ({max_event_duration:.0f}d) > window ({time_window}d)")
+        issues.append(f"⚠️ Event duration ({max_event_duration:.0f}d) > window ({time_window}d)")
     
-    # Check model configuration
     model = ModelConfig
     if model.D_MODEL % model.NHEAD != 0:
-        issues.append(f"⚠️  d_model ({model.D_MODEL}) must be divisible by nhead ({model.NHEAD})")
+        issues.append(f"⚠️ d_model ({model.D_MODEL}) must be divisible by nhead ({model.NHEAD})")
     
-    # Check data splits
     train = TrainingConfig
     split_sum = train.TRAIN_RATIO + train.VAL_RATIO + train.TEST_RATIO
     if abs(split_sum - 1.0) > 0.001:
-        issues.append(f"⚠️  Data splits sum to {split_sum:.3f}, not 1.0")
+        issues.append(f"⚠️ Data splits sum to {split_sum:.3f}, not 1.0")
     
-    # Check t0 range
+    # Check t₀ range
     if abs(PSPLConfig.T0_MAX - PSPLConfig.T0_MIN) < 50:
-        issues.append(f"⚠️  t0 range too narrow: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}]")
+        issues.append(f"⚠️ t₀ range too narrow: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}]")
     
-    # Report
     if issues:
-        print("\n⚠️  Configuration Warnings:")
+        print("Configuration Issues Found:")
         for issue in issues:
             print(f"  {issue}")
         return False
     else:
-        print("\n✅ Configuration validated successfully!")
+        print("✅ Configuration validated successfully!")
         return True
 
 # ============================================================================
 # BACKWARDS COMPATIBILITY
 # ============================================================================
 
-# For existing code expecting old variable names
+# For existing code that expects old variable names
 N_POINTS = SimulationConfig.N_POINTS
 TIME_MIN = SimulationConfig.TIME_MIN
 TIME_MAX = SimulationConfig.TIME_MAX
@@ -524,6 +512,10 @@ BINARY_PARAM_SETS = {
     name: BinaryConfig.get_config(name)
     for name in BinaryConfig.CONFIGS.keys()
 }
+
+# Aliases for compatibility
+BINARY_PARAM_SETS['critical'] = BINARY_PARAM_SETS['distinct']
+BINARY_PARAM_SETS['overlapping'] = BINARY_PARAM_SETS['challenging']
 
 def get_config_summary():
     """Wrapper for backwards compatibility"""

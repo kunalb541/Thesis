@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Comprehensive Model Evaluation for 3-Class Classification
-==========================================================
-Classes: 0=Flat (no event), 1=PSPL, 2=Binary
+Model Evaluation for Microlensing Classification
+================================================
 
-Architectural Fix: Relative positional encoding prevents data leakage
-- Model only knows observation count, not absolute time
-- Realistic early detection performance
-- Full sequences preserve PSPL features
+Complete evaluation pipeline with:
+- Classification metrics (accuracy, precision, recall, F1)
+- ROC curves and confusion matrix
+- Calibration analysis
+- Impact parameter (u₀) dependency
+- Early detection performance
+- Real-time classification evolution
 
 Author: Kunal Bhatia
-Version: 12.0-beta - Architectural Fix Only
+Version: 13.0
 """
 
 import torch
@@ -87,35 +89,34 @@ class ComprehensiveEvaluator:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"\n{'='*70}")
-        print(f"COMPREHENSIVE MODEL EVALUATION")
-        print(f"{'='*70}")
-        print(f"🔬 Evaluating model:")
+        print("="*70)
+        print("MODEL EVALUATION")
+        print("="*70)
         print(f"Device: {self.device}")
-        print(f"Output: {self.output_dir}")
+        print(f"Output directory: {self.output_dir}")
         if n_samples:
             print(f"Sample limit: {n_samples} events")
         
-        print("\n📦 Loading model...")
+        print("\nLoading model...")
         self.model = self._load_model(model_path)
         self.model.to(self.device)
         self.model.eval()
-        print("✅ Model loaded successfully!")
+        print("Model loaded")
         
-        print("\n📊 Loading normalizer...")
+        print("\nLoading normalizer...")
         self.normalizer = self._load_normalizer(normalizer_path)
-        print("✅ Normalizer loaded successfully!")
+        print("Normalizer loaded")
         
-        print("\n📊 Loading data...")
+        print("\nLoading data...")
         self.X, self.y, self.params, self.timestamps, self.n_classes = self._load_data(data_path)
         
-        print("\n🔄 Normalizing data...")
+        print("\nNormalizing...")
         self.X_norm = self.normalizer.transform(self.X)
         
-        print(f"\n🔮 Getting predictions...")
+        print("Getting predictions...")
         self.predictions, self.confidences, self.probs = self._get_predictions()
         
-        print("\n📈 Computing metrics...")
+        print("Computing metrics...")
         self.metrics = self._compute_metrics()
         self._print_summary()
     
@@ -132,7 +133,7 @@ class ComprehensiveEvaluator:
             num_layers = config.get('num_layers', 4)
             dropout = config.get('dropout', 0.1)
             
-            print(f"   Using config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
+            print(f"   Config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
         else:
             print("   Warning: config.json not found, using defaults")
             d_model = 128
@@ -169,7 +170,7 @@ class ComprehensiveEvaluator:
         with open(normalizer_path, 'rb') as f:
             normalizer = pickle.load(f)
         
-        print(f"   Loaded: mean={normalizer.mean:.3f}, std={normalizer.std:.3f}")
+        print(f"   Mean={normalizer.mean:.3f}, Std={normalizer.std:.3f}")
         return normalizer
     
     def _load_data(self, data_path):
@@ -188,10 +189,10 @@ class ComprehensiveEvaluator:
         # Detect number of classes
         if 'n_classes' in data:
             n_classes = int(data['n_classes'])
-            print(f"   Dataset: {n_classes}-class")
+            print(f"   Dataset: {n_classes} classes")
         else:
             n_classes = len(np.unique(y))
-            print(f"   Dataset: {n_classes}-class (inferred)")
+            print(f"   Dataset: {n_classes} classes (inferred)")
         
         params = None
         if 'params_binary_json' in data:
@@ -209,7 +210,7 @@ class ComprehensiveEvaluator:
             params = params_dict
         
         if self.n_samples is not None and self.n_samples < len(X):
-            print(f"   ⚡ Sampling {self.n_samples} events...")
+            print(f"   Sampling {self.n_samples} events...")
             
             # Sample from each class
             indices_per_class = []
@@ -243,9 +244,9 @@ class ComprehensiveEvaluator:
             print(f"   Binary: {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
         
         if params is not None:
-            print(f"   ✅ Parameter data found (u0 analysis enabled)")
+            print(f"   Parameter data available (u0 analysis enabled)")
         else:
-            print("   ⚠️  No parameter data (u0 analysis disabled)")
+            print("   No parameter data (u0 analysis disabled)")
         
         return X, y, params, timestamps, n_classes
     
@@ -309,13 +310,9 @@ class ComprehensiveEvaluator:
     
     def _print_summary(self):
         print(f"\n{'='*70}")
-        print(f"EVALUATION RESULTS ({self.n_classes}-CLASS)")
+        print(f"EVALUATION RESULTS ({self.n_classes} classes)")
         print(f"{'='*70}")
         print(f"Overall Accuracy: {self.metrics['accuracy']*100:.2f}%")
-        print(f"\nExpected Performance (architectural fix):")
-        print(f"  Baseline (100% observed): 70-75%")
-        print(f"  Early (10% observed): ~40% (near random)")
-        print(f"  Early (50% observed): ~70%")
         print(f"\nPer-Class Performance:")
         
         if self.n_classes == 3:
@@ -581,14 +578,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_real_time_evolution(self, event_idx=None, event_type='binary'):
-        """
-        Plot real-time evolution showing ALL class probabilities
-        
-        For 3-class: Shows Flat, PSPL, Binary probabilities
-        For 2-class: Shows PSPL, Binary probabilities
-        
-        Realistic evolution with architectural fix
-        """
+        """Plot real-time classification evolution showing all class probabilities"""
         if event_idx is None:
             # Select a good example
             if self.n_classes == 3:
@@ -614,7 +604,7 @@ class ComprehensiveEvaluator:
         light_curve_norm = self.X_norm[event_idx]
         true_label = self.y[event_idx]
         
-        # Test more fractions for realistic curve
+        # Test multiple fractions
         fractions = np.linspace(0.1, 1.0, 10)
         
         if self.n_classes == 3:
@@ -704,11 +694,6 @@ class ComprehensiveEvaluator:
         ax2.grid(True, alpha=0.3)
         ax2.set_ylim([-0.05, 1.05])
         
-        # Add note about realistic evolution
-        ax2.text(0.02, 0.98, 'Realistic evolution (architectural fix)\nNo instant high confidence', 
-                transform=ax2.transAxes, fontsize=8, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
         # Bottom: Overall confidence
         ax3 = fig.add_subplot(gs[2])
         ax3.plot(completeness, confidences, 'd-', linewidth=3, markersize=8, color='purple', label='Overall Confidence')
@@ -734,12 +719,8 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_early_detection(self):
-        """
-        Compute early detection performance
-        
-        Realistic curve with architectural fix
-        """
-        print("  Computing early detection performance (realistic expectations)...")
+        """Compute performance vs. observation completeness"""
+        print("  Computing early detection performance...")
         
         fractions = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
         overall_accs = []
@@ -795,23 +776,23 @@ class ComprehensiveEvaluator:
             ax.plot(completeness, [r*100 for r in per_class_recalls[c]], 's-', 
                    linewidth=2.5, markersize=8, color=color, label=f'{name} Recall', alpha=0.7)
         
-        # Add realistic thresholds
+        # Add thresholds
         ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', linestyle='--', 
-                  linewidth=1, alpha=0.5, label='Random (3-class)' if self.n_classes == 3 else 'Random (2-class)')
+                  linewidth=1, alpha=0.5, label='Random' if self.n_classes == 3 else 'Random')
         ax.axhline(y=70, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='Target (70%)')
         ax.axvline(x=50, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='50% observed')
         
-        # Add annotations showing realistic performance
+        # Add annotations
         idx_10 = fractions.index(0.1)
         idx_50 = fractions.index(0.5)
         
-        ax.annotate(f'{overall_accs[idx_10]*100:.1f}%\n(near random)',
+        ax.annotate(f'{overall_accs[idx_10]*100:.1f}%',
                    xy=(10, overall_accs[idx_10]*100),
                    xytext=(15, overall_accs[idx_10]*100 + 5),
                    fontsize=9, fontweight='bold', color='red',
                    arrowprops=dict(arrowstyle='->', color='red'))
         
-        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%\n(realistic)',
+        ax.annotate(f'{overall_accs[idx_50]*100:.1f}%',
                    xy=(50, overall_accs[idx_50]*100),
                    xytext=(55, overall_accs[idx_50]*100 - 5),
                    fontsize=9, fontweight='bold', color='green',
@@ -819,12 +800,11 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Observation Completeness (%)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Performance (%)', fontsize=12, fontweight='bold')
-        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class)\nRealistic curve - architectural fix', 
+        ax.set_title(f'Early Detection Performance ({self.n_classes}-Class)', 
                      fontsize=14, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0, 105])
-    
         
         plt.tight_layout()
         
@@ -834,13 +814,13 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def analyze_u0_dependency(self, n_bins=10, threshold=0.3):
-        """Analyze u0 dependency (only for Binary class in 3-class system)"""
+        """Analyze u0 dependency (Binary class only)"""
         if self.params is None or 'binary' not in self.params:
-            print("\n⚠️  Skipping u0 analysis (no binary parameter data)")
+            print("\nSkipping u0 analysis (no binary parameter data)")
             return None
         
         print(f"\n{'='*70}")
-        print("u0 DEPENDENCY ANALYSIS (Binary Class Only)")
+        print("u0 DEPENDENCY ANALYSIS (Binary Class)")
         print(f"{'='*70}")
         
         binary_params = self.params['binary']
@@ -947,7 +927,7 @@ class ComprehensiveEvaluator:
                           u0_threshold=0.3, u0_bins=10):
         """Generate all visualizations"""
         print(f"\n{'='*70}")
-        print(f"GENERATING ALL VISUALIZATIONS ({self.n_classes}-CLASS)")
+        print(f"GENERATING VISUALIZATIONS ({self.n_classes} classes)")
         print(f"{'='*70}\n")
         
         print("1. ROC Curves...")
@@ -993,7 +973,7 @@ class ComprehensiveEvaluator:
                 print(f"  ✓ Saved: {u0_report_path.name}")
         
         print(f"\n{'='*70}")
-        print(f"✅ ALL VISUALIZATIONS SAVED TO: {self.output_dir}")
+        print(f"All visualizations saved to: {self.output_dir}")
         print(f"{'='*70}\n")
     
     def save_results(self):
@@ -1007,20 +987,19 @@ class ComprehensiveEvaluator:
             'n_samples': int(len(self.y)),
             'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
-            'has_u0_analysis': self.params is not None and 'binary' in self.params,
-            'architecture': 'v12'
+            'has_u0_analysis': self.params is not None and 'binary' in self.params
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
         
-        print(f"📄 Results saved to: {output_path}")
+        print(f"Results saved to: {output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive evaluation'
+        description='Comprehensive model evaluation'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -1040,7 +1019,7 @@ def main():
     exp_dirs = sorted(results_dir.glob(f'{args.experiment_name}_*'))
     
     if not exp_dirs:
-        print(f"❌ No experiment found matching: {args.experiment_name}")
+        print(f"No experiment found matching: {args.experiment_name}")
         return
     
     exp_dir = exp_dirs[-1]
@@ -1048,7 +1027,7 @@ def main():
     normalizer_path = exp_dir / 'normalizer.pkl'
     
     if not model_path.exists():
-        print(f"❌ Model not found: {model_path}")
+        print(f"Model not found: {model_path}")
         return
     
     print(f"Using experiment: {exp_dir.name}")
@@ -1074,7 +1053,7 @@ def main():
     )
     
     evaluator.save_results()
-    print("\n🎉 Evaluation complete!")
+    print("\nEvaluation complete!")
 
 
 if __name__ == '__main__':

@@ -21,8 +21,7 @@ Auxiliary Tasks (Multi-Task Learning):
 - Confidence Estimation: Self-assessment of prediction quality
 
 Author: Kunal Bhatia
-Institution: University of Heidelberg
-Thesis: From Light Curves to Labels - Machine Learning in Microlensing
+Version: 13.0
 """
 
 import torch

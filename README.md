@@ -362,6 +362,7 @@ python evaluate.py --experiment_name baseline_1M \
 - 0.20 mag: 65-70% accuracy
 
 **Finding**: Caustic features robust to moderate noise; space-based quality provides modest benefit
+
 ---
 
 
