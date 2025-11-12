@@ -183,6 +183,7 @@ Auxiliary Heads [B, 1] each → BCEWithLogits Loss:
 | Distinct | 85-90% | 90-95% | 80-85% | 85-90% | Clear caustics |
 | Planetary | 75-80% | 85-90% | 70-75% | 75-80% | Exoplanet focus |
 | Challenging | 60-65% | 75-80% | 55-60% | 55-65% | Near physical limit |
+| Stellar | 75-80% | 85-90% | 70-75% | 75-80% | Stellar Binaries focus |
 
 ### Impact Parameter Dependency (Binary Class)
 
