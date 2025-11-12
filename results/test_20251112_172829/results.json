@@ -1,7 +1,0 @@
-{
-  "test_acc": 0.9475555419921875,
-  "test_loss": 0.14158697426319122,
-  "best_val_acc": 0.9486666917800903,
-  "version": "12.0-beta-optimized",
-  "total_epochs": 10
-}
