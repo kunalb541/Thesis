@@ -415,7 +415,7 @@ def validate_config():
         return False
     else:
         print("✅ Configuration validated successfully!")
-        print("✅ Ready for v12.0-beta training (architectural fix)!")
+        print("✅ Ready!")
         return True
 
 # ============================================================================

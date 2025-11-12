@@ -8,7 +8,7 @@ NEW in v11.0: Added Flat class (no event, just baseline)
 Classes: 0=Flat, 1=PSPL, 2=Binary
 
 Author: Kunal Bhatia
-Version: 12.0 - Three-Class Classification
+Version: 12.0-beta - Three-Class Classification
 """
 
 import numpy as np
@@ -420,7 +420,7 @@ def main():
         return
     
     print("="*70)
-    print("THREE-CLASS MICROLENSING SIMULATION v11.0")
+    print("THREE-CLASS MICROLENSING SIMULATION")
     print("="*70)
     print(f"Flat events: {args.n_flat}")
     print(f"PSPL events: {args.n_pspl}")
