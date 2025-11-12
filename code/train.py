@@ -242,7 +242,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             if 'pspl' in outputs:
                 pspl_target = (y == 1).float()
                 pspl_loss = F.binary_cross_entropy_with_logits(outputs['pspl'], pspl_target)
-                loss = loss + 0.5 * pspl_loss  # HIGH WEIGHT!
+                loss = loss + 0.2 * pspl_loss  # HIGH WEIGHT!
                 pspl_loss_total += pspl_loss.item()
             else:
                 pspl_loss = torch.tensor(0.0)
@@ -268,7 +268,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
                 caustic_loss = F.binary_cross_entropy_with_logits(outputs['caustic'], caustic_target)
-                loss = loss + 0.2 * caustic_loss
+                loss = loss + 0.4 * caustic_loss
                 caustic_loss_total += caustic_loss.item()
             else:
                 caustic_loss = torch.tensor(0.0)
