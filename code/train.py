@@ -103,10 +103,7 @@ class MicrolensingDataset(Dataset):
         
         # Pre-compute lengths
         self.lengths = np.sum(X != pad_value, axis=1).astype(np.int32)
-        
-        print(f"      Dataset: {len(X)} events")
-        print(f"      Valid observations: {self.lengths.mean():.0f} ± {self.lengths.std():.0f}")
-    
+         
     def __len__(self):
         return len(self.y)
     
@@ -230,7 +227,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 pspl_loss = F.binary_cross_entropy_with_logits(
                     outputs['pspl'], pspl_target
                 )
-                loss = loss + 0.5 * pspl_loss
+                loss = loss + 0.7 * pspl_loss
                 aux_losses['pspl'] += pspl_loss.item()
             
             if 'anomaly' in outputs:
@@ -238,7 +235,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 anomaly_loss = F.binary_cross_entropy_with_logits(
                     outputs['anomaly'], anomaly_target
                 )
-                loss = loss + 0.2 * anomaly_loss
+                loss = loss + 0.3 * anomaly_loss
                 aux_losses['anomaly'] += anomaly_loss.item()
             
             if 'caustic' in outputs:
@@ -246,7 +243,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 caustic_loss = F.binary_cross_entropy_with_logits(
                     outputs['caustic'], caustic_target
                 )
-                loss = loss + 0.2 * caustic_loss
+                loss = loss + 0.8 * caustic_loss
                 aux_losses['caustic'] += caustic_loss.item()
         
         # Check for NaN/Inf

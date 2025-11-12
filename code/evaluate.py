@@ -489,7 +489,7 @@ class ComprehensiveEvaluator:
         print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
-    def plot_example_grid(self, n_per_class=3):
+    def plot_example_grid(self, n_per_class=4):
         """Plot example grid with 3-class results"""
         print(f"  Generating example plots...")
         
