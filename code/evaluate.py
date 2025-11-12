@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-Distributed Model Evaluation for Microlensing Classification
-============================================================
+Model Evaluation for Microlensing Classification
+================================================
 
-Complete evaluation pipeline with DDP support for multi-GPU evaluation.
-
-Features:
-- Full DDP support with proper metric gathering
+Complete evaluation pipeline with:
 - Classification metrics (accuracy, precision, recall, F1)
 - ROC curves and confusion matrix
 - Calibration analysis
@@ -15,19 +12,13 @@ Features:
 - Real-time classification evolution
 
 Author: Kunal Bhatia
-Version: 14.4 (Bug fixes - dtype, parameter indexing, memory management, validation, SAMPLING FIX)
+Version: 13.0
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for cluster
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
@@ -39,58 +30,14 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, roc_curve, confusion_matrix, classification_report
 )
-import os
-import warnings
-warnings.filterwarnings("ignore")
 
 import sys
-from transformer import MicrolensingTransformer
+from transformer import MicrolensingTransformer, count_parameters
 
 plt.style.use('seaborn-v0_8-paper')
 sns.set_palette("husl")
 plt.rcParams['figure.dpi'] = 300
 plt.rcParams['font.size'] = 10
-
-# Suppress NCCL warnings
-os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
-os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
-os.environ['NCCL_TIMEOUT'] = '1800'
-os.environ['NCCL_DEBUG'] = 'WARN'
-
-
-def count_parameters(model):
-    """Count trainable parameters in model"""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def setup_distributed():
-    """Initialize distributed training"""
-    rank = int(os.environ.get('RANK', 0))
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    world_size = int(os.environ.get('WORLD_SIZE', 1))
-    
-    if world_size > 1:
-        if rank == 0:
-            print(f"[Rank {rank}] Initializing process group...")
-        dist.init_process_group(
-            backend='nccl',
-            init_method='env://'
-        )
-        torch.cuda.set_device(local_rank)
-    
-    return rank, local_rank, world_size
-
-
-def cleanup_distributed():
-    """Clean up distributed training"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def print_rank0(message, rank=0):
-    """Print only from rank 0"""
-    if rank == 0:
-        print(message)
 
 
 class StableNormalizer:
@@ -131,74 +78,47 @@ class StableNormalizer:
         return self.fit(X).transform(X)
 
 
-class EvaluationDataset(Dataset):
-    """Simple dataset for evaluation with proper dtype handling"""
-    
-    def __init__(self, X, y):
-        # FIX: Ensure float32 dtype
-        self.X = torch.from_numpy(X).float()
-        self.y = torch.from_numpy(y).long()
-    
-    def __len__(self):
-        return len(self.y)
-    
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
-
-
 class ComprehensiveEvaluator:
-    """Complete evaluation with DDP support"""
+    """Complete evaluation with 3-class support"""
     
     def __init__(self, model_path, normalizer_path, data_path, output_dir, 
-                 rank=0, local_rank=0, world_size=1, batch_size=128, n_samples=None):
-        self.rank = rank
-        self.local_rank = local_rank
-        self.world_size = world_size
-        self.device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+                 device='cuda', batch_size=128, n_samples=None):
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.batch_size = batch_size
         self.n_samples = n_samples
         self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        if rank == 0:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        print_rank0("="*70, rank)
-        print_rank0("MODEL EVALUATION (DDP-READY)", rank)
-        print_rank0("="*70, rank)
-        print_rank0(f"GPUs: {world_size}", rank)
-        print_rank0(f"Device: {self.device}", rank)
-        print_rank0(f"Output directory: {self.output_dir}", rank)
+        print("="*70)
+        print("MODEL EVALUATION")
+        print("="*70)
+        print(f"Device: {self.device}")
+        print(f"Output directory: {self.output_dir}")
         if n_samples:
-            print_rank0(f"Sample limit: {n_samples} events", rank)
+            print(f"Sample limit: {n_samples} events")
         
-        print_rank0("\nLoading model...", rank)
+        print("\nLoading model...")
         self.model = self._load_model(model_path)
         self.model.to(self.device)
         self.model.eval()
-        print_rank0("Model loaded", rank)
+        print("Model loaded")
         
-        print_rank0("\nLoading normalizer...", rank)
+        print("\nLoading normalizer...")
         self.normalizer = self._load_normalizer(normalizer_path)
-        print_rank0("Normalizer loaded", rank)
+        print("Normalizer loaded")
         
-        print_rank0("\nLoading data...", rank)
+        print("\nLoading data...")
         self.X, self.y, self.params, self.timestamps, self.n_classes = self._load_data(data_path)
         
-        print_rank0("\nNormalizing...", rank)
-        # FIX: Ensure float32 dtype after normalization
-        self.X_norm = self.normalizer.transform(self.X).astype(np.float32)
+        print("\nNormalizing...")
+        self.X_norm = self.normalizer.transform(self.X)
         
-        print_rank0("Getting predictions...", rank)
+        print("Getting predictions...")
         self.predictions, self.confidences, self.probs = self._get_predictions()
         
-        # Synchronize before computing metrics
-        if world_size > 1:
-            dist.barrier()
-        
-        if rank == 0:
-            print("\nComputing metrics...")
-            self.metrics = self._compute_metrics()
-            self._print_summary()
+        print("Computing metrics...")
+        self.metrics = self._compute_metrics()
+        self._print_summary()
     
     def _load_model(self, model_path):
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
@@ -213,11 +133,9 @@ class ComprehensiveEvaluator:
             num_layers = config.get('num_layers', 4)
             dropout = config.get('dropout', 0.1)
             
-            if self.rank == 0:
-                print(f"   Config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
+            print(f"   Config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
         else:
-            if self.rank == 0:
-                print("   Warning: config.json not found, using defaults")
+            print("   Warning: config.json not found, using defaults")
             d_model = 128
             nhead = 4
             num_layers = 4
@@ -238,9 +156,7 @@ class ComprehensiveEvaluator:
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         
         model.load_state_dict(state_dict)
-        
-        if self.rank == 0:
-            print(f"   Parameters: {count_parameters(model):,}")
+        print(f"   Parameters: {count_parameters(model):,}")
         
         return model
     
@@ -248,15 +164,13 @@ class ComprehensiveEvaluator:
         normalizer_path = Path(normalizer_path)
         
         if not normalizer_path.exists():
-            if self.rank == 0:
-                print(f"   Warning: Normalizer not found, creating default")
+            print(f"   Warning: Normalizer not found, creating default")
             return StableNormalizer(pad_value=-1.0)
         
         with open(normalizer_path, 'rb') as f:
             normalizer = pickle.load(f)
         
-        if self.rank == 0:
-            print(f"   Mean={normalizer.mean:.3f}, Std={normalizer.std:.3f}")
+        print(f"   Mean={normalizer.mean:.3f}, Std={normalizer.std:.3f}")
         return normalizer
     
     def _load_data(self, data_path):
@@ -267,24 +181,18 @@ class ComprehensiveEvaluator:
         if X.ndim == 3:
             X = X.squeeze(1)
         
-        # FIX: Ensure float32 from the start
-        X = X.astype(np.float32)
-        y = y.astype(np.int64)
-        
         if 'timestamps' in data:
-            timestamps = data['timestamps'].astype(np.float32)
+            timestamps = data['timestamps']
         else:
-            timestamps = np.linspace(-100, 100, X.shape[1], dtype=np.float32)
+            timestamps = np.linspace(-100, 100, X.shape[1])
         
         # Detect number of classes
         if 'n_classes' in data:
             n_classes = int(data['n_classes'])
-            if self.rank == 0:
-                print(f"   Dataset: {n_classes} classes")
+            print(f"   Dataset: {n_classes} classes")
         else:
             n_classes = len(np.unique(y))
-            if self.rank == 0:
-                print(f"   Dataset: {n_classes} classes (inferred)")
+            print(f"   Dataset: {n_classes} classes (inferred)")
         
         params = None
         if 'params_binary_json' in data:
@@ -300,169 +208,57 @@ class ComprehensiveEvaluator:
                 params_dict['flat'] = params_flat
             
             params = params_dict
-            
-            # FIX: Validate parameter alignment BEFORE sampling
-            if self.rank == 0:
-                print("\n   Validating parameter alignment (before sampling):")
-                for key in params.keys():
-                    if key in ['binary', 'pspl', 'flat']:
-                        if n_classes == 3:
-                            class_id = {'flat': 0, 'pspl': 1, 'binary': 2}.get(key)
-                        else:
-                            class_id = {'pspl': 0, 'binary': 1}.get(key)
-                        
-                        if class_id is not None:
-                            expected_count = (data['y'] == class_id).sum()
-                            actual_count = len(params[key])
-                            status = "✓" if expected_count == actual_count else "✗ MISMATCH"
-                            print(f"     {status} {key}: expected {expected_count}, got {actual_count}")
-                            
-                            if expected_count != actual_count:
-                                print(f"     WARNING: Parameter count mismatch detected!")
         
-        # FIX: Proper sampling that maintains parameter alignment AND gets exact count
         if self.n_samples is not None and self.n_samples < len(X):
-            if self.rank == 0:
-                print(f"\n   Sampling {self.n_samples} events...")
+            print(f"   Sampling {self.n_samples} events...")
             
-            # Set seed for reproducibility across ranks
-            np.random.seed(42)
-            
-            # CRITICAL FIX: Distribute remainder to ensure exactly n_samples total
-            base_per_class = self.n_samples // n_classes
-            extra = self.n_samples % n_classes  # Handle remainder
-            
+            # Sample from each class
             indices_per_class = []
             for c in range(n_classes):
                 class_mask = y == c
-                # First 'extra' classes get one additional sample
-                n_class = base_per_class + (1 if c < extra else 0)
-                n_class = min(n_class, class_mask.sum())
+                n_class = min(self.n_samples // n_classes, class_mask.sum())
                 class_indices = np.random.choice(np.where(class_mask)[0], n_class, replace=False)
                 indices_per_class.append(class_indices)
             
             all_indices = np.concatenate(indices_per_class)
-            # Ensure we have exactly n_samples (trim if needed due to class size limits)
-            if len(all_indices) > self.n_samples:
-                all_indices = all_indices[:self.n_samples]
             np.random.shuffle(all_indices)
             
-            # Store original data for parameter mapping
-            original_y = data['y'].copy()
-            
-            # Sample X and y
             X = X[all_indices]
             y = y[all_indices]
             
-            # FIX: Properly subset parameters based on sampled indices
             if params is not None:
-                new_params = {}
-                
-                # Build class-to-param-index mapping for original data
-                class_param_indices = {}
                 for key in params.keys():
                     if key in ['binary', 'pspl', 'flat']:
-                        # Get the class ID
-                        if n_classes == 3:
-                            class_id = {'flat': 0, 'pspl': 1, 'binary': 2}.get(key)
-                        else:
-                            class_id = {'pspl': 0, 'binary': 1}.get(key)
-                        
-                        if class_id is not None:
-                            # Get ALL indices for this class in original dataset
-                            original_class_indices = np.where(original_y == class_id)[0]
-                            # Create mapping: global_index → position_in_class_params
-                            class_param_indices[key] = {
-                                global_idx: param_idx 
-                                for param_idx, global_idx in enumerate(original_class_indices)
-                            }
-                
-                # Now map sampled indices to parameters
-                for key in params.keys():
-                    if key in class_param_indices:
-                        param_indices = []
-                        for sample_idx in all_indices:
-                            if sample_idx in class_param_indices[key]:
-                                param_idx = class_param_indices[key][sample_idx]
-                                param_indices.append(param_idx)
-                        
-                        # Select the corresponding parameters
-                        if param_indices:
-                            new_params[key] = [params[key][i] for i in param_indices]
-                        else:
-                            new_params[key] = []
-                
-                params = new_params
+                        class_id = {'flat': 0, 'pspl': 1, 'binary': 2}.get(key, -1)
+                        if class_id >= 0:
+                            class_mask = y == class_id
+                            params[key] = [params[key][i] for i in range(len(params[key])) if i < class_mask.sum()]
         
-        if self.rank == 0:
-            print(f"\n   Final dataset statistics:")
-            print(f"   Events: {len(X)}")
-            if n_classes == 3:
-                print(f"   Flat:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
-                print(f"   PSPL:   {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
-                print(f"   Binary: {(y == 2).sum()} ({(y == 2).mean()*100:.1f}%)")
-            else:
-                print(f"   PSPL:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
-                print(f"   Binary: {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
-            
-            if params is not None:
-                print(f"\n   Parameter data available (u0 analysis enabled)")
-                # FIX: Validate parameter alignment AFTER sampling
-                print("   Validating parameter alignment (after sampling):")
-                for key in params.keys():
-                    if key in ['binary', 'pspl', 'flat']:
-                        if n_classes == 3:
-                            class_id = {'flat': 0, 'pspl': 1, 'binary': 2}.get(key)
-                        else:
-                            class_id = {'pspl': 0, 'binary': 1}.get(key)
-                        
-                        if class_id is not None:
-                            n_events = (y == class_id).sum()
-                            n_params = len(params[key])
-                            status = "✓" if n_events == n_params else "✗ MISMATCH"
-                            print(f"     {status} {key}: {n_events} events, {n_params} params")
-                            
-                            if n_events != n_params:
-                                print(f"     ERROR: Parameter alignment broken after sampling!")
-                                print(f"     This will cause incorrect u0 analysis.")
-            else:
-                print("   No parameter data (u0 analysis disabled)")
+        print(f"   Events: {len(X)}")
+        if n_classes == 3:
+            print(f"   Flat:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
+            print(f"   PSPL:   {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
+            print(f"   Binary: {(y == 2).sum()} ({(y == 2).mean()*100:.1f}%)")
+        else:
+            print(f"   PSPL:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
+            print(f"   Binary: {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
+        
+        if params is not None:
+            print(f"   Parameter data available (u0 analysis enabled)")
+        else:
+            print("   No parameter data (u0 analysis disabled)")
         
         return X, y, params, timestamps, n_classes
     
     def _get_predictions(self):
-        """Get predictions using distributed data loading"""
-        # FIX: Dataset now handles dtype conversion internally
-        dataset = EvaluationDataset(self.X_norm, self.y)
-        
-        if self.world_size > 1:
-            sampler = DistributedSampler(
-                dataset, num_replicas=self.world_size, rank=self.rank, shuffle=False
-            )
-        else:
-            sampler = None
-        
-        loader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            sampler=sampler,
-            num_workers=4,
-            pin_memory=True,
-            shuffle=False
-        )
-        
-        local_predictions = []
-        local_confidences = []
-        local_probs = []
+        predictions = []
+        confidences = []
+        all_probs = []
         
         with torch.no_grad():
-            if self.rank == 0:
-                pbar = tqdm(loader, desc="   Evaluating")
-            else:
-                pbar = loader
-            
-            for batch_idx, (x_batch, y_batch) in enumerate(pbar):
-                x_batch = x_batch.to(self.device, non_blocking=True)
+            for i in tqdm(range(0, len(self.X_norm), self.batch_size), desc="   Evaluating"):
+                batch_end = min(i + self.batch_size, len(self.X_norm))
+                x_batch = torch.tensor(self.X_norm[i:batch_end], dtype=torch.float32).to(self.device)
                 
                 output = self.model(x_batch, return_all=False)
                 logits = output['logits'] if 'logits' in output else output['binary']
@@ -471,75 +267,13 @@ class ComprehensiveEvaluator:
                 preds = probs.argmax(axis=1)
                 confs = probs.max(axis=1)
                 
-                local_predictions.extend(preds)
-                local_confidences.extend(confs)
-                local_probs.append(probs)
+                predictions.extend(preds)
+                confidences.extend(confs)
+                all_probs.append(probs)
         
-        local_predictions = np.array(local_predictions)
-        local_confidences = np.array(local_confidences)
-        local_probs = np.vstack(local_probs)
-        
-        # FIX: Gather predictions only to rank 0 to save memory
-        if self.world_size > 1:
-            # Gather sizes from all ranks
-            local_size = torch.tensor([len(local_predictions)], device=self.device)
-            all_sizes = [torch.zeros(1, dtype=torch.long, device=self.device) 
-                        for _ in range(self.world_size)]
-            dist.all_gather(all_sizes, local_size)
-            all_sizes = [int(s.item()) for s in all_sizes]
-            
-            # Gather to rank 0 only
-            if self.rank == 0:
-                # Prepare receiving buffers on rank 0
-                gathered_preds = [torch.zeros(s, dtype=torch.long, device=self.device) 
-                                 for s in all_sizes]
-                gathered_confs = [torch.zeros(s, dtype=torch.float32, device=self.device) 
-                                 for s in all_sizes]
-                gathered_probs = [torch.zeros(s, self.n_classes, dtype=torch.float32, device=self.device) 
-                                 for s in all_sizes]
-            else:
-                gathered_preds = None
-                gathered_confs = None
-                gathered_probs = None
-            
-            # Gather predictions
-            local_preds_tensor = torch.from_numpy(local_predictions).long().to(self.device)
-            dist.gather(local_preds_tensor, gathered_preds, dst=0)
-            
-            # Gather confidences
-            local_confs_tensor = torch.from_numpy(local_confidences).float().to(self.device)
-            dist.gather(local_confs_tensor, gathered_confs, dst=0)
-            
-            # Gather probabilities
-            local_probs_tensor = torch.from_numpy(local_probs).float().to(self.device)
-            dist.gather(local_probs_tensor, gathered_probs, dst=0)
-            
-            # FIX: Free memory on non-zero ranks immediately
-            if self.rank != 0:
-                del local_preds_tensor, local_confs_tensor, local_probs_tensor
-                del local_predictions, local_confidences, local_probs
-                torch.cuda.empty_cache()
-                # Return dummy values for non-rank-0 processes
-                return np.array([]), np.array([]), np.array([[]])
-            
-            # Combine on rank 0
-            predictions = torch.cat(gathered_preds).cpu().numpy()
-            confidences = torch.cat(gathered_confs).cpu().numpy()
-            probs = torch.cat(gathered_probs).cpu().numpy()
-            
-            # FIX: Free gathered tensors
-            del gathered_preds, gathered_confs, gathered_probs
-            del local_preds_tensor, local_confs_tensor, local_probs_tensor
-            torch.cuda.empty_cache()
-        else:
-            predictions = local_predictions
-            confidences = local_confidences
-            probs = local_probs
-        
-        return predictions, confidences, probs
+        return np.array(predictions), np.array(confidences), np.vstack(all_probs)
     
     def _compute_metrics(self):
-        """Compute metrics (only on rank 0)"""
         # Basic metrics
         accuracy = accuracy_score(self.y, self.predictions)
         
@@ -575,7 +309,6 @@ class ComprehensiveEvaluator:
         return metrics
     
     def _print_summary(self):
-        """Print summary (only on rank 0)"""
         print(f"\n{'='*70}")
         print(f"EVALUATION RESULTS ({self.n_classes} classes)")
         print(f"{'='*70}")
@@ -598,10 +331,7 @@ class ComprehensiveEvaluator:
         print(f"{'='*70}\n")
     
     def plot_roc_curve(self):
-        """Plot ROC curves (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Plot ROC curves (one-vs-rest for multi-class)"""
         fig, ax = plt.subplots(figsize=(10, 8))
         
         if self.n_classes == 3:
@@ -638,10 +368,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_confusion_matrix(self):
-        """Plot confusion matrix (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Plot confusion matrix for n-class classification"""
         cm = np.array(self.metrics['confusion_matrix'])
         
         if self.n_classes == 3:
@@ -676,10 +403,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_confidence_distribution(self):
-        """Plot confidence distribution (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Plot confidence distribution by correctness"""
         correct = self.predictions == self.y
         
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -703,10 +427,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_calibration_curve(self):
-        """Plot calibration curve (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Plot calibration curve"""
         correct = self.predictions == self.y
         
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -769,10 +490,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_example_grid(self, n_per_class=3):
-        """Plot example grid (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Plot example grid with 3-class results"""
         print(f"  Generating example plots...")
         
         correct = self.predictions == self.y
@@ -860,10 +578,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_real_time_evolution(self, event_idx=None, event_type='binary'):
-        """Plot real-time classification evolution (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Plot real-time classification evolution showing all class probabilities"""
         if event_idx is None:
             # Select a good example
             if self.n_classes == 3:
@@ -905,7 +620,7 @@ class ComprehensiveEvaluator:
                 partial_curve = np.full(1500, -1.0, dtype=np.float32)
                 partial_curve[:n_points] = light_curve_norm[:n_points]
                 
-                x = torch.from_numpy(partial_curve).float().unsqueeze(0).to(self.device)
+                x = torch.from_numpy(partial_curve).unsqueeze(0).to(self.device)
                 output = self.model(x, return_all=False)
                 logits = output['logits'] if 'logits' in output else output['binary']
                 probs = F.softmax(logits, dim=1).cpu().numpy()[0]
@@ -1004,10 +719,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_early_detection(self):
-        """Compute performance vs. observation completeness (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Compute performance vs. observation completeness"""
         print("  Computing early detection performance...")
         
         fractions = [0.1, 0.167, 0.25, 0.5, 0.67, 0.833, 1.0]
@@ -1026,7 +738,7 @@ class ComprehensiveEvaluator:
                     partial_curves_np = np.full((batch_size_actual, 1500), -1.0, dtype=np.float32)
                     partial_curves_np[:, :n_points] = self.X_norm[i:batch_end, :n_points]
                     
-                    x_batch = torch.from_numpy(partial_curves_np).float().to(self.device)
+                    x_batch = torch.from_numpy(partial_curves_np).to(self.device)
                     
                     output = self.model(x_batch, return_all=False)
                     logits = output['logits'] if 'logits' in output else output['binary']
@@ -1102,10 +814,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def analyze_u0_dependency(self, n_bins=10, threshold=0.3):
-        """Analyze u0 dependency (Binary class only, only on rank 0)"""
-        if self.rank != 0:
-            return None
-        
+        """Analyze u0 dependency (Binary class only)"""
         if self.params is None or 'binary' not in self.params:
             print("\nSkipping u0 analysis (no binary parameter data)")
             return None
@@ -1118,45 +827,23 @@ class ComprehensiveEvaluator:
         
         if self.n_classes == 3:
             binary_mask = self.y == 2
-            binary_class_id = 2
         else:
             binary_mask = self.y == 1
-            binary_class_id = 1
-        
-        # FIX: Validate parameter count matches binary event count
-        n_binary_events = binary_mask.sum()
-        n_binary_params = len(binary_params)
-        
-        if n_binary_events != n_binary_params:
-            print(f"ERROR: Binary event count ({n_binary_events}) != param count ({n_binary_params})")
-            print("This indicates a parameter indexing issue.")
-            print("u0 analysis cannot proceed - parameter indices are misaligned with events.")
-            return None
         
         u0_values = np.array([p['u_0'] for p in binary_params])
-        
-        # Validate u0 values are reasonable
-        if u0_values.min() < 0 or u0_values.max() > 10:
-            print(f"WARNING: Unusual u0 range detected: [{u0_values.min():.3f}, {u0_values.max():.3f}]")
-            print("Expected u0 ∈ [0, ~2]. Check parameter extraction.")
-        
         u0_bins = np.linspace(u0_values.min(), u0_values.max(), n_bins + 1)
         u0_centers = (u0_bins[:-1] + u0_bins[1:]) / 2
         
         accuracies = []
         counts = []
         
-        # Get predictions for binary events only
-        binary_predictions = self.predictions[binary_mask]
-        binary_true = self.y[binary_mask]
-        
         for i in range(n_bins):
             u0_low, u0_high = u0_bins[i], u0_bins[i+1]
             in_bin = (u0_values >= u0_low) & (u0_values < u0_high)
             
             if in_bin.sum() > 0:
-                bin_true = binary_true[in_bin]
-                bin_pred = binary_predictions[in_bin]
+                bin_true = self.y[binary_mask][in_bin]
+                bin_pred = self.predictions[binary_mask][in_bin]
                 acc = accuracy_score(bin_true, bin_pred)
                 accuracies.append(acc)
                 counts.append(int(in_bin.sum()))
@@ -1176,9 +863,6 @@ class ComprehensiveEvaluator:
         print(f"  Below threshold (u₀ < {threshold}): {n_below} ({n_below/len(u0_values)*100:.1f}%)")
         print(f"  Above threshold (u₀ ≥ {threshold}): {n_above} ({n_above/len(u0_values)*100:.1f}%)")
         
-        if n_below < 10:
-            print(f"  WARNING: Very few events below threshold ({n_below}). Results may be unreliable.")
-        
         return {
             'u0_bins': [float(x) for x in u0_bins],
             'u0_centers': [float(x) for x in u0_centers],
@@ -1192,8 +876,8 @@ class ComprehensiveEvaluator:
         }
     
     def plot_u0_dependency(self, u0_results, threshold=0.3):
-        """Plot u0 dependency (only on rank 0)"""
-        if self.rank != 0 or u0_results is None:
+        """Plot u0 dependency"""
+        if u0_results is None:
             return
         
         u0_centers = u0_results['u0_centers']
@@ -1241,10 +925,7 @@ class ComprehensiveEvaluator:
     
     def generate_all_plots(self, include_u0=True, include_early=False, n_evolution_per_type=3, 
                           u0_threshold=0.3, u0_bins=10):
-        """Generate all visualizations (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Generate all visualizations"""
         print(f"\n{'='*70}")
         print(f"GENERATING VISUALIZATIONS ({self.n_classes} classes)")
         print(f"{'='*70}\n")
@@ -1296,10 +977,7 @@ class ComprehensiveEvaluator:
         print(f"{'='*70}\n")
     
     def save_results(self):
-        """Save evaluation results (only on rank 0)"""
-        if self.rank != 0:
-            return
-        
+        """Save evaluation results"""
         results = {
             'metrics': {k: float(v) if isinstance(v, (np.floating, float)) else v 
                        for k, v in self.metrics.items() if k not in ['classification_report', 'confusion_matrix']},
@@ -1321,7 +999,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive model evaluation with DDP support'
+        description='Comprehensive model evaluation'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -1333,19 +1011,15 @@ def main():
                        help='Compute early detection curve')
     parser.add_argument('--n_evolution_per_type', type=int, default=3)
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--no_cuda', action='store_true')
     
     args = parser.parse_args()
     
-    # Setup distributed
-    rank, local_rank, world_size = setup_distributed()
-    
-    # Find experiment directory
     results_dir = Path('../results')
     exp_dirs = sorted(results_dir.glob(f'{args.experiment_name}_*'))
     
     if not exp_dirs:
-        print_rank0(f"No experiment found matching: {args.experiment_name}", rank)
-        cleanup_distributed()
+        print(f"No experiment found matching: {args.experiment_name}")
         return
     
     exp_dir = exp_dirs[-1]
@@ -1353,35 +1027,23 @@ def main():
     normalizer_path = exp_dir / 'normalizer.pkl'
     
     if not model_path.exists():
-        print_rank0(f"Model not found: {model_path}", rank)
-        cleanup_distributed()
+        print(f"Model not found: {model_path}")
         return
     
-    print_rank0(f"Using experiment: {exp_dir.name}", rank)
+    print(f"Using experiment: {exp_dir.name}")
     output_dir = exp_dir / 'evaluation'
     
-    # Synchronize before creating evaluator
-    if world_size > 1:
-        dist.barrier()
-    
-    # Create evaluator
+    device = 'cpu' if args.no_cuda else 'cuda'
     evaluator = ComprehensiveEvaluator(
         model_path=str(model_path),
         normalizer_path=str(normalizer_path),
         data_path=args.data,
         output_dir=str(output_dir),
-        rank=rank,
-        local_rank=local_rank,
-        world_size=world_size,
+        device=device,
         batch_size=args.batch_size,
         n_samples=args.n_samples
     )
     
-    # Synchronize before plotting (only rank 0 plots)
-    if world_size > 1:
-        dist.barrier()
-    
-    # Generate plots (only on rank 0)
     evaluator.generate_all_plots(
         include_u0=not args.no_u0,
         include_early=args.early_detection,
@@ -1390,17 +1052,8 @@ def main():
         u0_bins=args.u0_bins
     )
     
-    # Save results (only on rank 0)
     evaluator.save_results()
-    
-    # Synchronize before cleanup
-    if world_size > 1:
-        dist.barrier()
-    
-    print_rank0("\nEvaluation complete!", rank)
-    
-    # Cleanup distributed
-    cleanup_distributed()
+    print("\nEvaluation complete!")
 
 
 if __name__ == '__main__':
