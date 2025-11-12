@@ -93,6 +93,13 @@ python train.py \
 **Multi-GPU:**
 ```bash
 
+export PYTHONWARNINGS="ignore"
+export TORCH_SHOW_CPP_STACKTRACES=0
+export TORCH_DISTRIBUTED_DEBUG=OFF
+export TORCH_CPP_LOG_LEVEL=ERROR
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG=NONE
+export RCCL_DEBUG=NONE
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
 export MASTER_PORT=29500
 
