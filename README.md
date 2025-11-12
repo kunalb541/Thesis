@@ -113,11 +113,7 @@ srun torchrun \
     --data ../data/raw/test.npz \
     --experiment_name test \
     --epochs 10 \
-    --batch_size 64 \
-    --lr 1e-3 \
-    --d_model 128 \
-    --nhead 4 \
-    --num_layers 4
+    --batch_size 64
 ```
 
 ### 4. Evaluate Model 
