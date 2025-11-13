@@ -11,7 +11,7 @@ Generates realistic gravitational microlensing light curves for three classes:
 Uses VBBinaryLensing for physically accurate binary lens calculations.
 
 Author: Kunal Bhatia
-Version: 13.0
+Version: 14.0
 """
 
 import numpy as np

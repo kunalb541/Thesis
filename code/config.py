@@ -1,14 +1,21 @@
 """
-Configuration for Microlensing Classification - FIXED FOR TEMPORAL BIAS
-========================================================================
+Configuration for Microlensing Classification - Roman Space Telescope
+======================================================================
 
-**VERSION 13.1 - TEMPORAL BIAS FIX**
+**VERSION 14.0 - ROMAN SPACE TELESCOPE FOCUS**
 
-Key Changes from v13.0:
-1. Extended observation window: [-120, +120] days (was [-100, +100])
-2. Constrained t0 to second half: [0, +80] days (was [-50, +50])
-3. This ensures ALL events have baseline at start of observations
-4. Removes temporal shortcuts at early completeness levels
+Key Changes from v13.1:
+1. TARGET: Roman Space Telescope (was LSST ground-based)
+2. CADENCE_MASK_PROB: 0.05 (was 0.20) - 5% missing, ~15 min cadence
+3. MAG_ERROR_STD: 0.05 (was 0.10) - Space-based photometry quality
+4. RESEARCH SCOPE: Binary morphology study only (removed cadence/error experiments)
+5. KEPT: Temporal bias fix (t0 in [0, 80], extended window to [-120, 120])
+
+Rationale:
+- Roman Space Telescope more relevant for thesis timeline
+- Better data quality enables clearer binary morphology study
+- Focus on physical detection limits rather than observational effects
+- Simplified experimental scope (5 experiments vs. 11)
 
 Physical Parameters:
 - Impact parameter (u₀): Most critical - determines caustic crossing probability
@@ -18,7 +25,7 @@ Physical Parameters:
 - Einstein timescale (tE): Event duration
 
 Author: Kunal Bhatia
-Version: 13.1
+Version: 14.0
 """
 
 import math
@@ -29,19 +36,19 @@ from typing import Dict, Any
 # ============================================================================
 
 class SimulationConfig:
-    """Data generation parameters"""
-    # Temporal sampling - UPDATED TO PREVENT TEMPORAL BIAS
+    """Data generation parameters - Roman Space Telescope configuration"""
+    # Temporal sampling - KEPT FROM v13.1 (temporal bias fix)
     N_POINTS = 1500          # Full temporal resolution
-    TIME_MIN = -120          # Extended baseline (was -100)
-    TIME_MAX = 120           # Symmetric window (was 100)
+    TIME_MIN = -120          # Extended baseline (prevents temporal bias)
+    TIME_MAX = 120           # Symmetric window
     
     # VBBinaryLensing settings
     VBM_TOLERANCE = 1e-4
     MAX_BINARY_ATTEMPTS = 10
     
-    # Observational effects
-    CADENCE_MASK_PROB = 0.20  # 20% missing (LSST nominal)
-    MAG_ERROR_STD = 0.10       # Ground-based photometry
+    # Observational effects - ROMAN SPACE TELESCOPE
+    CADENCE_MASK_PROB = 0.05  # 5% missing (Roman ~15 min cadence)
+    MAG_ERROR_STD = 0.05       # Space-based photometry quality
     BASELINE_MIN = 19.0        # Source magnitude range
     BASELINE_MAX = 22.0
     
@@ -63,81 +70,78 @@ class PSPLConfig:
     """
     Point Source Point Lens parameters
     
-    **CRITICAL UPDATE**: t₀ now constrained to [0, +80] to ensure
+    **TEMPORAL BIAS FIX**: t₀ constrained to [0, +80] to ensure
     all events have baseline observations at the start.
-    
-    This prevents the model from learning "if I see baseline early,
-    classify as non-event" temporal shortcuts.
     """
-    T0_MIN = 0.0      # Peak in second half (was -50.0)
-    T0_MAX = 80.0     # Still varied (was 50.0)
+    T0_MIN = 0.0      # Peak in second half (temporal bias fix)
+    T0_MAX = 80.0     # Still varied
     U0_MIN = 0.001    
     U0_MAX = 0.3      
     TE_MIN = 20.0     
     TE_MAX = 40.0
 
 class BinaryConfig:
-    """Binary lens configurations - UPDATED FOR TEMPORAL BIAS FIX"""
+    """Binary lens configurations - Roman Space Telescope Focus"""
     
     CONFIGS = {
         'baseline': {
-            'description': 'Realistic mixed population',
+            'description': 'Realistic mixed population for Roman',
             's_range': (0.1, 2.5),
             'q_range': (0.001, 1.0),
             'u0_range': (0.001, 0.3),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
+            't0_range': (0.0, 80.0),    # Temporal bias fix
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.70
+            'expected_accuracy': 0.78   # Higher with Roman quality
         },
         
         'distinct': {
-            'description': 'Clear caustics for training',
+            'description': 'Clear caustics (s≈1, small u0)',
             's_range': (0.7, 1.5),
             'q_range': (0.01, 0.5),
-            'u0_range': (0.001, 0.05),
+            'u0_range': (0.001, 0.15),   # Only small u0
             'rho_range': (0.001, 0.01),
             'alpha_range': (0, math.pi),
-            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
+            't0_range': (0.0, 80.0),
             'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.85
-        },
-        
-        'challenging': {
-            'description': 'Includes undetectable events (u₀ > 0.3)',
-            's_range': (0.1, 3.0),
-            'q_range': (0.0001, 1.0),
-            'u0_range': (0.01, 1.0),  # Includes fundamentally undetectable
-            'rho_range': (0.001, 0.1),
-            'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
-            'tE_range': (10.0, 40.0),
-            'expected_accuracy': 0.55
+            'expected_accuracy': 0.88    # Easy to detect
         },
         
         'planetary': {
-            'description': 'Exoplanet detection focus',
+            'description': 'Exoplanet detection focus (small q)',
             's_range': (0.5, 2.0),
-            'q_range': (0.0001, 0.01),
-            'u0_range': (0.001, 0.2),
+            'q_range': (0.0001, 0.01),   # Planetary mass ratios
+            'u0_range': (0.001, 0.3),
             'rho_range': (0.0001, 0.01),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
+            't0_range': (0.0, 80.0),
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.70
+            'expected_accuracy': 0.75    # Small features
         },
         
         'stellar': {
-            'description': 'Binary stars focus',
+            'description': 'Binary stars focus (large q)',
             's_range': (0.3, 3.0),
-            'q_range': (0.3, 1.0),
-            'u0_range': (0.001, 0.4),
+            'q_range': (0.3, 1.0),       # Stellar mass ratios
+            'u0_range': (0.001, 0.3),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
+            't0_range': (0.0, 80.0),
             'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.65
+            'expected_accuracy': 0.73    # Complex caustics
+        },
+        
+        'challenging': {
+            'description': 'Physical detection limit study (wide u0)',
+            's_range': (0.1, 3.0),
+            'q_range': (0.0001, 1.0),
+            'u0_range': (0.01, 1.0),     # Includes undetectable (u0>0.3)
+            'rho_range': (0.001, 0.1),
+            'alpha_range': (0, 2 * math.pi),
+            't0_range': (0.0, 80.0),
+            'tE_range': (10.0, 40.0),
+            'expected_accuracy': 0.60    # Many undetectable
         }
     }
     
@@ -242,8 +246,8 @@ class EvaluationConfig:
     N_EXAMPLE_GRID = 3
     
     # Performance thresholds
-    MIN_ACCURACY_WARNING = 0.60
-    TARGET_ACCURACY = 0.70
+    MIN_ACCURACY_WARNING = 0.70  # Higher for Roman quality
+    TARGET_ACCURACY = 0.78       # Higher for Roman quality
 
 # ============================================================================
 # SYSTEM PARAMETERS
@@ -265,11 +269,11 @@ class SystemConfig:
     LOG_INTERVAL = 10
 
 # ============================================================================
-# EXPERIMENT PRESETS
+# EXPERIMENT PRESETS - v14.0: BINARY MORPHOLOGY STUDY
 # ============================================================================
 
 class ExperimentPresets:
-    """Pre-configured experiment settings"""
+    """Pre-configured experiments for Roman Space Telescope"""
     
     EXPERIMENTS = {
         'quick_test': {
@@ -278,7 +282,7 @@ class ExperimentPresets:
             'n_binary': 100,
             'binary_params': 'baseline',
             'epochs': 5,
-            'description': 'Quick validation test'
+            'description': 'Quick validation test (Roman quality)'
         },
         
         'baseline_1M': {
@@ -287,115 +291,43 @@ class ExperimentPresets:
             'n_binary': 334000,
             'binary_params': 'baseline',
             'epochs': 50,
-            'description': 'Main benchmark (1M events, realistic mix)'
+            'description': 'Main Roman benchmark (1M events, 5% missing, 0.05 mag)'
         },
         
-        'distinct_1M': {
-            'n_flat': 333000,
-            'n_pspl': 333000,
-            'n_binary': 334000,
-            'binary_params': 'distinct',
-            'epochs': 50,
-            'description': 'Clear caustics (train on easy cases)'
-        },
-        
-        'physical_limit': {
+        'distinct': {
             'n_flat': 50000,
             'n_pspl': 50000,
             'n_binary': 50000,
-            'binary_params': 'challenging',
+            'binary_params': 'distinct',
             'epochs': 50,
-            'description': 'Test physical detection limits (includes u₀ > 0.3)'
+            'description': 'Clear caustics (optimal detection)'
         },
         
-        'planetary_search': {
+        'planetary': {
             'n_flat': 50000,
             'n_pspl': 50000,
             'n_binary': 50000,
             'binary_params': 'planetary',
             'epochs': 50,
-            'description': 'Exoplanet detection optimization'
+            'description': 'Exoplanet search (small mass ratios)'
         },
         
-        'stellar_binary': {
+        'stellar': {
             'n_flat': 50000,
             'n_pspl': 50000,
             'n_binary': 50000,
             'binary_params': 'stellar',
             'epochs': 50,
-            'description': 'Equal-mass binary systems'
+            'description': 'Binary stars (equal masses)'
         },
         
-        # Cadence experiments
-        'cadence_dense': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'cadence_mask_prob': 0.05,
+        'challenging': {
+            'n_flat': 50000,
+            'n_pspl': 50000,
+            'n_binary': 50000,
+            'binary_params': 'challenging',
             'epochs': 50,
-            'description': 'Dense cadence (5% missing, intensive follow-up)'
-        },
-        
-        'cadence_nominal': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'cadence_mask_prob': 0.20,
-            'epochs': 50,
-            'description': 'Nominal cadence (20% missing, LSST standard)'
-        },
-        
-        'cadence_sparse': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'cadence_mask_prob': 0.30,
-            'epochs': 50,
-            'description': 'Sparse cadence (30% missing, poor weather)'
-        },
-        
-        'cadence_very_sparse': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'cadence_mask_prob': 0.40,
-            'epochs': 50,
-            'description': 'Very sparse (40% missing, limited coverage)'
-        },
-        
-        # Photometric error experiments
-        'error_space': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'mag_error_std': 0.05,
-            'epochs': 50,
-            'description': 'Space-based quality (0.05 mag, Roman/HST)'
-        },
-        
-        'error_ground': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'mag_error_std': 0.10,
-            'epochs': 50,
-            'description': 'Ground-based quality (0.10 mag, LSST/OGLE)'
-        },
-        
-        'error_poor': {
-            'n_flat': 100000,
-            'n_pspl': 100000,
-            'n_binary': 100000,
-            'binary_params': 'baseline',
-            'mag_error_std': 0.20,
-            'epochs': 50,
-            'description': 'Poor quality (0.20 mag, degraded conditions)'
+            'description': 'Physical limit study (wide u0 range)'
         }
     }
 
@@ -420,29 +352,27 @@ def get_all_configs() -> Dict[str, Any]:
 def print_config_summary():
     """Print configuration summary"""
     print("="*70)
-    print("CONFIGURATION SUMMARY - v13.1 (TEMPORAL BIAS FIX)")
+    print("CONFIGURATION SUMMARY - v14.0 (ROMAN SPACE TELESCOPE)")
     print("="*70)
     
     sim = SimulationConfig
-    print(f"\n📊 Data Generation:")
-    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days (EXTENDED)")
+    print(f"\n🛰️  Roman Space Telescope Configuration:")
+    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
     print(f"  Points: {sim.N_POINTS}")
-    print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
-    print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
+    print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}% (~15 min cadence)")
+    print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag (space-based quality)")
     
     pspl = PSPLConfig
-    print(f"\n⭐ PSPL Parameters (UPDATED):")
-    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days (SHIFTED RIGHT)")
+    print(f"\n⭐ PSPL Parameters:")
+    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days (temporal bias fix)")
     print(f"  u₀: [{pspl.U0_MIN}, {pspl.U0_MAX}]")
     print(f"  tE: [{pspl.TE_MIN}, {pspl.TE_MAX}] days")
-    print(f"  ⚠️  All events now have baseline observations at start!")
     
-    print(f"\n🧬 Binary Configurations (UPDATED):")
+    print(f"\n🧬 Binary Morphology Study:")
     for name, cfg in BinaryConfig.CONFIGS.items():
         t0_range = cfg['t0_range']
         u0_range = cfg['u0_range']
-        print(f"  {name:12s}: t₀=[{t0_range[0]:.1f}, {t0_range[1]:.1f}], "
-              f"u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
+        print(f"  {name:12s}: u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
               f"expected {cfg['expected_accuracy']*100:.0f}% accuracy")
     
     model = ModelConfig
@@ -451,23 +381,20 @@ def print_config_summary():
     print(f"  nhead: {model.NHEAD}")
     print(f"  num_layers: {model.NUM_LAYERS}")
     print(f"  dim_ff: {model.DIM_FEEDFORWARD}")
-    print(f"  Parameters: ~100K")
     
     train = TrainingConfig
     print(f"\n🎯 Training:")
     print(f"  Batch size: {train.BATCH_SIZE} per GPU")
     print(f"  Learning rate: {train.LEARNING_RATE}")
-    print(f"  Warmup: {train.WARMUP_EPOCHS} epochs")
     print(f"  Max epochs: {train.MAX_EPOCHS}")
     
     print("\n" + "="*70)
-    print("KEY CHANGES IN v13.1:")
+    print("RESEARCH FOCUS - v14.0:")
     print("="*70)
-    print("1. TIME_MIN: -100 → -120 (extended baseline)")
-    print("2. TIME_MAX: +100 → +120 (symmetric window)")
-    print("3. t₀ range: [-50, +50] → [0, +80] (ALL configs)")
-    print("4. This ensures ALL events have baseline at observation start")
-    print("5. Prevents temporal bias in early detection (Binary recall at 10%)")
+    print("1. Baseline Roman benchmark (1M events)")
+    print("2. Binary morphology study (4 topologies × 150k events)")
+    print("3. u0 dependency analysis (physical detection limits)")
+    print("4. Early detection capability")
     print("="*70)
 
 def validate_config():
@@ -493,9 +420,12 @@ def validate_config():
     else:
         warnings.append(f"✅ Guaranteed baseline: {baseline_duration:.0f} days before earliest peak")
     
-    # Check if peaks are too late
-    if pspl.T0_MAX > sim.TIME_MAX - 20:
-        warnings.append(f"⚠️ Some events may not complete (latest peak at t={pspl.T0_MAX})")
+    # Check Roman configuration
+    if sim.CADENCE_MASK_PROB != 0.05:
+        issues.append(f"⚠️ CADENCE_MASK_PROB should be 0.05 for Roman (currently {sim.CADENCE_MASK_PROB})")
+    
+    if sim.MAG_ERROR_STD != 0.05:
+        issues.append(f"⚠️ MAG_ERROR_STD should be 0.05 for Roman (currently {sim.MAG_ERROR_STD})")
     
     model = ModelConfig
     if model.D_MODEL % model.NHEAD != 0:
@@ -505,15 +435,6 @@ def validate_config():
     split_sum = train.TRAIN_RATIO + train.VAL_RATIO + train.TEST_RATIO
     if abs(split_sum - 1.0) > 0.001:
         issues.append(f"⚠️ Data splits sum to {split_sum:.3f}, not 1.0")
-    
-    # Check t₀ range is positive
-    if PSPLConfig.T0_MIN < 0:
-        issues.append(f"⚠️ t₀_min should be ≥ 0 to guarantee baseline (currently {PSPLConfig.T0_MIN})")
-    
-    # Check all binary configs have matching t0 range
-    for name, cfg in BinaryConfig.CONFIGS.items():
-        if cfg['t0_range'][0] < 0:
-            issues.append(f"⚠️ Binary config '{name}' has t₀_min < 0: {cfg['t0_range']}")
     
     # Print results
     if warnings:
@@ -558,10 +479,6 @@ BINARY_PARAM_SETS = {
     name: BinaryConfig.get_config(name)
     for name in BinaryConfig.CONFIGS.keys()
 }
-
-# Aliases for compatibility
-BINARY_PARAM_SETS['critical'] = BINARY_PARAM_SETS['distinct']
-BINARY_PARAM_SETS['overlapping'] = BINARY_PARAM_SETS['challenging']
 
 def get_config_summary():
     """Wrapper for backwards compatibility"""

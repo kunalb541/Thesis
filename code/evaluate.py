@@ -12,7 +12,7 @@ Complete evaluation pipeline with:
 - Real-time classification evolution
 
 Author: Kunal Bhatia
-Version: 13.0
+Version: 14.0
 """
 
 import torch

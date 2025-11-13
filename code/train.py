@@ -12,7 +12,7 @@ Supports:
 - AMD (ROCm) and NVIDIA (CUDA) GPUs
 
 Author: Kunal Bhatia
-Version: 13.0
+Version: 14.0
 """
 
 import os
