@@ -1,0 +1,21 @@
+{
+  "data": "../data/raw/roman_unbiased_1M_v14.1.npz",
+  "experiment_name": "roman_unbiased_1M_v14.1",
+  "epochs": 10,
+  "batch_size": 64,
+  "lr": 0.001,
+  "warmup_epochs": 5,
+  "weight_decay": 0.0001,
+  "grad_clip": 1.0,
+  "no_amp": false,
+  "quick": false,
+  "d_model": 128,
+  "nhead": 4,
+  "num_layers": 4,
+  "dropout": 0.1,
+  "gradient_checkpointing": false,
+  "num_workers": 4,
+  "world_size": 4,
+  "effective_batch_size": 256,
+  "scaled_lr": 0.001
+}
