@@ -1,8 +1,14 @@
 """
-Configuration for Microlensing Classification
-==============================================
+Configuration for Microlensing Classification - FIXED FOR TEMPORAL BIAS
+========================================================================
 
-Defines all parameters for data generation, model architecture, training, and evaluation.
+**VERSION 13.1 - TEMPORAL BIAS FIX**
+
+Key Changes from v13.0:
+1. Extended observation window: [-120, +120] days (was [-100, +100])
+2. Constrained t0 to second half: [0, +80] days (was [-50, +50])
+3. This ensures ALL events have baseline at start of observations
+4. Removes temporal shortcuts at early completeness levels
 
 Physical Parameters:
 - Impact parameter (u₀): Most critical - determines caustic crossing probability
@@ -12,7 +18,7 @@ Physical Parameters:
 - Einstein timescale (tE): Event duration
 
 Author: Kunal Bhatia
-Version: 13.0
+Version: 13.1
 """
 
 import math
@@ -24,10 +30,10 @@ from typing import Dict, Any
 
 class SimulationConfig:
     """Data generation parameters"""
-    # Temporal sampling
+    # Temporal sampling - UPDATED TO PREVENT TEMPORAL BIAS
     N_POINTS = 1500          # Full temporal resolution
-    TIME_MIN = -100          # Days before peak
-    TIME_MAX = 100           # Days after peak
+    TIME_MIN = -120          # Extended baseline (was -100)
+    TIME_MAX = 120           # Symmetric window (was 100)
     
     # VBBinaryLensing settings
     VBM_TOLERANCE = 1e-4
@@ -57,17 +63,21 @@ class PSPLConfig:
     """
     Point Source Point Lens parameters
     
-    Wide t₀ range prevents temporal artifacts
+    **CRITICAL UPDATE**: t₀ now constrained to [0, +80] to ensure
+    all events have baseline observations at the start.
+    
+    This prevents the model from learning "if I see baseline early,
+    classify as non-event" temporal shortcuts.
     """
-    T0_MIN = -50.0    # Wide range (prevents timing artifacts)
-    T0_MAX = 50.0     
+    T0_MIN = 0.0      # Peak in second half (was -50.0)
+    T0_MAX = 80.0     # Still varied (was 50.0)
     U0_MIN = 0.001    
     U0_MAX = 0.3      
     TE_MIN = 20.0     
     TE_MAX = 40.0
 
 class BinaryConfig:
-    """Binary lens configurations"""
+    """Binary lens configurations - UPDATED FOR TEMPORAL BIAS FIX"""
     
     CONFIGS = {
         'baseline': {
@@ -77,7 +87,7 @@ class BinaryConfig:
             'u0_range': (0.001, 0.3),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-50.0, 50.0),
+            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
             'tE_range': (20.0, 40.0),
             'expected_accuracy': 0.70
         },
@@ -89,7 +99,7 @@ class BinaryConfig:
             'u0_range': (0.001, 0.05),
             'rho_range': (0.001, 0.01),
             'alpha_range': (0, math.pi),
-            't0_range': (-50.0, 50.0),
+            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
             'tE_range': (30.0, 40.0),
             'expected_accuracy': 0.85
         },
@@ -101,7 +111,7 @@ class BinaryConfig:
             'u0_range': (0.01, 1.0),  # Includes fundamentally undetectable
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-50.0, 50.0),
+            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
             'tE_range': (10.0, 40.0),
             'expected_accuracy': 0.55
         },
@@ -113,7 +123,7 @@ class BinaryConfig:
             'u0_range': (0.001, 0.2),
             'rho_range': (0.0001, 0.01),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-50.0, 50.0),
+            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
             'tE_range': (20.0, 40.0),
             'expected_accuracy': 0.70
         },
@@ -125,7 +135,7 @@ class BinaryConfig:
             'u0_range': (0.001, 0.4),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (-50.0, 50.0),
+            't0_range': (0.0, 80.0),    # UPDATED: was (-50.0, 50.0)
             'tE_range': (30.0, 40.0),
             'expected_accuracy': 0.65
         }
@@ -410,26 +420,29 @@ def get_all_configs() -> Dict[str, Any]:
 def print_config_summary():
     """Print configuration summary"""
     print("="*70)
-    print("CONFIGURATION SUMMARY")
+    print("CONFIGURATION SUMMARY - v13.1 (TEMPORAL BIAS FIX)")
     print("="*70)
     
     sim = SimulationConfig
     print(f"\n📊 Data Generation:")
-    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
+    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days (EXTENDED)")
     print(f"  Points: {sim.N_POINTS}")
     print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}%")
     print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag")
     
     pspl = PSPLConfig
-    print(f"\n⭐ PSPL Parameters:")
-    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days")
+    print(f"\n⭐ PSPL Parameters (UPDATED):")
+    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days (SHIFTED RIGHT)")
     print(f"  u₀: [{pspl.U0_MIN}, {pspl.U0_MAX}]")
     print(f"  tE: [{pspl.TE_MIN}, {pspl.TE_MAX}] days")
+    print(f"  ⚠️  All events now have baseline observations at start!")
     
-    print(f"\n🧬 Binary Configurations:")
+    print(f"\n🧬 Binary Configurations (UPDATED):")
     for name, cfg in BinaryConfig.CONFIGS.items():
+        t0_range = cfg['t0_range']
         u0_range = cfg['u0_range']
-        print(f"  {name:12s}: u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
+        print(f"  {name:12s}: t₀=[{t0_range[0]:.1f}, {t0_range[1]:.1f}], "
+              f"u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
               f"expected {cfg['expected_accuracy']*100:.0f}% accuracy")
     
     model = ModelConfig
@@ -447,11 +460,20 @@ def print_config_summary():
     print(f"  Warmup: {train.WARMUP_EPOCHS} epochs")
     print(f"  Max epochs: {train.MAX_EPOCHS}")
     
+    print("\n" + "="*70)
+    print("KEY CHANGES IN v13.1:")
+    print("="*70)
+    print("1. TIME_MIN: -100 → -120 (extended baseline)")
+    print("2. TIME_MAX: +100 → +120 (symmetric window)")
+    print("3. t₀ range: [-50, +50] → [0, +80] (ALL configs)")
+    print("4. This ensures ALL events have baseline at observation start")
+    print("5. Prevents temporal bias in early detection (Binary recall at 10%)")
     print("="*70)
 
 def validate_config():
     """Validate configuration consistency"""
     issues = []
+    warnings = []
     
     sim = SimulationConfig
     pspl = PSPLConfig
@@ -462,6 +484,19 @@ def validate_config():
     if max_event_duration > time_window:
         issues.append(f"⚠️ Event duration ({max_event_duration:.0f}d) > window ({time_window}d)")
     
+    # Check baseline guarantee
+    earliest_peak = pspl.T0_MIN
+    baseline_duration = earliest_peak - sim.TIME_MIN
+    
+    if baseline_duration < 50:
+        issues.append(f"⚠️ Insufficient guaranteed baseline: {baseline_duration:.0f} days")
+    else:
+        warnings.append(f"✅ Guaranteed baseline: {baseline_duration:.0f} days before earliest peak")
+    
+    # Check if peaks are too late
+    if pspl.T0_MAX > sim.TIME_MAX - 20:
+        warnings.append(f"⚠️ Some events may not complete (latest peak at t={pspl.T0_MAX})")
+    
     model = ModelConfig
     if model.D_MODEL % model.NHEAD != 0:
         issues.append(f"⚠️ d_model ({model.D_MODEL}) must be divisible by nhead ({model.NHEAD})")
@@ -471,17 +506,28 @@ def validate_config():
     if abs(split_sum - 1.0) > 0.001:
         issues.append(f"⚠️ Data splits sum to {split_sum:.3f}, not 1.0")
     
-    # Check t₀ range
-    if abs(PSPLConfig.T0_MAX - PSPLConfig.T0_MIN) < 50:
-        issues.append(f"⚠️ t₀ range too narrow: [{PSPLConfig.T0_MIN}, {PSPLConfig.T0_MAX}]")
+    # Check t₀ range is positive
+    if PSPLConfig.T0_MIN < 0:
+        issues.append(f"⚠️ t₀_min should be ≥ 0 to guarantee baseline (currently {PSPLConfig.T0_MIN})")
+    
+    # Check all binary configs have matching t0 range
+    for name, cfg in BinaryConfig.CONFIGS.items():
+        if cfg['t0_range'][0] < 0:
+            issues.append(f"⚠️ Binary config '{name}' has t₀_min < 0: {cfg['t0_range']}")
+    
+    # Print results
+    if warnings:
+        print("\nConfiguration Notes:")
+        for warning in warnings:
+            print(f"  {warning}")
     
     if issues:
-        print("Configuration Issues Found:")
+        print("\nConfiguration Issues Found:")
         for issue in issues:
             print(f"  {issue}")
         return False
     else:
-        print("✅ Configuration validated successfully!")
+        print("\n✅ Configuration validated successfully!")
         return True
 
 # ============================================================================
