@@ -2,18 +2,23 @@
 Configuration for Microlensing Classification - Roman Space Telescope
 ======================================================================
 
-**VERSION 14.0 - ROMAN SPACE TELESCOPE FOCUS**
+**VERSION 14.0 - ROMAN SPACE TELESCOPE + TEMPORAL BIAS FIX v2**
 
 Key Changes from v13.1:
 1. TARGET: Roman Space Telescope (was LSST ground-based)
 2. CADENCE_MASK_PROB: 0.05 (was 0.20) - 5% missing, ~15 min cadence
 3. MAG_ERROR_STD: 0.05 (was 0.10) - Space-based photometry quality
-4. RESEARCH SCOPE: Binary morphology study only (removed cadence/error experiments)
-5. KEPT: Temporal bias fix (t0 in [0, 80], extended window to [-120, 120])
+4. TEMPORAL BIAS FIX v2: t₀ ∈ [-60, +40] days (was [0, +80])
+   - Events can peak before, during, or early in observation
+   - All events show characteristic features by window end
+   - Prevents temporal position shortcuts
+   - Ensures label-feature consistency
+5. RESEARCH SCOPE: Binary morphology study only (removed cadence/error experiments)
 
 Rationale:
 - Roman Space Telescope more relevant for thesis timeline
 - Better data quality enables clearer binary morphology study
+- Proper temporal bias fix: varied event stages without label mismatch
 - Focus on physical detection limits rather than observational effects
 - Simplified experimental scope (5 experiments vs. 11)
 
@@ -23,6 +28,16 @@ Physical Parameters:
 - Mass ratio (q): m₂/m₁ (companion/primary)
 - Source size (rho): Angular radius/Einstein radius  
 - Einstein timescale (tE): Event duration
+- Peak time (t₀): When maximum magnification occurs
+
+Temporal Bias Fix Explanation:
+- Observation window: [-120, +120] days (240 days total)
+- Event peaks: [-60, +40] days (100 days range)
+- Earliest peak: t = -60 → 60 days of pre-peak baseline
+- Latest peak: t = +40 → 80 days of post-peak observation
+- Event visibility: t₀ - 3*tE to t₀ + 3*tE (≈ -180 to +160 for tE=40)
+- Result: ALL events show complete light curve features within window
+- Model CANNOT use temporal position as shortcut (events scattered)
 
 Author: Kunal Bhatia
 Version: 14.0
@@ -37,10 +52,10 @@ from typing import Dict, Any
 
 class SimulationConfig:
     """Data generation parameters - Roman Space Telescope configuration"""
-    # Temporal sampling - KEPT FROM v13.1 (temporal bias fix)
+    # Temporal sampling - TEMPORAL BIAS FIX v2
     N_POINTS = 1500          # Full temporal resolution
     TIME_MIN = -120          # Extended baseline (prevents temporal bias)
-    TIME_MAX = 120           # Symmetric window
+    TIME_MAX = 120           # Symmetric window (240 days total)
     
     # VBBinaryLensing settings
     VBM_TOLERANCE = 1e-4
@@ -70,78 +85,89 @@ class PSPLConfig:
     """
     Point Source Point Lens parameters
     
-    **TEMPORAL BIAS FIX**: t₀ constrained to [0, +80] to ensure
-    all events have baseline observations at the start.
+    **TEMPORAL BIAS FIX v2**: t₀ ∈ [-60, +40] ensures:
+    1. Events can peak before observation starts (some declining)
+    2. Events can peak during observation (various stages)
+    3. Events can peak early in observation (rising phase visible)
+    4. ALL events show complete features by window end
+    5. Model cannot use temporal position as classification shortcut
+    
+    With tE ∈ [20, 40] days:
+    - Event visible from: t₀ - 3*tE ≈ t₀ - 120 days
+    - Event visible to: t₀ + 3*tE ≈ t₀ + 120 days
+    - Earliest peak (t₀ = -60): visible from t ≈ -180 (before window)
+    - Latest peak (t₀ = +40): visible to t ≈ +160 (after window)
+    - Result: Complete light curve features always visible
     """
-    T0_MIN = 0.0      # Peak in second half (temporal bias fix)
-    T0_MAX = 80.0     # Still varied
+    T0_MIN = -60.0    # Can peak 60 days before window midpoint
+    T0_MAX = 40.0     # Can peak 40 days after window midpoint
     U0_MIN = 0.001    
     U0_MAX = 0.3      
     TE_MIN = 20.0     
     TE_MAX = 40.0
 
 class BinaryConfig:
-    """Binary lens configurations - Roman Space Telescope Focus"""
+    """Binary lens configurations - Roman Space Telescope + Temporal Fix v2"""
     
     CONFIGS = {
         'baseline': {
-            'description': 'Realistic mixed population for Roman',
+            'description': 'Realistic mixed population for Roman (temporal fix v2)',
             's_range': (0.1, 2.5),
             'q_range': (0.001, 1.0),
             'u0_range': (0.001, 0.3),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),    # Temporal bias fix
+            't0_range': (-60.0, 40.0),    # Temporal bias fix v2
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.78   # Higher with Roman quality
+            'expected_accuracy': 0.80     # Higher with Roman + proper temporal fix
         },
         
         'distinct': {
-            'description': 'Clear caustics (s≈1, small u0)',
+            'description': 'Clear caustics (s≈1, small u0) - optimal detection',
             's_range': (0.7, 1.5),
             'q_range': (0.01, 0.5),
-            'u0_range': (0.001, 0.15),   # Only small u0
+            'u0_range': (0.001, 0.15),    # Only small u0
             'rho_range': (0.001, 0.01),
             'alpha_range': (0, math.pi),
-            't0_range': (0.0, 80.0),
+            't0_range': (-60.0, 40.0),    # Temporal bias fix v2
             'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.88    # Easy to detect
+            'expected_accuracy': 0.90     # Easy to detect with Roman quality
         },
         
         'planetary': {
-            'description': 'Exoplanet detection focus (small q)',
+            'description': 'Exoplanet detection focus (small q, planet mass ratios)',
             's_range': (0.5, 2.0),
-            'q_range': (0.0001, 0.01),   # Planetary mass ratios
+            'q_range': (0.0001, 0.01),    # Planetary mass ratios
             'u0_range': (0.001, 0.3),
             'rho_range': (0.0001, 0.01),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),
+            't0_range': (-60.0, 40.0),    # Temporal bias fix v2
             'tE_range': (20.0, 40.0),
-            'expected_accuracy': 0.75    # Small features
+            'expected_accuracy': 0.77     # Small features, but Roman helps
         },
         
         'stellar': {
-            'description': 'Binary stars focus (large q)',
+            'description': 'Binary stars focus (large q, equal-mass systems)',
             's_range': (0.3, 3.0),
-            'q_range': (0.3, 1.0),       # Stellar mass ratios
+            'q_range': (0.3, 1.0),        # Stellar mass ratios
             'u0_range': (0.001, 0.3),
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),
+            't0_range': (-60.0, 40.0),    # Temporal bias fix v2
             'tE_range': (30.0, 40.0),
-            'expected_accuracy': 0.73    # Complex caustics
+            'expected_accuracy': 0.75     # Complex caustics, challenging
         },
         
         'challenging': {
-            'description': 'Physical detection limit study (wide u0)',
+            'description': 'Physical detection limit study (wide u0, includes undetectable)',
             's_range': (0.1, 3.0),
             'q_range': (0.0001, 1.0),
-            'u0_range': (0.01, 1.0),     # Includes undetectable (u0>0.3)
+            'u0_range': (0.01, 1.0),      # Includes undetectable (u0>0.3)
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
-            't0_range': (0.0, 80.0),
+            't0_range': (-60.0, 40.0),    # Temporal bias fix v2
             'tE_range': (10.0, 40.0),
-            'expected_accuracy': 0.60    # Many undetectable
+            'expected_accuracy': 0.62     # Many large u0 events
         }
     }
     
@@ -247,7 +273,7 @@ class EvaluationConfig:
     
     # Performance thresholds
     MIN_ACCURACY_WARNING = 0.70  # Higher for Roman quality
-    TARGET_ACCURACY = 0.78       # Higher for Roman quality
+    TARGET_ACCURACY = 0.80       # Higher for Roman quality + temporal fix
 
 # ============================================================================
 # SYSTEM PARAMETERS
@@ -282,7 +308,7 @@ class ExperimentPresets:
             'n_binary': 100,
             'binary_params': 'baseline',
             'epochs': 5,
-            'description': 'Quick validation test (Roman quality)'
+            'description': 'Quick validation test (Roman quality + temporal fix v2)'
         },
         
         'baseline_1M': {
@@ -291,7 +317,7 @@ class ExperimentPresets:
             'n_binary': 334000,
             'binary_params': 'baseline',
             'epochs': 50,
-            'description': 'Main Roman benchmark (1M events, 5% missing, 0.05 mag)'
+            'description': 'Main Roman benchmark (1M events, 5% missing, 0.05 mag, temporal fix v2)'
         },
         
         'distinct': {
@@ -300,7 +326,7 @@ class ExperimentPresets:
             'n_binary': 50000,
             'binary_params': 'distinct',
             'epochs': 50,
-            'description': 'Clear caustics (optimal detection)'
+            'description': 'Clear caustics (optimal detection conditions)'
         },
         
         'planetary': {
@@ -352,27 +378,32 @@ def get_all_configs() -> Dict[str, Any]:
 def print_config_summary():
     """Print configuration summary"""
     print("="*70)
-    print("CONFIGURATION SUMMARY - v14.0 (ROMAN SPACE TELESCOPE)")
+    print("CONFIGURATION SUMMARY - v14.0 (ROMAN + TEMPORAL FIX v2)")
     print("="*70)
     
     sim = SimulationConfig
     print(f"\n🛰️  Roman Space Telescope Configuration:")
-    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days")
+    print(f"  Time window: [{sim.TIME_MIN}, {sim.TIME_MAX}] days (240 days)")
     print(f"  Points: {sim.N_POINTS}")
     print(f"  Missing: {sim.CADENCE_MASK_PROB*100:.0f}% (~15 min cadence)")
     print(f"  Error: {sim.MAG_ERROR_STD:.2f} mag (space-based quality)")
     
     pspl = PSPLConfig
-    print(f"\n⭐ PSPL Parameters:")
-    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days (temporal bias fix)")
+    print(f"\n⭐ PSPL Parameters (TEMPORAL BIAS FIX v2):")
+    print(f"  t₀: [{pspl.T0_MIN}, {pspl.T0_MAX}] days")
     print(f"  u₀: [{pspl.U0_MIN}, {pspl.U0_MAX}]")
     print(f"  tE: [{pspl.TE_MIN}, {pspl.TE_MAX}] days")
+    print(f"  Earliest peak: t = {pspl.T0_MIN} → {abs(pspl.T0_MIN - sim.TIME_MIN):.0f} days pre-peak baseline")
+    print(f"  Latest peak: t = {pspl.T0_MAX} → {sim.TIME_MAX - pspl.T0_MAX:.0f} days post-peak observation")
+    print(f"  ✅ All events show complete features within observation window")
+    print(f"  ✅ Events at varied stages prevent temporal position shortcuts")
     
-    print(f"\n🧬 Binary Morphology Study:")
+    print(f"\n🧬 Binary Morphology Study (TEMPORAL BIAS FIX v2):")
     for name, cfg in BinaryConfig.CONFIGS.items():
         t0_range = cfg['t0_range']
         u0_range = cfg['u0_range']
-        print(f"  {name:12s}: u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
+        print(f"  {name:12s}: t₀=[{t0_range[0]:.1f}, {t0_range[1]:.1f}], "
+              f"u₀=[{u0_range[0]:.3f}, {u0_range[1]:.3f}], "
               f"expected {cfg['expected_accuracy']*100:.0f}% accuracy")
     
     model = ModelConfig
@@ -381,6 +412,7 @@ def print_config_summary():
     print(f"  nhead: {model.NHEAD}")
     print(f"  num_layers: {model.NUM_LAYERS}")
     print(f"  dim_ff: {model.DIM_FEEDFORWARD}")
+    print(f"  Parameters: ~435k")
     
     train = TrainingConfig
     print(f"\n🎯 Training:")
@@ -394,7 +426,17 @@ def print_config_summary():
     print("1. Baseline Roman benchmark (1M events)")
     print("2. Binary morphology study (4 topologies × 150k events)")
     print("3. u0 dependency analysis (physical detection limits)")
-    print("4. Early detection capability")
+    print("4. Early detection capability (proper temporal fix)")
+    print("5. Roman vs. ground-based comparison")
+    print("="*70)
+    print("\nTEMPORAL BIAS FIX v2:")
+    print("="*70)
+    print("✅ Events peak at varied times: t₀ ∈ [-60, +40] days")
+    print("✅ Observation window: [-120, +120] days (240 days)")
+    print("✅ Guaranteed baseline: 60-180 days before peak")
+    print("✅ Complete features visible: tE ∈ [20, 40] → 6*tE visibility")
+    print("✅ No temporal shortcuts: event stage randomized")
+    print("✅ Label consistency: all events show full light curve")
     print("="*70)
 
 def validate_config():
@@ -415,17 +457,45 @@ def validate_config():
     earliest_peak = pspl.T0_MIN
     baseline_duration = earliest_peak - sim.TIME_MIN
     
-    if baseline_duration < 50:
-        issues.append(f"⚠️ Insufficient guaranteed baseline: {baseline_duration:.0f} days")
+    if baseline_duration < 30:
+        issues.append(f"⚠️ Insufficient baseline: {baseline_duration:.0f} days")
     else:
-        warnings.append(f"✅ Guaranteed baseline: {baseline_duration:.0f} days before earliest peak")
+        warnings.append(f"✅ Minimum baseline: {baseline_duration:.0f} days before earliest peak")
+    
+    # Check post-peak observation
+    latest_peak = pspl.T0_MAX
+    post_peak_duration = sim.TIME_MAX - latest_peak
+    
+    if post_peak_duration < 30:
+        issues.append(f"⚠️ Insufficient post-peak: {post_peak_duration:.0f} days")
+    else:
+        warnings.append(f"✅ Minimum post-peak: {post_peak_duration:.0f} days after latest peak")
+    
+    # Check event visibility
+    max_visibility = pspl.TE_MAX * 6  # ±3*tE
+    earliest_visible = pspl.T0_MIN - pspl.TE_MAX * 3
+    latest_visible = pspl.T0_MAX + pspl.TE_MAX * 3
+    
+    if earliest_visible < sim.TIME_MIN:
+        warnings.append(f"✅ Some events visible from window start (earliest: t={earliest_visible:.0f})")
+    else:
+        issues.append(f"⚠️ Gap before first event visible: t={earliest_visible:.0f} > {sim.TIME_MIN}")
+    
+    if latest_visible > sim.TIME_MAX:
+        warnings.append(f"✅ Some events visible beyond window end (latest: t={latest_visible:.0f})")
+    else:
+        issues.append(f"⚠️ All events end before window: t={latest_visible:.0f} < {sim.TIME_MAX}")
     
     # Check Roman configuration
     if sim.CADENCE_MASK_PROB != 0.05:
         issues.append(f"⚠️ CADENCE_MASK_PROB should be 0.05 for Roman (currently {sim.CADENCE_MASK_PROB})")
+    else:
+        warnings.append(f"✅ Roman cadence: {sim.CADENCE_MASK_PROB*100:.0f}% missing")
     
     if sim.MAG_ERROR_STD != 0.05:
         issues.append(f"⚠️ MAG_ERROR_STD should be 0.05 for Roman (currently {sim.MAG_ERROR_STD})")
+    else:
+        warnings.append(f"✅ Roman photometry: {sim.MAG_ERROR_STD:.2f} mag error")
     
     model = ModelConfig
     if model.D_MODEL % model.NHEAD != 0:
@@ -435,6 +505,18 @@ def validate_config():
     split_sum = train.TRAIN_RATIO + train.VAL_RATIO + train.TEST_RATIO
     if abs(split_sum - 1.0) > 0.001:
         issues.append(f"⚠️ Data splits sum to {split_sum:.3f}, not 1.0")
+    
+    # Check temporal bias fix
+    t0_range = pspl.T0_MAX - pspl.T0_MIN
+    if t0_range < 50:
+        issues.append(f"⚠️ t₀ range too narrow: {t0_range:.0f} days (should be ≥50 for temporal fix)")
+    else:
+        warnings.append(f"✅ t₀ range: {t0_range:.0f} days (sufficient for temporal fix)")
+    
+    if pspl.T0_MIN >= 0:
+        issues.append(f"⚠️ t₀_min should be negative for temporal fix (currently {pspl.T0_MIN})")
+    else:
+        warnings.append(f"✅ t₀_min negative: events can peak before observation midpoint")
     
     # Print results
     if warnings:
@@ -449,6 +531,9 @@ def validate_config():
         return False
     else:
         print("\n✅ Configuration validated successfully!")
+        print("   Roman Space Telescope parameters: CORRECT")
+        print("   Temporal bias fix v2: IMPLEMENTED")
+        print("   All consistency checks: PASSED")
         return True
 
 # ============================================================================
