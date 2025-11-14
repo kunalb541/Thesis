@@ -158,7 +158,7 @@ class ComprehensiveEvaluator:
             dropout=dropout,
             pad_value=-1.0,
             causal_attention=causal_attention,
-            feat_div_weight=feat_div_weight
+            feature_diversity_weight=feat_div_weight
         )
         
         state_dict = checkpoint['model_state_dict']
