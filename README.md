@@ -3,7 +3,7 @@
 **Version 15.0 - Anti-Cheating Edition**  
 MSc Thesis Project | University of Heidelberg | Prof. Dr. Joachim Wambsganß
 
-Real-time classification of gravitational microlensing events using transformer neural networks with anti-cheating architecture.
+Real-time classification of gravitational microlensing events using transformer neural networks
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![PyTorch 2.2](https://img.shields.io/badge/pytorch-2.2.0-orange.svg)](https://pytorch.org/)
