@@ -1,19 +1,21 @@
 """
-Transformer Architecture v15.0 - Anti-Cheating Edition
-======================================================
+Transformer Architecture v15.1 - Anti-Cheating Edition (FIXED)
+==============================================================
 
-CRITICAL CHANGES:
-1. **Semi-Causal Attention**: Prevents future peeking (no shortcuts from peak timing)
-2. **Temporal Invariance Loss**: Forces model to ignore absolute time positions
-3. **Simplified Multi-Task**: Only caustic detection (Binary-specific feature)
-4. **Attention Diagnostics**: Tools to detect temporal shortcuts
+CRITICAL FIXES (v15.1):
+1. **Renamed TemporalInvarianceLoss → FeatureDiversityLoss** (accurately reflects what it does)
+2. **Clarified**: This is NOT a temporal invariance loss, it's a batch diversity regularizer
+3. **Made optional**: Default weight = 0.0 (disabled unless explicitly enabled)
+
+ANTI-CHEATING FEATURES (Working correctly):
+1. **Semi-Causal Attention**: Prevents future peeking ✓
+2. **Relative Positional Encoding**: No absolute time information ✓  
+3. **Wide t_0 sampling in simulation**: Forces morphology learning ✓
 
 Three-Class Classification: 0=Flat, 1=PSPL, 2=Binary
 
-Key Innovation: Model learns from magnification morphology, NOT temporal position.
-
 Author: Kunal Bhatia
-Version: 15.0
+Version: 15.1 (Fixed)
 """
 
 import torch
@@ -256,12 +258,20 @@ class TransformerBlock(nn.Module):
         return x, attn_weights
 
 
-class TemporalInvarianceLoss(nn.Module):
+class FeatureDiversityLoss(nn.Module):
     """
-    Temporal Invariance Loss - CRITICAL for preventing shortcuts
+    Feature Diversity Loss (RENAMED from TemporalInvarianceLoss in v15.0)
     
-    Encourages the model to produce similar embeddings for time-shifted
-    versions of the same event. This prevents learning "peak at time X = class Y".
+    IMPORTANT: This is NOT a temporal invariance loss. This is a batch-level
+    diversity regularizer that encourages different events in a batch to have
+    distinct embeddings.
+    
+    This loss does NOT enforce temporal invariance (which would require positive
+    pairs of augmented versions of the same event). It's a standard diversity/
+    entropy regularization technique.
+    
+    DEFAULT: This loss is DISABLED (weight=0.0) in the fixed version, as it
+    does not contribute to the anti-cheating architecture as originally claimed.
     """
     
     def __init__(self, temperature: float = 0.07):
@@ -276,7 +286,7 @@ class TemporalInvarianceLoss(nn.Module):
             padding_mask: Padding mask [B, T]
         
         Returns:
-            Temporal invariance loss (scalar)
+            Feature diversity loss (scalar)
         """
         B, T, D = embeddings.shape
         
@@ -295,7 +305,7 @@ class TemporalInvarianceLoss(nn.Module):
         mask = torch.eye(B, device=embeddings.device, dtype=torch.bool)
         sim_matrix = sim_matrix.masked_fill(mask, -1e4)
         
-        # InfoNCE-style loss: encourage diversity
+        # Diversity loss: encourage distinct embeddings across batch
         loss = -F.log_softmax(sim_matrix, dim=1).diag().mean()
         
         return loss
@@ -303,13 +313,16 @@ class TemporalInvarianceLoss(nn.Module):
 
 class MicrolensingTransformer(nn.Module):
     """
-    Transformer for 3-class microlensing classification v15.0
+    Transformer for 3-class microlensing classification v15.1 (FIXED)
     
-    ANTI-CHEATING FEATURES:
-    1. Semi-causal attention (no future peeking)
-    2. Relative positional encoding (no absolute time)
-    3. Temporal invariance loss (penalizes time-dependent features)
-    4. Simplified multi-task (only caustic detection for Binary class)
+    ANTI-CHEATING FEATURES (Correctly Implemented):
+    1. ✓ Semi-causal attention (no future peeking)
+    2. ✓ Relative positional encoding (no absolute time)
+    3. ✓ Wide t_0 sampling range in simulation (forces morphology learning)
+    
+    REMOVED/OPTIONAL:
+    - Feature diversity loss (renamed, disabled by default, weight=0.0)
+    - Temporal randomization (removed from simulate.py to avoid artifacts)
     """
     
     def __init__(
@@ -324,7 +337,7 @@ class MicrolensingTransformer(nn.Module):
         max_seq_len: int = 2000,
         use_checkpoint: bool = False,
         causal_attention: bool = True,
-        temporal_invariance_weight: float = 0.1
+        feature_diversity_weight: float = 0.0  # RENAMED and DISABLED by default
     ):
         super().__init__()
         
@@ -334,7 +347,7 @@ class MicrolensingTransformer(nn.Module):
         self.nhead = nhead
         self.use_checkpoint = use_checkpoint
         self.causal_attention = causal_attention
-        self.temporal_invariance_weight = temporal_invariance_weight
+        self.feature_diversity_weight = feature_diversity_weight
         
         # Input embedding
         self.input_embed = nn.Sequential(
@@ -364,7 +377,7 @@ class MicrolensingTransformer(nn.Module):
         # Final norm
         self.norm = nn.LayerNorm(d_model, eps=1e-6)
         
-        # SIMPLIFIED: Only classification + caustic detection
+        # Classification + caustic detection
         self.classification_head = nn.Sequential(
             nn.LayerNorm(d_model, eps=1e-6),
             nn.Linear(d_model, d_model // 2),
@@ -382,8 +395,8 @@ class MicrolensingTransformer(nn.Module):
             nn.Linear(d_model // 4, 1)
         )
         
-        # Temporal invariance loss
-        self.temporal_invariance_loss = TemporalInvarianceLoss()
+        # Feature diversity loss (optional, disabled by default)
+        self.feature_diversity_loss = FeatureDiversityLoss()
         
         # Confidence estimation
         self.confidence_head = nn.Sequential(
@@ -512,11 +525,11 @@ class MicrolensingTransformer(nn.Module):
         # Final norm
         x_embed = self.norm(x_embed)
         
-        # Compute temporal invariance loss (before pooling)
-        if self.training and self.temporal_invariance_weight > 0:
-            temp_inv_loss = self.temporal_invariance_loss(x_embed, padding_mask)
+        # Compute feature diversity loss (optional, disabled by default)
+        if self.training and self.feature_diversity_weight > 0:
+            feat_div_loss = self.feature_diversity_loss(x_embed, padding_mask)
         else:
-            temp_inv_loss = torch.tensor(0.0, device=x.device)
+            feat_div_loss = torch.tensor(0.0, device=x.device)
         
         # Global pooling
         x_pooled = self.global_pooling(x_embed, padding_mask)
@@ -535,7 +548,7 @@ class MicrolensingTransformer(nn.Module):
             'binary': logits,  # Alias for compatibility
             'caustic': caustic_logits,
             'confidence': confidence,
-            'temporal_invariance_loss': temp_inv_loss
+            'feature_diversity_loss': feat_div_loss  # RENAMED
         }
         
         if return_all:
@@ -556,58 +569,9 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ============================================================================
-# ATTENTION DIAGNOSTICS
-# ============================================================================
-
-def analyze_attention_patterns(model, dataloader, device='cuda', n_samples=100):
-    """
-    Analyze attention patterns to detect temporal shortcuts
-    
-    Returns:
-        dict with attention statistics
-    """
-    model.eval()
-    
-    attention_entropies = []
-    temporal_concentration = []
-    
-    with torch.no_grad():
-        for i, (X, y, _) in enumerate(dataloader):
-            if i >= n_samples:
-                break
-            
-            X = X.to(device)
-            outputs = model(X, return_attention=True)
-            
-            # Get last layer attention weights
-            attn_weights = outputs['attention_weights'][-1]  # [B, H, T, T]
-            
-            # Compute attention entropy (higher = more uniform, better)
-            B, H, T, _ = attn_weights.shape
-            for b in range(B):
-                for h in range(H):
-                    attn = attn_weights[b, h]
-                    entropy = -(attn * (attn + 1e-10).log()).sum(dim=-1).mean()
-                    attention_entropies.append(entropy.item())
-            
-            # Check if attention concentrates on specific time regions
-            # (which would indicate temporal shortcuts)
-            temporal_attn = attn_weights.mean(dim=(0, 1))  # Average over batch and heads [T, T]
-            concentration = temporal_attn.max(dim=-1)[0].mean()
-            temporal_concentration.append(concentration.item())
-    
-    return {
-        'mean_entropy': np.mean(attention_entropies),
-        'std_entropy': np.std(attention_entropies),
-        'mean_concentration': np.mean(temporal_concentration),
-        'std_concentration': np.std(temporal_concentration)
-    }
-
-
 if __name__ == "__main__":
     print("="*70)
-    print("MicrolensingTransformer v15.0 - Anti-Cheating Edition")
+    print("MicrolensingTransformer v15.1 - FIXED")
     print("="*70)
     
     model = MicrolensingTransformer(
@@ -618,26 +582,26 @@ if __name__ == "__main__":
         dim_feedforward=512,
         dropout=0.1,
         causal_attention=True,
-        temporal_invariance_weight=0.1
+        feature_diversity_weight=0.0  # DISABLED by default
     )
     
     print(f"\nParameters: {count_parameters(model):,}")
-    print(f"Causal attention: ENABLED")
-    print(f"Temporal invariance loss: ENABLED (weight=0.1)")
+    print(f"Causal attention: ENABLED ✓")
+    print(f"Relative positional encoding: ENABLED ✓")
+    print(f"Feature diversity loss: DISABLED (weight=0.0)")
     
     # Test forward pass
     x = torch.randn(8, 1500)
     x[:, 500:] = -1.0  # Add padding
     
-    outputs = model(x, return_all=True, return_attention=True)
+    outputs = model(x, return_all=True)
     
     print(f"\nOutput shapes:")
     print(f"  Logits: {outputs['logits'].shape}")
     print(f"  Caustic: {outputs['caustic'].shape}")
     print(f"  Confidence: {outputs['confidence'].shape}")
-    print(f"  Temporal inv loss: {outputs['temporal_invariance_loss'].item():.4f}")
-    print(f"  Attention weights: {len(outputs['attention_weights'])} layers")
+    print(f"  Feature div loss: {outputs['feature_diversity_loss'].item():.4f}")
     
     print("\n" + "="*70)
-    print("✅ Model initialized successfully")
+    print("✅ Model initialized successfully (FIXED VERSION)")
     print("="*70)
