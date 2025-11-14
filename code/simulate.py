@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Microlensing Event Simulation
-==============================
+Microlensing Event Simulation v15.0
+====================================
 
-Generates realistic gravitational microlensing light curves for three classes:
-- Flat (0): No event, baseline flux only
-- PSPL (1): Point Source Point Lens
-- Binary (2): Binary lens (planetary or stellar companion)
+Self-contained simulation with built-in presets for:
+- Binary topology studies (distinct, planetary, stellar, challenging)
+- Cadence studies (5%, 15%, 30%, 50% missing)
+- Photometric error studies (0.03, 0.05, 0.10, 0.15 mag)
 
-Uses VBBinaryLensing for physically accurate binary lens calculations.
+NO external config.py dependencies - everything built-in.
 
 Author: Kunal Bhatia
-Version: 14.0
+Version: 15.0
 """
 
 import numpy as np
@@ -21,40 +21,197 @@ import json
 from pathlib import Path
 from multiprocessing import Pool
 from functools import partial
-import sys
+import math
 
-# Import configuration
-from config import (
-    N_POINTS, TIME_MIN, TIME_MAX,
-    PSPL_T0_MIN, PSPL_T0_MAX, PSPL_U0_MIN, PSPL_U0_MAX, PSPL_TE_MIN, PSPL_TE_MAX,
-    BASELINE_MIN, BASELINE_MAX,
-    CADENCE_MASK_PROB, MAG_ERROR_STD, PAD_VALUE,
-    BINARY_PARAM_SETS, VBM_TOLERANCE, MAX_BINARY_ATTEMPTS,
-    get_config_summary, validate_config
-)
+# ============================================================================
+# BUILT-IN CONFIGURATION (No external dependencies)
+# ============================================================================
 
-# Try to import VBBinaryLensing
+class SimConfig:
+    """Built-in simulation parameters"""
+    # Temporal
+    N_POINTS = 1500
+    TIME_MIN = -120
+    TIME_MAX = 120
+    
+    # VBBinaryLensing
+    VBM_TOLERANCE = 1e-4
+    MAX_BINARY_ATTEMPTS = 10
+    
+    # Observational - Roman baseline
+    CADENCE_MASK_PROB = 0.05  # 5% missing
+    MAG_ERROR_STD = 0.05       # Space-based
+    BASELINE_MIN = 19.0
+    BASELINE_MAX = 22.0
+    
+    # Data
+    PAD_VALUE = -1.0
+
+
+class PSPLParams:
+    """PSPL parameter ranges - TEMPORAL INVARIANT"""
+    # CRITICAL: Wide t0 range to prevent temporal shortcuts
+    T0_MIN = -80.0   # Can peak well before observation
+    T0_MAX = 60.0    # Can peak late in observation
+    U0_MIN = 0.001
+    U0_MAX = 0.3
+    TE_MIN = 20.0
+    TE_MAX = 40.0
+
+
+class BinaryPresets:
+    """
+    Binary topology presets
+    
+    Each preset defines a specific science case:
+    - distinct: Clear caustics (optimal detection)
+    - planetary: Exoplanet search (small q)
+    - stellar: Binary stars (large q)
+    - challenging: Physical limits (wide u0)
+    - baseline: Mixed population (realistic)
+    """
+    
+    PRESETS = {
+        'distinct': {
+            'description': 'Clear caustics - optimal detection',
+            's_range': (0.7, 1.5),
+            'q_range': (0.01, 0.5),
+            'u0_range': (0.001, 0.15),
+            'rho_range': (0.001, 0.01),
+            'alpha_range': (0, math.pi),
+            't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
+            'tE_range': (30.0, 40.0),
+        },
+        
+        'planetary': {
+            'description': 'Exoplanet focus - small mass ratios',
+            's_range': (0.5, 2.0),
+            'q_range': (0.0001, 0.01),
+            'u0_range': (0.001, 0.3),
+            'rho_range': (0.0001, 0.01),
+            'alpha_range': (0, 2 * math.pi),
+            't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
+            'tE_range': (20.0, 40.0),
+        },
+        
+        'stellar': {
+            'description': 'Binary stars - equal masses',
+            's_range': (0.3, 3.0),
+            'q_range': (0.3, 1.0),
+            'u0_range': (0.001, 0.3),
+            'rho_range': (0.001, 0.05),
+            'alpha_range': (0, 2 * math.pi),
+            't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
+            'tE_range': (30.0, 40.0),
+        },
+        
+        'challenging': {
+            'description': 'Physical limits - wide u0 range',
+            's_range': (0.1, 3.0),
+            'q_range': (0.0001, 1.0),
+            'u0_range': (0.01, 1.0),  # Includes undetectable
+            'rho_range': (0.001, 0.1),
+            'alpha_range': (0, 2 * math.pi),
+            't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
+            'tE_range': (10.0, 40.0),
+        },
+        
+        'baseline': {
+            'description': 'Mixed population - realistic survey',
+            's_range': (0.1, 2.5),
+            'q_range': (0.001, 1.0),
+            'u0_range': (0.001, 0.3),
+            'rho_range': (0.001, 0.05),
+            'alpha_range': (0, 2 * math.pi),
+            't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
+            'tE_range': (20.0, 40.0),
+        }
+    }
+
+
+class ObservationalPresets:
+    """
+    Cadence and photometric error presets
+    
+    Cadence studies: How does sampling frequency affect classification?
+    Error studies: How does photometric quality affect classification?
+    """
+    
+    CADENCE_PRESETS = {
+        'roman': {
+            'description': 'Roman Space Telescope (~15 min)',
+            'mask_prob': 0.05,
+            'error': 0.05
+        },
+        'lsst_good': {
+            'description': 'LSST good weather (~2 days)',
+            'mask_prob': 0.15,
+            'error': 0.10
+        },
+        'lsst_typical': {
+            'description': 'LSST typical (~3 days)',
+            'mask_prob': 0.30,
+            'error': 0.10
+        },
+        'lsst_sparse': {
+            'description': 'LSST sparse (~5 days)',
+            'mask_prob': 0.50,
+            'error': 0.10
+        }
+    }
+    
+    ERROR_PRESETS = {
+        'excellent': {
+            'description': 'Space-based quality',
+            'mask_prob': 0.05,
+            'error': 0.03
+        },
+        'good': {
+            'description': 'High-quality ground',
+            'mask_prob': 0.05,
+            'error': 0.05
+        },
+        'typical': {
+            'description': 'Typical ground survey',
+            'mask_prob': 0.05,
+            'error': 0.10
+        },
+        'poor': {
+            'description': 'Challenging conditions',
+            'mask_prob': 0.05,
+            'error': 0.15
+        }
+    }
+
+
+# ============================================================================
+# VBBinaryLensing (Try import)
+# ============================================================================
+
 try:
     import VBBinaryLensing
     HAS_VBB = True
-    print("✅ VBBinaryLensing loaded successfully")
 except ImportError:
     HAS_VBB = False
-    print("⚠️  VBBinaryLensing not found, will use approximation")
+    print("⚠️  VBBinaryLensing not found, using approximation")
 
+
+# ============================================================================
+# MAGNIFICATION FUNCTIONS
+# ============================================================================
 
 def pspl_magnification(t, t_E, u_0, t_0):
-    """Compute PSPL magnification"""
+    """Point Source Point Lens magnification"""
     u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
     A = (u**2 + 2) / (u * np.sqrt(u**2 + 4))
     return A
 
 
 def binary_magnification_vbb(t, t_E, u_0, t_0, s, q, alpha, rho=0.001):
-    """Compute binary lens magnification using VBBinaryLensing"""
+    """Binary lens magnification using VBBinaryLensing"""
     VBB = VBBinaryLensing.VBBinaryLensing()
-    VBB.Tol = VBM_TOLERANCE
-    VBB.RelTol = VBM_TOLERANCE
+    VBB.Tol = SimConfig.VBM_TOLERANCE
+    VBB.RelTol = SimConfig.VBM_TOLERANCE
     
     tau = (t - t_0) / t_E
     source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
@@ -75,6 +232,7 @@ def binary_magnification_approx(t, t_E, u_0, t_0, s, q, alpha, rho=0.001):
     source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
     source_y = u_0 * np.sin(alpha) - tau * np.cos(alpha)
     
+    # Simple caustic perturbation
     caustic_x = s * np.array([0.5, -0.5, 0, 0])
     caustic_y = s * np.array([0, 0, 0.5, -0.5])
     
@@ -85,46 +243,37 @@ def binary_magnification_approx(t, t_E, u_0, t_0, s, q, alpha, rho=0.001):
         perturbation += q * np.exp(-dist**2 / (2 * caustic_width**2))
     
     A_binary = A_pspl * (1 + perturbation * 3)
-    
     return A_binary
 
 
+# ============================================================================
+# PARAMETER GENERATION
+# ============================================================================
+
 def generate_flat_params(n_events, seed=None):
-    """
-    Generate parameters for flat (no event) light curves
-    
-    Args:
-        n_events: Number of flat events to generate
-        seed: Random seed
-        
-    Returns:
-        list: List of parameter dictionaries
-    """
+    """Generate Flat (no event) parameters"""
     if seed is not None:
         np.random.seed(seed)
     
     params = []
     for _ in range(n_events):
-        m_source = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
-        params.append({
-            'm_source': m_source,
-            'type': 'flat'
-        })
+        m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
+        params.append({'m_source': m_source, 'type': 'flat'})
     
     return params
 
 
 def generate_pspl_params(n_events, seed=None):
-    """Generate PSPL parameters using config values"""
+    """Generate PSPL parameters with temporal invariance"""
     if seed is not None:
         np.random.seed(seed)
     
     params = []
     for _ in range(n_events):
-        t_E = np.random.uniform(PSPL_TE_MIN, PSPL_TE_MAX)
-        t_0 = np.random.uniform(PSPL_T0_MIN, PSPL_T0_MAX)
-        u_0 = np.random.uniform(PSPL_U0_MIN, PSPL_U0_MAX)
-        m_source = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
+        t_E = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
+        t_0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
+        u_0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
+        m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
         
         params.append({
             't_E': t_E,
@@ -137,30 +286,27 @@ def generate_pspl_params(n_events, seed=None):
     return params
 
 
-def generate_binary_params(n_events, params_set='baseline', seed=None):
-    """Generate binary lens parameters using config values"""
+def generate_binary_params(n_events, preset='baseline', seed=None):
+    """Generate Binary parameters from preset"""
     if seed is not None:
         np.random.seed(seed)
     
-    if params_set not in BINARY_PARAM_SETS:
-        print(f"⚠️  Unknown params_set '{params_set}', using 'baseline'")
-        params_set = 'baseline'
+    if preset not in BinaryPresets.PRESETS:
+        print(f"⚠️  Unknown preset '{preset}', using 'baseline'")
+        preset = 'baseline'
     
-    config = BINARY_PARAM_SETS[params_set]
-    
+    config = BinaryPresets.PRESETS[preset]
     params = []
     
-    pbar = tqdm(total=n_events, desc=f"  Generating {params_set} binary params")
-    
-    for _ in range(n_events):
-        t_E = np.random.uniform(config['tE_min'], config['tE_max'])
-        t_0 = np.random.uniform(config['t0_min'], config['t0_max'])
-        u_0 = np.random.uniform(config['u0_min'], config['u0_max'])
-        s = np.random.uniform(config['s_min'], config['s_max'])
-        q = np.random.uniform(config['q_min'], config['q_max'])
-        alpha = np.random.uniform(config['alpha_min'], config['alpha_max'])
-        rho = np.random.uniform(config['rho_min'], config['rho_max'])
-        m_source = np.random.uniform(BASELINE_MIN, BASELINE_MAX)
+    for _ in tqdm(range(n_events), desc=f"  Generating {preset} params"):
+        t_E = np.random.uniform(config['tE_range'][0], config['tE_range'][1])
+        t_0 = np.random.uniform(config['t0_range'][0], config['t0_range'][1])
+        u_0 = np.random.uniform(config['u0_range'][0], config['u0_range'][1])
+        s = np.random.uniform(config['s_range'][0], config['s_range'][1])
+        q = np.random.uniform(config['q_range'][0], config['q_range'][1])
+        alpha = np.random.uniform(config['alpha_range'][0], config['alpha_range'][1])
+        rho = np.random.uniform(config['rho_range'][0], config['rho_range'][1])
+        m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
         
         params.append({
             't_E': t_E,
@@ -173,27 +319,17 @@ def generate_binary_params(n_events, params_set='baseline', seed=None):
             'm_source': m_source,
             'type': 'binary'
         })
-        pbar.update(1)
-    
-    pbar.close()
     
     return params
 
 
+# ============================================================================
+# LIGHT CURVE GENERATION
+# ============================================================================
+
 def generate_light_curve(params, event_type, timestamps):
-    """
-    Generate a single light curve
-    
-    Args:
-        params: Parameter dictionary
-        event_type: 'flat', 'pspl', or 'binary'
-        timestamps: Time array
-        
-    Returns:
-        Flux array
-    """
+    """Generate a single light curve"""
     if event_type == 'flat':
-        # Just return constant flux (magnification = 1.0)
         A = np.ones_like(timestamps)
     elif event_type == 'pspl':
         A = pspl_magnification(timestamps, params['t_E'], params['u_0'], params['t_0'])
@@ -212,242 +348,378 @@ def generate_light_curve(params, event_type, timestamps):
     return A
 
 
-def add_observational_effects(flux, error_mag=MAG_ERROR_STD, 
-                              cadence_missing=CADENCE_MASK_PROB, 
-                              pad_value=PAD_VALUE):
+def add_observational_effects(flux, error_mag, cadence_missing, pad_value):
     """Add realistic observational effects"""
     flux_obs = flux.copy()
     
-    # Add photometric noise
+    # Photometric noise
     noise = np.random.normal(0, error_mag, size=len(flux))
     flux_obs = flux_obs * (1 + noise)
     
-    # Add missing observations
+    # Missing observations
     mask = np.random.random(len(flux)) < cadence_missing
     flux_obs[mask] = pad_value
     
-    # Ensure positive flux where not masked
+    # Ensure positive flux
     flux_obs[flux_obs != pad_value] = np.maximum(flux_obs[flux_obs != pad_value], 0.01)
     
     return flux_obs
 
 
 def generate_single_event(args):
-    """
-    Wrapper for parallel generation
-    
-    Args:
-        args: (index, params, event_type, timestamps, cadence, error)
-        
-    Returns:
-        (flux, label, params)
-    """
-    idx, params, event_type, timestamps, cadence, error = args
+    """Wrapper for parallel generation"""
+    idx, params, event_type, timestamps, cadence, error, pad_value = args
     
     # Generate clean light curve
     flux = generate_light_curve(params, event_type, timestamps)
     
     # Add observational effects
-    flux_obs = add_observational_effects(flux, error_mag=error, cadence_missing=cadence)
+    flux_obs = add_observational_effects(flux, error, cadence, pad_value)
     
-    # Label: 0 = Flat, 1 = PSPL, 2 = Binary
-    if event_type == 'flat':
-        label = 0
-    elif event_type == 'pspl':
-        label = 1
-    else:  # binary
-        label = 2
+    # Label: 0=Flat, 1=PSPL, 2=Binary
+    label = {'flat': 0, 'pspl': 1, 'binary': 2}[event_type]
     
     return flux_obs, label, params
 
 
-def simulate_dataset(n_flat, n_pspl, n_binary, binary_params='baseline', 
-                     num_workers=1, seed=None, save_params=False,
-                     cadence_mask_prob=None, mag_error_std=None):
+# ============================================================================
+# TEMPORAL RANDOMIZATION (Anti-Cheating)
+# ============================================================================
+
+def apply_temporal_randomization(X, y, params_dict, timestamps, max_shift=30.0, pad_value=-1.0):
     """
-    Generate complete dataset with three classes
+    Apply random time shifts to prevent temporal shortcuts
+    
+    This is CRITICAL to prevent the model from learning:
+    "peak at time X = class Y"
+    
+    Instead, the model must learn morphology patterns.
+    """
+    print("\n" + "="*70)
+    print("APPLYING TEMPORAL RANDOMIZATION (Anti-Cheating)")
+    print("="*70)
+    print(f"Max shift: ±{max_shift} days")
+    
+    X_shifted = X.copy()
+    params_shifted = {'flat': [], 'pspl': [], 'binary': []}
+    
+    for i in tqdm(range(len(X)), desc="  Randomizing"):
+        # Random time shift
+        shift = np.random.uniform(-max_shift, max_shift)
+        
+        # Shift light curve via interpolation
+        flux = X[i]
+        valid_mask = flux != pad_value
+        
+        if valid_mask.sum() > 0:
+            valid_times_old = timestamps[valid_mask]
+            valid_flux = flux[valid_mask]
+            
+            # Interpolate onto shifted timeline
+            flux_interp = np.interp(
+                timestamps,
+                valid_times_old + shift,
+                valid_flux,
+                left=pad_value,
+                right=pad_value
+            )
+            
+            X_shifted[i] = flux_interp
+        
+        # Update parameters
+        class_idx = int(y[i])
+        if class_idx == 0:
+            params_shifted['flat'].append(params_dict['flat'][len(params_shifted['flat'])])
+        elif class_idx == 1:
+            param = params_dict['pspl'][len(params_shifted['pspl'])].copy()
+            param['t_0'] += shift
+            params_shifted['pspl'].append(param)
+        else:
+            param = params_dict['binary'][len(params_shifted['binary'])].copy()
+            param['t_0'] += shift
+            params_shifted['binary'].append(param)
+    
+    print("✅ Temporal randomization applied")
+    
+    return X_shifted, params_shifted
+
+
+# ============================================================================
+# MAIN SIMULATION FUNCTION
+# ============================================================================
+
+def simulate_dataset(
+    n_flat, n_pspl, n_binary,
+    binary_preset='baseline',
+    observational_preset=None,
+    cadence_mask_prob=None,
+    mag_error_std=None,
+    apply_temporal_randomization_flag=True,
+    max_time_shift=30.0,
+    num_workers=1,
+    seed=None,
+    save_params=True
+):
+    """
+    Generate complete 3-class dataset
     
     Args:
-        n_flat: Number of flat (no event) light curves
-        n_pspl: Number of PSPL events
-        n_binary: Number of binary events
-        binary_params: Binary configuration
-        num_workers: Number of parallel workers
+        n_flat, n_pspl, n_binary: Event counts
+        binary_preset: Topology preset name
+        observational_preset: Cadence/error preset (overrides individual settings)
+        cadence_mask_prob: Override cadence
+        mag_error_std: Override error
+        apply_temporal_randomization_flag: Apply random time shifts
+        max_time_shift: Maximum shift magnitude
+        num_workers: Parallel workers
         seed: Random seed
-        save_params: Whether to save event parameters
-        cadence_mask_prob: Override CADENCE_MASK_PROB from config
-        mag_error_std: Override MAG_ERROR_STD from config
-        
-    Returns:
-        X: Light curves (n_events, n_points)
-        y: Labels (n_events,) - 0=Flat, 1=PSPL, 2=Binary
-        timestamps: Time array
-        params_dict: Event parameters (if save_params=True)
+        save_params: Save event parameters
     """
     if seed is not None:
         np.random.seed(seed)
     
-    # Generate timestamps
-    timestamps = np.linspace(TIME_MIN, TIME_MAX, N_POINTS)
+    # Get observational parameters
+    if observational_preset:
+        if observational_preset in ObservationalPresets.CADENCE_PRESETS:
+            obs_config = ObservationalPresets.CADENCE_PRESETS[observational_preset]
+        elif observational_preset in ObservationalPresets.ERROR_PRESETS:
+            obs_config = ObservationalPresets.ERROR_PRESETS[observational_preset]
+        else:
+            print(f"⚠️  Unknown observational preset '{observational_preset}'")
+            obs_config = {'mask_prob': SimConfig.CADENCE_MASK_PROB, 'error': SimConfig.MAG_ERROR_STD}
+        
+        cadence = obs_config['mask_prob']
+        error = obs_config['error']
+    else:
+        cadence = cadence_mask_prob if cadence_mask_prob is not None else SimConfig.CADENCE_MASK_PROB
+        error = mag_error_std if mag_error_std is not None else SimConfig.MAG_ERROR_STD
     
-    # Use overrides if provided, otherwise use config defaults
-    cadence = CADENCE_MASK_PROB if cadence_mask_prob is None else cadence_mask_prob
-    error = MAG_ERROR_STD if mag_error_std is None else mag_error_std
+    # Generate timestamps
+    timestamps = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS)
+    
+    # Print configuration
+    print("="*70)
+    print("MICROLENSING SIMULATION v15.0")
+    print("="*70)
+    print(f"Dataset: Flat={n_flat}, PSPL={n_pspl}, Binary={n_binary}")
+    print(f"Binary topology: {binary_preset}")
+    print(f"Cadence: {cadence*100:.0f}% missing")
+    print(f"Error: {error:.3f} mag")
+    print(f"Temporal randomization: {'ON' if apply_temporal_randomization_flag else 'OFF'}")
+    print(f"Workers: {num_workers}")
     
     # Generate parameters
-    print("="*70)
-    print("MICROLENSING EVENT SIMULATION")
-    print("="*70)
-    print(f"Dataset composition:")
-    print(f"  Flat:   {n_flat}")
-    print(f"  PSPL:   {n_pspl}")
-    print(f"  Binary: {n_binary}")
-    print(f"  Total:  {n_flat + n_pspl + n_binary}")
-    print(f"Binary topology: {binary_params}")
-    print(f"Time window: [{TIME_MIN}, {TIME_MAX}] days")
-    print(f"Cadence: {cadence*100:.0f}% missing observations")
-    print(f"Photometric error: {error:.3f} mag")
-    print(f"Parallel workers: {num_workers}")
-    
-    print("\nGenerating Flat parameters...")
+    print("\nGenerating parameters...")
     params_flat = generate_flat_params(n_flat, seed=seed)
-    
-    print("Generating PSPL parameters...")
     params_pspl = generate_pspl_params(n_pspl, seed=seed+1 if seed else None)
-    
-    print(f"Generating Binary parameters ({binary_params})...")
-    params_binary = generate_binary_params(n_binary, params_set=binary_params, 
+    params_binary = generate_binary_params(n_binary, preset=binary_preset, 
                                           seed=seed+2 if seed else None)
     
-    # Prepare arguments with all three event types
+    # Prepare arguments
     args_list = []
-    args_list.extend([(i, p, 'flat', timestamps, cadence, error) 
+    args_list.extend([(i, p, 'flat', timestamps, cadence, error, SimConfig.PAD_VALUE) 
                       for i, p in enumerate(params_flat)])
-    args_list.extend([(i, p, 'pspl', timestamps, cadence, error) 
+    args_list.extend([(i, p, 'pspl', timestamps, cadence, error, SimConfig.PAD_VALUE) 
                       for i, p in enumerate(params_pspl)])
-    args_list.extend([(i, p, 'binary', timestamps, cadence, error) 
+    args_list.extend([(i, p, 'binary', timestamps, cadence, error, SimConfig.PAD_VALUE) 
                       for i, p in enumerate(params_binary)])
     
-    # Generate events in parallel
-    print(f"\nGenerating light curves ({num_workers} workers)...")
+    # Generate events
+    print(f"\nGenerating light curves...")
     if num_workers > 1:
         with Pool(num_workers) as pool:
             results = list(tqdm(
                 pool.imap(generate_single_event, args_list),
                 total=len(args_list),
-                desc="  Processing events"
+                desc="  Processing"
             ))
     else:
-        results = [generate_single_event(args) for args in tqdm(args_list, desc="  Processing events")]
+        results = [generate_single_event(args) for args in tqdm(args_list, desc="  Processing")]
     
-    # Unpack results
+    # Unpack
     X = np.array([r[0] for r in results])
     y = np.array([r[1] for r in results])
     all_params = [r[2] for r in results]
+    
+    # Organize parameters
+    params_dict = {
+        'flat': [all_params[i] for i in range(len(all_params)) if y[i] == 0],
+        'pspl': [all_params[i] for i in range(len(all_params)) if y[i] == 1],
+        'binary': [all_params[i] for i in range(len(all_params)) if y[i] == 2]
+    }
+    
+    # Apply temporal randomization
+    if apply_temporal_randomization_flag:
+        X, params_dict = apply_temporal_randomization(
+            X, y, params_dict, timestamps, 
+            max_shift=max_time_shift,
+            pad_value=SimConfig.PAD_VALUE
+        )
     
     # Shuffle
     shuffle_idx = np.random.permutation(len(X))
     X = X[shuffle_idx]
     y = y[shuffle_idx]
-    all_params = [all_params[i] for i in shuffle_idx]
     
     # Statistics
     print("\n" + "="*70)
     print("GENERATION COMPLETE")
     print("="*70)
-    print(f"Total events: {len(X)}")
+    print(f"Total: {len(X)}")
     print(f"  Flat:   {(y==0).sum()} ({(y==0).mean()*100:.1f}%)")
     print(f"  PSPL:   {(y==1).sum()} ({(y==1).mean()*100:.1f}%)")
     print(f"  Binary: {(y==2).sum()} ({(y==2).mean()*100:.1f}%)")
     
-    # Binary statistics
-    binary_mag = []
-    for i, label in enumerate(y):
-        if label == 2:
-            flux = X[i]
-            valid_flux = flux[flux != PAD_VALUE]
-            if len(valid_flux) > 0:
-                binary_mag.append(valid_flux.max())
-    
-    if binary_mag:
-        binary_mag = np.array(binary_mag)
-        print(f"\nBinary Statistics:")
-        print(f"  Max magnification mean: {binary_mag.mean():.1f}")
-        print(f"  Max magnification median: {np.median(binary_mag):.1f}")
-        print(f"  Max magnification range: [{binary_mag.min():.1f}, {binary_mag.max():.1f}]")
-    
-    # Prepare return
-    params_dict = None
-    if save_params:
-        params_flat_list = [all_params[i] for i in range(len(all_params)) if y[i] == 0]
-        params_pspl_list = [all_params[i] for i in range(len(all_params)) if y[i] == 1]
-        params_binary_list = [all_params[i] for i in range(len(all_params)) if y[i] == 2]
-        params_dict = {
-            'flat': params_flat_list,
-            'pspl': params_pspl_list,
-            'binary': params_binary_list
-        }
-    
-    return X, y, timestamps, params_dict
+    return X, y, timestamps, params_dict if save_params else None
 
+
+# ============================================================================
+# CLI
+# ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate microlensing dataset (Flat, PSPL, Binary)'
+        description='Generate microlensing dataset v15.0',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Baseline (1M events, Roman quality)
+  python simulate_v15.py --preset baseline_1M
+  
+  # Topology study
+  python simulate_v15.py --preset distinct --n_flat 50000 --n_pspl 50000 --n_binary 50000
+  
+  # Cadence study
+  python simulate_v15.py --preset cadence_roman --n_flat 30000 --n_pspl 30000 --n_binary 30000
+  python simulate_v15.py --preset cadence_lsst_typical --n_flat 30000 --n_pspl 30000 --n_binary 30000
+  
+  # Error study
+  python simulate_v15.py --preset error_excellent --n_flat 30000 --n_pspl 30000 --n_binary 30000
+  python simulate_v15.py --preset error_typical --n_flat 30000 --n_pspl 30000 --n_binary 30000
+  
+  # Custom
+  python simulate_v15.py --n_flat 10000 --n_pspl 10000 --n_binary 10000 \\
+      --binary_preset planetary --cadence_mask_prob 0.10 --mag_error_std 0.08
+        """
     )
-    parser.add_argument('--n_flat', type=int, default=10000,
-                       help='Number of flat (no event) light curves')
-    parser.add_argument('--n_pspl', type=int, default=10000,
-                       help='Number of PSPL events')
-    parser.add_argument('--n_binary', type=int, default=10000,
-                       help='Number of binary events')
-    parser.add_argument('--binary_params', type=str, default='baseline',
-                       choices=list(BINARY_PARAM_SETS.keys()),
-                       help='Binary parameter configuration')
-    parser.add_argument('--output', type=str, default='../data/raw/dataset_3class.npz',
-                       help='Output file path')
-    parser.add_argument('--num_workers', type=int, default=1,
-                       help='Number of parallel workers')
-    parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed')
-    parser.add_argument('--save_params', action='store_true',
-                       help='Save event parameters in output file')
-    parser.add_argument('--cadence_mask_prob', type=float, default=None,
-                       help='Override CADENCE_MASK_PROB from config')
-    parser.add_argument('--mag_error_std', type=float, default=None,
-                       help='Override MAG_ERROR_STD from config')
-    parser.add_argument('--show_config', action='store_true',
-                       help='Show configuration and exit')
+    
+    # Event counts
+    parser.add_argument('--n_flat', type=int, default=10000)
+    parser.add_argument('--n_pspl', type=int, default=10000)
+    parser.add_argument('--n_binary', type=int, default=10000)
+    
+    # Presets
+    parser.add_argument('--preset', type=str, choices=[
+        'baseline_1M', 'quick_test',
+        'distinct', 'planetary', 'stellar', 'challenging',
+        'cadence_roman', 'cadence_lsst_good', 'cadence_lsst_typical', 'cadence_lsst_sparse',
+        'error_excellent', 'error_good', 'error_typical', 'error_poor'
+    ], help='Use predefined experiment preset')
+    
+    # Binary topology
+    parser.add_argument('--binary_preset', type=str, default='baseline',
+                       choices=list(BinaryPresets.PRESETS.keys()))
+    
+    # Observational
+    parser.add_argument('--cadence_mask_prob', type=float, default=None)
+    parser.add_argument('--mag_error_std', type=float, default=None)
+    
+    # Temporal randomization
+    parser.add_argument('--no_temporal_randomization', action='store_true',
+                       help='Disable temporal randomization (NOT recommended)')
+    parser.add_argument('--max_time_shift', type=float, default=30.0)
+    
+    # System
+    parser.add_argument('--output', type=str, default='../data/raw/dataset.npz')
+    parser.add_argument('--num_workers', type=int, default=1)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--no_save_params', action='store_true')
+    
+    # Info
+    parser.add_argument('--list_presets', action='store_true',
+                       help='List all available presets')
     
     args = parser.parse_args()
     
-    if args.show_config:
-        get_config_summary()
+    # List presets
+    if args.list_presets:
+        print("\n" + "="*70)
+        print("AVAILABLE PRESETS")
+        print("="*70)
+        
+        print("\nBinary Topologies:")
+        for name, config in BinaryPresets.PRESETS.items():
+            print(f"  {name:15s}: {config['description']}")
+        
+        print("\nCadence Presets:")
+        for name, config in ObservationalPresets.CADENCE_PRESETS.items():
+            print(f"  cadence_{name:15s}: {config['description']} ({config['mask_prob']*100:.0f}% missing)")
+        
+        print("\nError Presets:")
+        for name, config in ObservationalPresets.ERROR_PRESETS.items():
+            print(f"  error_{name:15s}: {config['description']} ({config['error']:.3f} mag)")
+        
+        print("\nExperiment Presets:")
+        print("  baseline_1M    : 1M events, Roman quality")
+        print("  quick_test     : 300 events, quick validation")
+        print("  distinct       : Topology study (clear caustics)")
+        print("  planetary      : Topology study (exoplanets)")
+        print("  stellar        : Topology study (binary stars)")
+        print("  challenging    : Topology study (physical limits)")
         print()
-        validate_config()
         return
     
-    if args.cadence_mask_prob is not None:
-        print(f"Cadence override: {args.cadence_mask_prob*100:.0f}% missing")
-    if args.mag_error_std is not None:
-        print(f"Error override: {args.mag_error_std:.3f} mag")
-    
-    print("\n" + "="*70)
-    if not validate_config():
-        print("\nConfiguration has warnings but will proceed...")
-    print("="*70 + "\n")
+    # Apply preset overrides
+    if args.preset:
+        if args.preset == 'baseline_1M':
+            args.n_flat = 333000
+            args.n_pspl = 333000
+            args.n_binary = 334000
+            args.binary_preset = 'baseline'
+            args.cadence_mask_prob = 0.05
+            args.mag_error_std = 0.05
+            args.output = '../data/raw/roman_baseline_1M.npz'
+        
+        elif args.preset == 'quick_test':
+            args.n_flat = 100
+            args.n_pspl = 100
+            args.n_binary = 100
+            args.binary_preset = 'baseline'
+            args.output = '../data/raw/quick_test.npz'
+        
+        elif args.preset in BinaryPresets.PRESETS:
+            args.binary_preset = args.preset
+            args.output = f'../data/raw/{args.preset}.npz'
+        
+        elif args.preset.startswith('cadence_'):
+            obs_name = args.preset.replace('cadence_', '')
+            if obs_name in ObservationalPresets.CADENCE_PRESETS:
+                obs = ObservationalPresets.CADENCE_PRESETS[obs_name]
+                args.cadence_mask_prob = obs['mask_prob']
+                args.mag_error_std = obs['error']
+                args.output = f'../data/raw/cadence_{obs_name}.npz'
+        
+        elif args.preset.startswith('error_'):
+            obs_name = args.preset.replace('error_', '')
+            if obs_name in ObservationalPresets.ERROR_PRESETS:
+                obs = ObservationalPresets.ERROR_PRESETS[obs_name]
+                args.cadence_mask_prob = obs['mask_prob']
+                args.mag_error_std = obs['error']
+                args.output = f'../data/raw/error_{obs_name}.npz'
     
     # Generate dataset
     X, y, timestamps, params_dict = simulate_dataset(
         n_flat=args.n_flat,
         n_pspl=args.n_pspl,
         n_binary=args.n_binary,
-        binary_params=args.binary_params,
+        binary_preset=args.binary_preset,
+        cadence_mask_prob=args.cadence_mask_prob,
+        mag_error_std=args.mag_error_std,
+        apply_temporal_randomization_flag=not args.no_temporal_randomization,
+        max_time_shift=args.max_time_shift,
         num_workers=args.num_workers,
         seed=args.seed,
-        save_params=args.save_params,
-        cadence_mask_prob=args.cadence_mask_prob,
-        mag_error_std=args.mag_error_std
+        save_params=not args.no_save_params
     )
     
     # Save
@@ -459,7 +731,13 @@ def main():
         'y': y,
         'timestamps': timestamps,
         'n_classes': 3,
-        'class_names': ['Flat', 'PSPL', 'Binary']
+        'class_names': ['Flat', 'PSPL', 'Binary'],
+        'version': '15.0',
+        'temporal_randomization': not args.no_temporal_randomization,
+        'max_time_shift': args.max_time_shift if not args.no_temporal_randomization else 0.0,
+        'binary_preset': args.binary_preset,
+        'cadence_mask_prob': args.cadence_mask_prob or SimConfig.CADENCE_MASK_PROB,
+        'mag_error_std': args.mag_error_std or SimConfig.MAG_ERROR_STD
     }
     
     if params_dict:
@@ -471,9 +749,9 @@ def main():
     
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"\n{'='*70}")
-    print(f"Dataset saved to: {output_path}")
+    print(f"Dataset saved: {output_path}")
     print(f"Size: {file_size_mb:.1f} MB")
-    print(f"Classes: 0=Flat, 1=PSPL, 2=Binary")
+    print(f"Version: 15.0")
     print(f"{'='*70}\n")
 
 

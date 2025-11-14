@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Distributed Training for Microlensing Classification
-====================================================
+Distributed Training v15.0 - Anti-Cheating Edition
+==================================================
 
-Trains transformer model for three-class classification (Flat/PSPL/Binary).
-
-Supports:
-- Single GPU and multi-GPU distributed training (DDP)
-- Mixed precision training (AMP)
-- Gradient checkpointing for memory efficiency
-- AMD (ROCm) and NVIDIA (CUDA) GPUs
+CRITICAL CHANGES:
+1. Temporal invariance loss integration
+2. Simplified multi-task learning (only caustic detection)
+3. Better gradient handling for causal attention
+4. Attention pattern monitoring during training
 
 Author: Kunal Bhatia
-Version: 14.0
+Version: 15.0
 """
 
 import os
@@ -22,6 +20,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
@@ -33,7 +32,6 @@ from datetime import datetime
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
-import torch.nn.functional as F
 
 # Suppress NCCL warnings
 os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
@@ -73,24 +71,9 @@ def print_rank0(message, rank=0):
 
 
 class MicrolensingDataset(Dataset):
-    """
-    Dataset for microlensing light curves
-    
-    Features:
-    - Pre-computed sequence lengths
-    - Efficient data loading
-    - Handles missing data (pad_value=-1.0)
-    """
+    """Dataset for microlensing light curves"""
     
     def __init__(self, X, y, pad_value=-1.0):
-        """
-        Initialize dataset
-        
-        Args:
-            X: Light curves [N, T]
-            y: Labels [N]
-            pad_value: Padding value
-        """
         # Clean data
         X = np.nan_to_num(X, nan=pad_value, posinf=100.0, neginf=-100.0)
         valid_mask = X != pad_value
@@ -108,12 +91,6 @@ class MicrolensingDataset(Dataset):
         return len(self.y)
     
     def __getitem__(self, idx):
-        """
-        Get single item
-        
-        Returns:
-            (x, y, length)
-        """
         return (
             self.X[idx],
             self.y[idx],
@@ -123,10 +100,8 @@ class MicrolensingDataset(Dataset):
 
 def collate_fn(batch):
     """Collate batch for DataLoader"""
-    # Unpack batch
     xs, ys, lengths = zip(*batch)
     
-    # Convert to tensors
     x_tensor = torch.from_numpy(np.stack(xs)).float()
     y_tensor = torch.from_numpy(np.array(ys)).long()
     lengths_tensor = torch.from_numpy(np.array(lengths)).long()
@@ -135,7 +110,7 @@ def collate_fn(batch):
 
 
 class StableNormalizer:
-    """Robust normalizer matching training"""
+    """Robust normalizer"""
     
     def __init__(self, pad_value=-1.0):
         self.pad_value = pad_value
@@ -173,24 +148,25 @@ class StableNormalizer:
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
-                device, epoch, rank, world_size, use_amp=True, grad_clip=1.0):
-    """Training epoch with distributed support"""
+                device, epoch, rank, world_size, 
+                temporal_inv_weight=0.1,
+                caustic_weight=0.8,
+                use_amp=True, grad_clip=1.0):
+    """
+    Training epoch with v15.0 features:
+    - Temporal invariance loss
+    - Simplified multi-task (only caustic)
+    """
     model.train()
     
     total_loss = 0
     classification_loss_total = 0
+    temporal_inv_loss_total = 0
+    caustic_loss_total = 0
     correct = 0
     total = 0
     num_batches = 0
     skipped_batches = 0
-    
-    # Loss tracking for auxiliary tasks
-    aux_losses = {
-        'flat': 0.0,
-        'pspl': 0.0,
-        'anomaly': 0.0,
-        'caustic': 0.0
-    }
     
     if rank == 0:
         pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
@@ -198,13 +174,12 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
         pbar = loader
     
     for batch_idx, (X, y, lengths) in enumerate(pbar):
-        # Move to device
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Forward pass with mixed precision
+        # Forward pass
         with autocast(enabled=use_amp):
             outputs = model(X, return_all=True)
             
@@ -213,38 +188,20 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             classification_loss = criterion(logits, y)
             loss = classification_loss
             
-            # Auxiliary losses with proper weights
-            if 'flat' in outputs:
-                flat_target = (y == 0).float()
-                flat_loss = F.binary_cross_entropy_with_logits(
-                    outputs['flat'], flat_target
-                )
-                loss = loss + 0.5 * flat_loss
-                aux_losses['flat'] += flat_loss.item()
+            # Temporal invariance loss (CRITICAL for anti-cheating)
+            if 'temporal_invariance_loss' in outputs:
+                temp_inv_loss = outputs['temporal_invariance_loss']
+                loss = loss + temporal_inv_weight * temp_inv_loss
+                temporal_inv_loss_total += temp_inv_loss.item()
             
-            if 'pspl' in outputs:
-                pspl_target = (y == 1).float()
-                pspl_loss = F.binary_cross_entropy_with_logits(
-                    outputs['pspl'], pspl_target
-                )
-                loss = loss + 0.7 * pspl_loss
-                aux_losses['pspl'] += pspl_loss.item()
-            
-            if 'anomaly' in outputs:
-                anomaly_target = (y > 0).float()
-                anomaly_loss = F.binary_cross_entropy_with_logits(
-                    outputs['anomaly'], anomaly_target
-                )
-                loss = loss + 0.3 * anomaly_loss
-                aux_losses['anomaly'] += anomaly_loss.item()
-            
+            # Caustic detection (Binary-specific feature)
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
                 caustic_loss = F.binary_cross_entropy_with_logits(
                     outputs['caustic'], caustic_target
                 )
-                loss = loss + 0.8 * caustic_loss
-                aux_losses['caustic'] += caustic_loss.item()
+                loss = loss + caustic_weight * caustic_loss
+                caustic_loss_total += caustic_loss.item()
         
         # Check for NaN/Inf
         if torch.isnan(loss) or torch.isinf(loss):
@@ -253,7 +210,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             skipped_batches += 1
             continue
         
-        # Backward pass with mixed precision
+        # Backward pass
         if use_amp:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -280,12 +237,14 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             correct += (preds == y).sum().item()
             total += len(y)
         
-        # Update progress bar (only on rank 0)
+        # Update progress bar
         if rank == 0 and batch_idx % 10 == 0:
             acc = correct / total if total > 0 else 0
             if hasattr(pbar, 'set_postfix'):
                 pbar.set_postfix({
                     'loss': f'{loss.item():.4f}',
+                    'cls': f'{classification_loss.item():.4f}',
+                    'temp_inv': f'{temp_inv_loss.item():.4f}' if 'temporal_invariance_loss' in outputs else 'N/A',
                     'acc': f'{acc*100:.1f}%',
                     'grad': f'{grad_norm:.2f}'
                 })
@@ -293,24 +252,26 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
     if rank == 0 and skipped_batches > 0:
         print(f"  [Warning] Skipped {skipped_batches} batches due to NaN/Inf")
     
-    # Gather metrics across all ranks
+    # Gather metrics
     if world_size > 1:
         metrics = torch.tensor(
-            [total_loss, correct, total, num_batches],
+            [total_loss, correct, total, num_batches, temporal_inv_loss_total, caustic_loss_total],
             dtype=torch.float32
         ).to(device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-        total_loss, correct, total, num_batches = metrics.cpu().numpy()
+        total_loss, correct, total, num_batches, temporal_inv_loss_total, caustic_loss_total = metrics.cpu().numpy()
     
     avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
+    avg_temp_inv = temporal_inv_loss_total / max(num_batches, 1)
+    avg_caustic = caustic_loss_total / max(num_batches, 1)
     
-    return avg_loss, accuracy
+    return avg_loss, accuracy, avg_temp_inv, avg_caustic
 
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device, rank, world_size):
-    """Evaluation with distributed support"""
+    """Evaluation"""
     model.eval()
     
     total_loss = 0
@@ -384,21 +345,18 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Distributed training for microlensing classification"
+        description="Training v15.0 - Anti-Cheating Edition"
     )
-    parser.add_argument('--data', required=True, help='Path to dataset')
-    parser.add_argument('--experiment_name', default='microlensing_transformer', 
-                       help='Experiment name')
+    parser.add_argument('--data', required=True)
+    parser.add_argument('--experiment_name', default='microlens_v15')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
-    parser.add_argument('--no_amp', action='store_true', 
-                       help='Disable mixed precision')
-    parser.add_argument('--quick', action='store_true',
-                       help='Quick test mode')
+    parser.add_argument('--no_amp', action='store_true')
+    parser.add_argument('--quick', action='store_true')
     
     # Model hyperparameters
     parser.add_argument('--d_model', type=int, default=128)
@@ -406,34 +364,42 @@ def main():
     parser.add_argument('--num_layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
     
-    # Training options
-    parser.add_argument('--gradient_checkpointing', action='store_true',
-                       help='Enable gradient checkpointing (saves memory)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                       help='DataLoader workers')
+    # v15.0 specific
+    parser.add_argument('--temporal_inv_weight', type=float, default=0.1,
+                       help='Temporal invariance loss weight')
+    parser.add_argument('--caustic_weight', type=float, default=0.8,
+                       help='Caustic detection loss weight')
+    parser.add_argument('--no_causal_attention', action='store_true',
+                       help='Disable causal attention (NOT recommended)')
+    
+    # System
+    parser.add_argument('--gradient_checkpointing', action='store_true')
+    parser.add_argument('--num_workers', type=int, default=4)
     
     args = parser.parse_args()
     
-    # Validate warmup epochs
+    # Validate
     if args.epochs <= args.warmup_epochs:
         print(f"Warning: epochs ({args.epochs}) <= warmup ({args.warmup_epochs})")
         args.warmup_epochs = max(1, args.epochs - 1)
     
-    # Setup distributed training
+    # Setup distributed
     rank, local_rank, world_size = setup_distributed()
     device = torch.device(f'cuda:{local_rank}')
     
     # Print configuration
     if rank == 0:
         print("="*70)
-        print("TRAINING MICROLENSING TRANSFORMER")
+        print("TRAINING v15.0 - ANTI-CHEATING EDITION")
         print("="*70)
         print(f"GPUs: {world_size}")
         print(f"Device: {device}")
         print(f"Mixed precision: {'Enabled' if not args.no_amp else 'Disabled'}")
+        print(f"Causal attention: {'Enabled' if not args.no_causal_attention else 'DISABLED'}")
+        print(f"Temporal invariance loss: {args.temporal_inv_weight}")
+        print(f"Caustic detection weight: {args.caustic_weight}")
         print(f"Batch size per GPU: {args.batch_size}")
         print(f"Effective batch size: {args.batch_size * world_size}")
-        print(f"Gradient checkpointing: {args.gradient_checkpointing}")
     
     # Load data
     print_rank0(f"\nLoading {args.data}...", rank)
@@ -458,7 +424,7 @@ def main():
         indices = np.random.choice(len(X), min(10000, len(X)), replace=False)
         X, y = X[indices], y[indices]
     
-    # Normalize data
+    # Normalize
     print_rank0("\nNormalizing data...", rank)
     normalizer = StableNormalizer(pad_value=-1.0)
     X_norm = normalizer.fit_transform(X)
@@ -532,8 +498,9 @@ def main():
         prefetch_factor=2
     )
     
-    # Import transformer
-    from transformer import MicrolensingTransformer, count_parameters
+    # Import transformer v15
+    sys.path.insert(0, str(Path(__file__).parent))
+    from transformer_v15 import MicrolensingTransformer, count_parameters
     
     # Create model
     print_rank0("\nCreating model...", rank)
@@ -545,7 +512,9 @@ def main():
         dim_feedforward=args.d_model * 4,
         dropout=args.dropout,
         pad_value=-1.0,
-        use_checkpoint=args.gradient_checkpointing
+        use_checkpoint=args.gradient_checkpointing,
+        causal_attention=not args.no_causal_attention,
+        temporal_invariance_weight=args.temporal_inv_weight
     ).to(device)
     
     # Wrap in DDP
@@ -560,11 +529,11 @@ def main():
     if rank == 0:
         base_model = model.module if hasattr(model, 'module') else model
         print(f"   Parameters: {count_parameters(base_model):,}")
+        print(f"   Causal attention: {'ON' if not args.no_causal_attention else 'OFF'}")
     
     # Setup optimizer
     criterion = nn.CrossEntropyLoss()
     
-    # Scale learning rate by world size
     effective_batch_size = args.batch_size * world_size
     lr_scale = max(1.0, effective_batch_size / 256)
     scaled_lr = args.lr * lr_scale
@@ -577,7 +546,7 @@ def main():
         eps=1e-8
     )
     
-    # Learning rate scheduler with warmup
+    # Learning rate scheduler
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
             return (epoch + 1) / max(args.warmup_epochs, 1)
@@ -605,6 +574,7 @@ def main():
         config['world_size'] = world_size
         config['effective_batch_size'] = effective_batch_size
         config['scaled_lr'] = scaled_lr
+        config['version'] = '15.0'
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -614,7 +584,7 @@ def main():
         with open(exp_dir / 'normalizer.pkl', 'wb') as f:
             pickle.dump(normalizer, f)
     
-    # Broadcast experiment directory to all ranks
+    # Broadcast experiment directory
     if world_size > 1:
         if rank == 0:
             exp_dir_str = str(exp_dir)
@@ -646,9 +616,11 @@ def main():
             print(f"{'='*70}")
         
         # Train
-        train_loss, train_acc = train_epoch(
+        train_loss, train_acc, avg_temp_inv, avg_caustic = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
             device, epoch, rank, world_size,
+            temporal_inv_weight=args.temporal_inv_weight,
+            caustic_weight=args.caustic_weight,
             use_amp=not args.no_amp,
             grad_clip=args.grad_clip
         )
@@ -664,6 +636,8 @@ def main():
             print(f"\nResults:")
             print(f"   Train: Loss={train_loss:.4f}, Acc={train_acc*100:.2f}%")
             print(f"   Val:   Loss={val_loss:.4f}, Acc={val_acc*100:.2f}%")
+            print(f"   Temp Inv Loss: {avg_temp_inv:.4f}")
+            print(f"   Caustic Loss: {avg_caustic:.4f}")
             
             # Save best model
             if val_acc > best_val_acc:
@@ -679,7 +653,7 @@ def main():
                     'val_loss': val_loss
                 }, exp_dir / 'best_model.pt')
                 
-                print(f"   Saved best model (val_acc: {val_acc*100:.2f}%)")
+                print(f"   ✅ Saved best model (val_acc: {val_acc*100:.2f}%)")
             else:
                 patience_counter += 1
                 print(f"   Patience: {patience_counter}/{max_patience}")
@@ -743,7 +717,8 @@ def main():
             'test_acc': float(test_acc),
             'test_loss': float(test_loss),
             'best_val_acc': float(best_val_acc),
-            'total_epochs': epoch + 1
+            'total_epochs': epoch + 1,
+            'version': '15.0'
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
