@@ -36,7 +36,7 @@ This project develops a real-time gravitational microlensing event classifier ca
 
 ## 🏃 Quick Start
 
-### 1️⃣ Installation
+### Installation
 ```bash
 # Clone repository
 git clone https://github.com/kunalb541/Thesis.git
@@ -47,7 +47,7 @@ conda env create -f environment.yml
 conda activate microlens
 ```
 
-### 2️⃣ GPU Setup
+### GPU Setup
 
 **For AMD GPUs (ROCm 6.0)** - e.g., AMD MI300:
 ```bash
@@ -69,7 +69,7 @@ pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorc
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Device count: {torch.cuda.device_count()}')"
 ```
 
-### 3️⃣ Quick Test (5 minutes, single GPU)
+### Quick Test (5 minutes, single GPU)
 ```bash
 cd code
 
