@@ -14,8 +14,6 @@ This work addresses:
 
 4. **Early Detection**: How early can we classify events with high-cadence observations?
 
-5. **Anti-Cheating Design**: How do we prevent models from learning temporal position instead of magnification morphology?
-
 ---
 
 ## 🛰️ Why Space-Based Quality?
@@ -508,7 +506,7 @@ if exp_dirs:
 
 ### Chapter 4: Results
 
-#### 4.1 Baseline Performance (Space-Based Quality + Anti-Cheating)
+#### 4.1 Baseline Performance (Space-Based Quality)
 
 **Report**:
 - Overall accuracy: 80-85%
@@ -564,7 +562,7 @@ if exp_dirs:
 
 **Key Conclusion**: "The u₀ = 0.3 threshold represents a fundamental physical detection limit for binary microlensing, arising from caustic geometry. Our anti-cheating architecture confirms this is not an artifact of temporal pattern learning."
 
-#### 4.4 Early Detection & Anti-Cheating Benefits
+#### 4.4 Early Detection 
 
 **High-Cadence Benefits**:
 - 50% completeness: 75-80% accuracy (reliable trigger)
@@ -572,91 +570,10 @@ if exp_dirs:
 - High-cadence sampling enables 2-3 week earlier classification
 - Fine-grained analysis (15 fractions) shows smooth accuracy growth
 
-**Anti-Cheating Architecture Benefits**:
-- Temporal invariance: Model robust to observation schedule changes
-- Causal attention: No information leakage from future observations
-- Temporal randomization: Training data prevents t₀ shortcuts
-- Result: Better generalization to real surveys with irregular sampling
-
 **Inference Performance**:
 - Latency: <1 ms per event
 - Throughput: 10,000+ events/second
 - Survey-scale ready
-
-#### 4.5 Temporal Bias Diagnostics (Novel Contribution)
-
-**Verification Methods**:
-- KS tests on t₀ distributions
-- Correlation analysis between peak time and predictions
-- Statistical significance tests
-
-**Findings**:
-- No temporal bias detected (p > 0.05 for all experiments)
-- Model performance independent of event peak time
-- Confirms anti-cheating design works as intended
-
----
-
-## 🎓 Expected Contributions
-
-1. **Anti-Cheating ML Architecture**: 
-   - First work to explicitly address temporal shortcuts in microlensing
-   - Novel combination: causal attention + temporal invariance loss + data randomization
-   - Generalizable to other time-series classification problems
-
-2. **Space-Based Quality Benchmark**: 
-   - 80-85% accuracy baseline for future surveys
-   - Quantified advantage of space-based photometry
-
-3. **Binary Morphology Characterization**:
-   - Quantified performance across 4 topologies
-   - Established u₀ = 0.3 as physical threshold
-   - Explained detection limits via caustic geometry
-
-4. **Temporal Bias Diagnostics**:
-   - Novel evaluation framework
-   - Statistical tests for temporal pattern learning
-   - Verification methodology for future ML work
-
-5. **Survey Operations**:
-   - Real-time capable (<1 ms inference)
-   - Early detection curves for follow-up planning
-   - Robustness to observation schedule variations
-
----
-
-## 📅 Timeline (Feasible for Feb 1, 2025)
-
-### Phase 0: Validation (2-3 days)
-- [ ] Run quick test (300 events)
-- [ ] Verify GPU allocation
-- [ ] Check all anti-cheating features enabled
-
-### Phase 1: Baseline (1 week)
-- [ ] Generate 1M events
-- [ ] Train 50 epochs (~3-5 hours on 32 GPUs)
-- [ ] Full evaluation with all diagnostics
-
-### Phase 2: Morphology Study (3-4 weeks)
-- [ ] 4 topology experiments (150k each)
-- [ ] Each: Generate → Train → Evaluate
-- [ ] Verify temporal bias diagnostics
-
-### Phase 3: Analysis (2 weeks)
-- [ ] u₀ comparison plots across topologies
-- [ ] Performance summaries
-- [ ] Statistical significance tests
-- [ ] Temporal bias verification
-
-### Phase 4: Writing (4-6 weeks)
-- [ ] Methods chapter (architecture + anti-cheating design)
-- [ ] Results chapter (all 5 experiments)
-- [ ] Discussion (physical interpretation)
-- [ ] Conclusions
-- [ ] Abstract + Introduction
-
-**Buffer**: 2-3 weeks for revisions  
-**Total**: ~10-12 weeks → **Target: January 15, 2025**
 
 ---
 
