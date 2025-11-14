@@ -141,7 +141,7 @@ Each observation can only see past and present, not future. This is **critical**
 
 #### Relative Positional Encoding
 
-**Traditional positional encoding** (like in BERT):
+**Traditional positional encoding** :
 ```python
 PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
 PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
@@ -538,7 +538,7 @@ thesis-microlensing/
 │           ├── early_detection.png
 │           ├── temporal_bias_diagnosis.png
 │           └── highres_evolution_*.png
-├── thesis/                      # LaTeX thesis files
+│ 
 ├── docs/
 │   └── RESEARCH_GUIDE.md        # Systematic experimental workflow
 ├── environment.yml              # Conda environment
