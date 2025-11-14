@@ -3,11 +3,11 @@
 Model Evaluation v15.0 - Anti-Cheating Edition
 ===============================================
 
-CRITICAL ADDITIONS:
-1. High-granularity evolution plots (20 points instead of 10)
-2. Attention pattern diagnostics (detect temporal shortcuts)
-3. Temporal bias detection tests
-4. Finer early detection analysis (15 fractions)
+Complete evaluation with:
+- High-resolution evolution (20 points)
+- Temporal bias diagnostics
+- Fine-grained early detection (15 fractions)
+- All standard metrics (ROC, confusion matrix, calibration, u0 analysis)
 
 Author: Kunal Bhatia
 Version: 15.0
@@ -147,7 +147,7 @@ class ComprehensiveEvaluator:
         
         # Import transformer_v15
         sys.path.insert(0, str(Path(__file__).parent))
-        from transformer import MicrolensingTransformer, count_parameters
+        from transformer_v15 import MicrolensingTransformer, count_parameters
         
         model = MicrolensingTransformer(
             n_points=1500,
@@ -327,15 +327,246 @@ class ComprehensiveEvaluator:
         
         print(f"{'='*70}\n")
     
-    # [Previous plotting methods: plot_roc_curve, plot_confusion_matrix, etc. - SAME AS BEFORE]
-    # I'll include the key new/updated methods below
+    def plot_roc_curve(self):
+        """Plot ROC curves (one-vs-rest)"""
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        if self.n_classes == 3:
+            class_names = ['Flat', 'PSPL', 'Binary']
+            colors = ['gray', 'darkred', 'darkblue']
+        else:
+            class_names = ['PSPL', 'Binary']
+            colors = ['darkred', 'darkblue']
+        
+        for i, (name, color) in enumerate(zip(class_names, colors)):
+            y_true_binary = (self.y == i).astype(int)
+            y_score = self.probs[:, i]
+            
+            if len(np.unique(y_true_binary)) > 1:
+                fpr, tpr, _ = roc_curve(y_true_binary, y_score)
+                auc = roc_auc_score(y_true_binary, y_score)
+                
+                ax.plot(fpr, tpr, linewidth=3, color=color,
+                       label=f'{name} (AUC = {auc:.3f})')
+        
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Random')
+        
+        ax.set_xlabel('False Positive Rate', fontsize=12, fontweight='bold')
+        ax.set_ylabel('True Positive Rate', fontsize=12, fontweight='bold')
+        ax.set_title(f'ROC Curves ({self.n_classes}-Class)', 
+                     fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        output_path = self.output_dir / 'roc_curve.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"  ✓ Saved: {output_path.name}")
+        plt.close()
+    
+    def plot_confusion_matrix(self):
+        """Plot confusion matrix"""
+        cm = np.array(self.metrics['confusion_matrix'])
+        
+        if self.n_classes == 3:
+            labels = ['Flat', 'PSPL', 'Binary']
+        else:
+            labels = ['PSPL', 'Binary']
+        
+        fig, ax = plt.subplots(figsize=(10, 8))
+        im = ax.imshow(cm, cmap='Blues', aspect='auto')
+        
+        ax.set_xticks(range(self.n_classes))
+        ax.set_yticks(range(self.n_classes))
+        ax.set_xticklabels(labels, fontsize=12)
+        ax.set_yticklabels(labels, fontsize=12)
+        ax.set_xlabel('Predicted', fontsize=12, fontweight='bold')
+        ax.set_ylabel('True', fontsize=12, fontweight='bold')
+        ax.set_title(f'Confusion Matrix ({self.n_classes}-Class)', 
+                     fontsize=14, fontweight='bold')
+        
+        for i in range(self.n_classes):
+            for j in range(self.n_classes):
+                text = ax.text(j, i, cm[i, j], ha="center", va="center",
+                             color="white" if cm[i, j] > cm.max()/2 else "black",
+                             fontsize=16, fontweight='bold')
+        
+        plt.colorbar(im, ax=ax)
+        
+        output_path = self.output_dir / 'confusion_matrix.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"  ✓ Saved: {output_path.name}")
+        plt.close()
+    
+    def plot_confidence_distribution(self):
+        """Plot confidence distribution"""
+        correct = self.predictions == self.y
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        bins = np.linspace(0.3 if self.n_classes == 3 else 0.5, 1.0, 50)
+        ax.hist(self.confidences[correct], bins=bins, alpha=0.7, color='green',
+               label=f'Correct (n={correct.sum()})', edgecolor='black')
+        ax.hist(self.confidences[~correct], bins=bins, alpha=0.7, color='red',
+               label=f'Incorrect (n={(~correct).sum()})', edgecolor='black')
+        
+        ax.set_xlabel('Confidence', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Count', fontsize=12, fontweight='bold')
+        ax.set_title(f'Confidence Distribution ({self.n_classes}-Class)', 
+                     fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        output_path = self.output_dir / 'confidence_distribution.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"  ✓ Saved: {output_path.name}")
+        plt.close()
+    
+    def plot_calibration_curve(self):
+        """Plot calibration curve"""
+        correct = self.predictions == self.y
+        
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        ax = axes[0]
+        conf_min = 0.3 if self.n_classes == 3 else 0.5
+        conf_bins = np.linspace(conf_min, 1.0, 11)
+        accuracies, bin_centers, counts = [], [], []
+        
+        for i in range(len(conf_bins)-1):
+            mask = (self.confidences >= conf_bins[i]) & (self.confidences < conf_bins[i+1])
+            if mask.sum() > 0:
+                accuracies.append(correct[mask].mean())
+                bin_centers.append((conf_bins[i] + conf_bins[i+1]) / 2)
+                counts.append(mask.sum())
+        
+        if len(bin_centers) > 0:
+            bars = ax.bar(bin_centers, accuracies, width=0.06, alpha=0.7, edgecolor='black', linewidth=1.5)
+            for bar, cnt in zip(bars, counts):
+                bar.set_facecolor(plt.cm.Blues(0.3 + 0.7 * cnt / max(counts)))
+            
+            for bc, acc, cnt in zip(bin_centers, accuracies, counts):
+                ax.text(bc, acc + 0.02, f'n={cnt}', ha='center', fontsize=7)
+        
+        ax.plot([conf_min, 1.0], [conf_min, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect')
+        ax.set_xlabel('Confidence', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
+        ax.set_title('Calibration', fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0.3 if self.n_classes == 3 else 0.4, 1.05])
+        
+        ax = axes[1]
+        n_plot = min(5000, len(correct))
+        idx = np.random.choice(len(correct), n_plot, replace=False)
+        jitter = np.random.normal(0, 0.01, size=n_plot)
+        
+        ax.scatter(self.confidences[idx][correct[idx]] + jitter[correct[idx]],
+                  correct[idx][correct[idx]],
+                  alpha=0.3, s=5, color='green', label='Correct')
+        ax.scatter(self.confidences[idx][~correct[idx]] + jitter[~correct[idx]],
+                  correct[idx][~correct[idx]],
+                  alpha=0.3, s=5, color='red', label='Incorrect')
+        
+        ax.set_xlabel('Confidence', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Correctness')
+        ax.set_title('Confidence vs Correctness', fontweight='bold')
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(['Wrong', 'Correct'])
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        output_path = self.output_dir / 'calibration.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"  ✓ Saved: {output_path.name}")
+        plt.close()
+    
+    def plot_example_grid(self, n_per_class=4):
+        """Plot example grid"""
+        print(f"  Generating example plots...")
+        
+        correct = self.predictions == self.y
+        
+        examples = []
+        
+        if self.n_classes == 3:
+            class_names = ['Flat', 'PSPL', 'Binary']
+            colors = ['gray', 'darkred', 'darkblue']
+        else:
+            class_names = ['PSPL', 'Binary']
+            colors = ['darkred', 'darkblue']
+        
+        for true_class, class_name, color in zip(range(self.n_classes), class_names, colors):
+            true_mask = self.y == true_class
+            correct_mask = true_mask & correct
+            incorrect_mask = true_mask & ~correct
+            
+            if correct_mask.sum() > 0:
+                indices = np.where(correct_mask)[0]
+                conf_sorted = indices[np.argsort(-self.confidences[indices])]
+                selected = conf_sorted[:n_per_class]
+                for idx in selected:
+                    examples.append((idx, f'{class_name} (Correct)', 'green'))
+            
+            if incorrect_mask.sum() > 0:
+                indices = np.where(incorrect_mask)[0]
+                conf_sorted = indices[np.argsort(-self.confidences[indices])]
+                selected = conf_sorted[:1]
+                for idx in selected:
+                    pred_name = class_names[self.predictions[idx]]
+                    examples.append((idx, f'{class_name}→{pred_name}', 'red'))
+        
+        n_examples = len(examples)
+        n_cols = 4
+        n_rows = (n_examples + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4*n_rows))
+        if n_rows == 1:
+            axes = axes.reshape(1, -1)
+        
+        for i, (idx, label, color) in enumerate(examples):
+            row = i // n_cols
+            col = i % n_cols
+            ax = axes[row, col]
+            
+            flux = self.X[idx]
+            valid_mask = flux != -1.0
+            times = self.timestamps[valid_mask]
+            fluxes = flux[valid_mask]
+            
+            baseline = 20.0
+            magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
+            
+            true_name = class_names[self.y[idx]]
+            pred_name = class_names[self.predictions[idx]]
+            
+            ax.scatter(times, magnitudes, c=color, s=8, alpha=0.7, edgecolors='black', linewidth=0.3)
+            ax.invert_yaxis()
+            
+            ax.set_title(f'{label}\nTrue: {true_name}, Pred: {pred_name}\nConf: {self.confidences[idx]:.2f}',
+                        fontsize=9, color=color, fontweight='bold')
+            ax.set_xlabel('Time (days)', fontsize=8)
+            ax.set_ylabel('Magnitude', fontsize=8)
+            ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            ax.tick_params(labelsize=7)
+        
+        for i in range(len(examples), n_rows * n_cols):
+            row = i // n_cols
+            col = i % n_cols
+            axes[row, col].axis('off')
+        
+        plt.suptitle(f'Example Light Curves ({self.n_classes}-Class)', 
+                     fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        output_path = self.output_dir / f'example_grid.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"  ✓ Saved: {output_path.name}")
+        plt.close()
     
     def plot_high_res_evolution(self, event_idx=None, event_type='binary'):
-        """
-        HIGH-RESOLUTION real-time evolution plot (20 points instead of 10)
-        
-        Shows fine-grained progression of class probabilities
-        """
+        """HIGH-RESOLUTION evolution (20 points) - v15.0"""
         if event_idx is None:
             if self.n_classes == 3:
                 target_class = {'flat': 0, 'pspl': 1, 'binary': 2}.get(event_type, 2)
@@ -360,7 +591,7 @@ class ComprehensiveEvaluator:
         light_curve_norm = self.X_norm[event_idx]
         true_label = self.y[event_idx]
         
-        # HIGH RESOLUTION: 20 fractions from 5% to 100%
+        # HIGH RESOLUTION: 20 fractions
         fractions = np.linspace(0.05, 1.0, 20)
         
         if self.n_classes == 3:
@@ -391,7 +622,6 @@ class ComprehensiveEvaluator:
                 
                 confidences.append(probs.max())
         
-        # Create figure
         fig = plt.figure(figsize=(16, 12))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.2, 1], hspace=0.3)
         
@@ -421,7 +651,7 @@ class ComprehensiveEvaluator:
                      fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
-        # Middle: Class probabilities (HIGH RESOLUTION)
+        # Middle: Class probabilities
         ax2 = fig.add_subplot(gs[1])
         completeness = [f*100 for f in fractions]
         
@@ -446,12 +676,7 @@ class ComprehensiveEvaluator:
         ax2.grid(True, alpha=0.3)
         ax2.set_ylim([-0.05, 1.05])
         
-        # Annotate key transition points
-        for i, (comp, conf) in enumerate(zip(completeness, confidences)):
-            if i > 0 and abs(confidences[i] - confidences[i-1]) > 0.1:
-                ax2.axvline(comp, color='red', linestyle=':', alpha=0.3, linewidth=1)
-        
-        # Bottom: Overall confidence (HIGH RESOLUTION)
+        # Bottom: Confidence
         ax3 = fig.add_subplot(gs[2])
         ax3.plot(completeness, confidences, 'd-', linewidth=2.5, markersize=6, color='purple', label='Confidence')
         ax3.axhline(y=0.8, color='orange', linestyle='--', linewidth=2, label='80%')
@@ -472,12 +697,9 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_fine_early_detection(self):
-        """
-        Fine-grained early detection analysis (15 fractions instead of 7)
-        """
+        """Fine-grained early detection (15 fractions) - v15.0"""
         print("  Computing fine-grained early detection...")
         
-        # HIGHER RESOLUTION: 15 fractions from 5% to 100%
         fractions = np.linspace(0.05, 1.0, 15)
         overall_accs = []
         per_class_recalls = [[] for _ in range(self.n_classes)]
@@ -513,7 +735,6 @@ class ComprehensiveEvaluator:
                 else:
                     per_class_recalls[c].append(0.0)
         
-        # Plot
         fig, ax = plt.subplots(figsize=(14, 8))
         completeness = [f*100 for f in fractions]
         
@@ -533,13 +754,11 @@ class ComprehensiveEvaluator:
             ax.plot(completeness, [r*100 for r in per_class_recalls[c]], f'{marker}-', 
                    linewidth=3, markersize=8, color=color, label=f'{name} Recall', alpha=0.8)
         
-        # Add thresholds
         ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', linestyle='--', 
                   linewidth=1.5, alpha=0.5, label='Random')
         ax.axhline(y=70, color='gray', linestyle=':', linewidth=1.5, alpha=0.5, label='Target (70%)')
         ax.axhline(y=80, color='green', linestyle=':', linewidth=1.5, alpha=0.5, label='Excellent (80%)')
         
-        # Add key milestones
         milestones = [0.10, 0.25, 0.50, 0.75]
         for milestone in milestones:
             if milestone in fractions:
@@ -565,14 +784,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def diagnose_temporal_bias(self):
-        """
-        Diagnose temporal bias - check if model cheats using peak timing
-        
-        Tests:
-        1. t0 distribution comparison (PSPL vs Binary)
-        2. Correlation between t0 and predicted class
-        3. Misclassification timing patterns
-        """
+        """Temporal bias diagnostics - v15.0"""
         if self.params is None or 'pspl' not in self.params or 'binary' not in self.params:
             print("\n⚠️  Skipping temporal bias diagnosis (no parameter data)")
             return
@@ -581,11 +793,10 @@ class ComprehensiveEvaluator:
         print("TEMPORAL BIAS DIAGNOSIS")
         print("="*70)
         
-        # Extract t0 values
         pspl_t0 = np.array([p['t_0'] for p in self.params['pspl']])
         binary_t0 = np.array([p['t_0'] for p in self.params['binary']])
         
-        # Test 1: KS test for t0 distributions
+        # Test 1: KS test
         stat, pval = ks_2samp(pspl_t0, binary_t0)
         
         print(f"\nTest 1: t0 Distribution Comparison")
@@ -599,13 +810,12 @@ class ComprehensiveEvaluator:
         else:
             print(f"  ✅ No significant difference (good!)")
         
-        # Test 2: Correlation between t0 and prediction
+        # Test 2: Correlation
         print(f"\nTest 2: t0 vs Predicted Class Correlation")
         
         pspl_mask = self.y == 1
         binary_mask = self.y == 2
         
-        # Get t0 for correctly and incorrectly classified events
         pspl_correct_t0 = pspl_t0[(self.predictions[pspl_mask] == 1)]
         pspl_wrong_t0 = pspl_t0[(self.predictions[pspl_mask] != 1)]
         
@@ -635,7 +845,6 @@ class ComprehensiveEvaluator:
         # Visualize
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
         
-        # Left: t0 distributions by true class
         ax = axes[0]
         ax.hist(pspl_t0, bins=30, alpha=0.6, color='darkred', label='PSPL (True)', edgecolor='black')
         ax.hist(binary_t0, bins=30, alpha=0.6, color='darkblue', label='Binary (True)', edgecolor='black')
@@ -647,7 +856,6 @@ class ComprehensiveEvaluator:
         ax.legend(fontsize=11)
         ax.grid(alpha=0.3)
         
-        # Right: Correct vs Wrong t0 distributions
         ax = axes[1]
         if len(pspl_correct_t0) > 0:
             ax.hist(pspl_correct_t0, bins=20, alpha=0.5, color='green', label='PSPL Correct', edgecolor='black')
@@ -659,7 +867,7 @@ class ComprehensiveEvaluator:
             ax.hist(binary_wrong_t0, bins=20, alpha=0.5, color='lightcoral', label='Binary Wrong', edgecolor='black', hatch='//')
         ax.set_xlabel('Peak Time t₀ (days)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Count', fontsize=12, fontweight='bold')
-        ax.set_title('t₀ Distribution: Correct vs Wrong Classifications', fontsize=13, fontweight='bold')
+        ax.set_title('t₀: Correct vs Wrong', fontsize=13, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(alpha=0.3)
         
@@ -673,7 +881,7 @@ class ComprehensiveEvaluator:
         print("="*70)
     
     def analyze_u0_dependency(self, n_bins=10, threshold=0.3):
-        """Analyze u0 dependency (Binary class only) - SAME AS BEFORE"""
+        """Analyze u0 dependency (Binary class only)"""
         if self.params is None or 'binary' not in self.params:
             print("\n⚠️  Skipping u0 analysis (no binary parameter data)")
             return None
@@ -734,37 +942,76 @@ class ComprehensiveEvaluator:
             'events_above_threshold': n_above
         }
     
-    # [Include other methods like plot_u0_dependency, save_results, etc. - SAME AS v14]
+    def plot_u0_dependency(self, u0_results, threshold=0.3):
+        """Plot u0 dependency"""
+        if u0_results is None:
+            return
+        
+        u0_centers = u0_results['u0_centers']
+        accuracies = [a*100 if a is not None else None for a in u0_results['accuracies']]
+        counts = u0_results['counts']
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        
+        valid_indices = [i for i, a in enumerate(accuracies) if a is not None]
+        valid_u0 = [u0_centers[i] for i in valid_indices]
+        valid_acc = [accuracies[i] for i in valid_indices]
+        
+        ax1.plot(valid_u0, valid_acc, 'o-', linewidth=2.5, markersize=10, color='#2E86AB')
+        ax1.axvline(x=threshold, color='red', linestyle='--', linewidth=2,
+                   label=f'Physical Limit (u₀ = {threshold})')
+        ax1.axhline(y=70, color='gray', linestyle=':', alpha=0.5, label='Target (70%)')
+        
+        ax1.set_ylabel('Binary Accuracy (%)', fontsize=13, fontweight='bold')
+        ax1.set_title('Binary Accuracy vs. Impact Parameter', 
+                     fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=11)
+        ax1.grid(alpha=0.3)
+        ax1.set_ylim([0, 105])
+        
+        for u, a, c in zip(valid_u0, valid_acc, [counts[i] for i in valid_indices]):
+            ax1.annotate(f'{a:.1f}%\n(n={c})', 
+                        xy=(u, a), xytext=(0, 10), textcoords='offset points',
+                        ha='center', fontsize=8,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        
+        ax2.bar(u0_centers, counts, width=(u0_centers[1]-u0_centers[0])*0.8, 
+               color='#A23B72', alpha=0.7, edgecolor='black')
+        ax2.axvline(x=threshold, color='red', linestyle='--', linewidth=2)
+        ax2.set_xlabel('Impact Parameter u₀', fontsize=13, fontweight='bold')
+        ax2.set_ylabel('Count', fontsize=13, fontweight='bold')
+        ax2.set_title('Distribution of Impact Parameters', fontsize=12)
+        ax2.grid(alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        
+        output_path = self.output_dir / 'u0_dependency.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"  ✓ Saved: {output_path.name}")
+        plt.close()
     
     def generate_all_plots(self, include_u0=True, include_early=True, 
                           n_evolution_per_type=3, temporal_bias_check=True,
                           u0_threshold=0.3, u0_bins=10):
-        """
-        Generate all visualizations v15.0
-        
-        NEW in v15.0:
-        - High-resolution evolution plots (20 points)
-        - Fine-grained early detection (15 fractions)
-        - Temporal bias diagnostics
-        """
+        """Generate all visualizations v15.0"""
         print(f"\n{'='*70}")
         print(f"GENERATING v15.0 VISUALIZATIONS")
         print(f"{'='*70}\n")
         
         print("1. ROC Curves...")
-        # [Same as before]
+        self.plot_roc_curve()
         
         print("\n2. Confusion Matrix...")
-        # [Same as before]
+        self.plot_confusion_matrix()
         
         print("\n3. Confidence Distribution...")
-        # [Same as before]
+        self.plot_confidence_distribution()
         
         print("\n4. Calibration Curve...")
-        # [Same as before]
+        self.plot_calibration_curve()
         
         print("\n5. Example Grid...")
-        # [Same as before]
+        self.plot_example_grid(n_per_class=3)
         
         print(f"\n6. HIGH-RES Evolution ({n_evolution_per_type} per class)...")
         
@@ -790,7 +1037,7 @@ class ComprehensiveEvaluator:
             print("\n9. u0 Dependency Analysis...")
             u0_results = self.analyze_u0_dependency(n_bins=u0_bins, threshold=u0_threshold)
             if u0_results:
-                # [plot_u0_dependency - same as before]
+                self.plot_u0_dependency(u0_results, threshold=u0_threshold)
                 
                 u0_report_path = self.output_dir / 'u0_report.json'
                 with open(u0_report_path, 'w') as f:
@@ -885,4 +1132,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
