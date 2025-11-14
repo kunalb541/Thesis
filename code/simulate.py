@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Microlensing Event Simulation v15.0
-====================================
+Microlensing Event Simulation v15.1 (FIXED)
+==========================================
 
-Self-contained simulation with built-in presets for:
-- Binary topology studies (distinct, planetary, stellar, baseline)
-- Cadence studies (5%, 15%, 30%, 50% missing)
-- Photometric error studies (0.03, 0.05, 0.10, 0.15 mag)
+CRITICAL FIX (v15.1):
+- **REMOVED apply_temporal_randomization function** (was creating interpolation artifacts)
+- Temporal invariance is now achieved ONLY through wide t_0 sampling (-80 to +60 days)
+- This prevents the model from learning "peak at time X = class Y" without introducing
+  fictitious linear segments in data gaps
 
-Default: Roman Space Telescope quality (5% missing, 0.05 mag error)
+The wide t_0 range is the correct way to enforce temporal invariance - it forces
+the model to learn magnification morphology rather than absolute peak timing.
 
-NO external config.py dependencies - everything built-in.
-
-Author: Kunal Bhatia
-Version: 15.0
+Author: Kunal Bhatia  
+Version: 15.1 (Fixed)
 """
 
 import numpy as np
@@ -384,69 +384,7 @@ def generate_single_event(args):
 
 
 # ============================================================================
-# TEMPORAL RANDOMIZATION (Anti-Cheating)
-# ============================================================================
-
-def apply_temporal_randomization(X, y, params_dict, timestamps, max_shift=30.0, pad_value=-1.0):
-    """
-    Apply random time shifts to prevent temporal shortcuts
-    
-    This is CRITICAL to prevent the model from learning:
-    "peak at time X = class Y"
-    
-    Instead, the model must learn morphology patterns.
-    """
-    print("\n" + "="*70)
-    print("APPLYING TEMPORAL RANDOMIZATION (Anti-Cheating)")
-    print("="*70)
-    print(f"Max shift: ±{max_shift} days")
-    
-    X_shifted = X.copy()
-    params_shifted = {'flat': [], 'pspl': [], 'binary': []}
-    
-    for i in tqdm(range(len(X)), desc="  Randomizing"):
-        # Random time shift
-        shift = np.random.uniform(-max_shift, max_shift)
-        
-        # Shift light curve via interpolation
-        flux = X[i]
-        valid_mask = flux != pad_value
-        
-        if valid_mask.sum() > 0:
-            valid_times_old = timestamps[valid_mask]
-            valid_flux = flux[valid_mask]
-            
-            # Interpolate onto shifted timeline
-            flux_interp = np.interp(
-                timestamps,
-                valid_times_old + shift,
-                valid_flux,
-                left=pad_value,
-                right=pad_value
-            )
-            
-            X_shifted[i] = flux_interp
-        
-        # Update parameters
-        class_idx = int(y[i])
-        if class_idx == 0:
-            params_shifted['flat'].append(params_dict['flat'][len(params_shifted['flat'])])
-        elif class_idx == 1:
-            param = params_dict['pspl'][len(params_shifted['pspl'])].copy()
-            param['t_0'] += shift
-            params_shifted['pspl'].append(param)
-        else:
-            param = params_dict['binary'][len(params_shifted['binary'])].copy()
-            param['t_0'] += shift
-            params_shifted['binary'].append(param)
-    
-    print("✅ Temporal randomization applied")
-    
-    return X_shifted, params_shifted
-
-
-# ============================================================================
-# MAIN SIMULATION FUNCTION
+# MAIN SIMULATION FUNCTION (FIXED - NO TEMPORAL RANDOMIZATION)
 # ============================================================================
 
 def simulate_dataset(
@@ -455,14 +393,17 @@ def simulate_dataset(
     observational_preset=None,
     cadence_mask_prob=None,
     mag_error_std=None,
-    apply_temporal_randomization_flag=True,
-    max_time_shift=30.0,
     num_workers=1,
     seed=None,
     save_params=True
 ):
     """
-    Generate complete 3-class dataset
+    Generate complete 3-class dataset (v15.1 FIXED)
+    
+    CRITICAL FIX: Removed apply_temporal_randomization post-processing.
+    Temporal invariance is achieved through wide t_0 sampling (-80 to +60 days)
+    at generation time, which forces the model to learn morphology without
+    introducing interpolation artifacts.
     
     Args:
         n_flat, n_pspl, n_binary: Event counts
@@ -470,8 +411,6 @@ def simulate_dataset(
         observational_preset: Cadence/error preset (overrides individual settings)
         cadence_mask_prob: Override cadence
         mag_error_std: Override error
-        apply_temporal_randomization_flag: Apply random time shifts
-        max_time_shift: Maximum shift magnitude
         num_workers: Parallel workers
         seed: Random seed
         save_params: Save event parameters
@@ -500,13 +439,14 @@ def simulate_dataset(
     
     # Print configuration
     print("="*70)
-    print("MICROLENSING SIMULATION v15.0")
+    print("MICROLENSING SIMULATION v15.1 (FIXED)")
     print("="*70)
     print(f"Dataset: Flat={n_flat}, PSPL={n_pspl}, Binary={n_binary}")
     print(f"Binary topology: {binary_preset}")
     print(f"Cadence: {cadence*100:.0f}% missing")
     print(f"Error: {error:.3f} mag")
-    print(f"Temporal randomization: {'ON' if apply_temporal_randomization_flag else 'OFF'}")
+    print(f"Temporal invariance: Via wide t_0 sampling (-80 to +60 days)")
+    print(f"  ✅ NO post-hoc interpolation (artifact-free)")
     print(f"Workers: {num_workers}")
     
     # Generate parameters
@@ -549,13 +489,8 @@ def simulate_dataset(
         'binary': [all_params[i] for i in range(len(all_params)) if y[i] == 2]
     }
     
-    # Apply temporal randomization
-    if apply_temporal_randomization_flag:
-        X, params_dict = apply_temporal_randomization(
-            X, y, params_dict, timestamps, 
-            max_shift=max_time_shift,
-            pad_value=SimConfig.PAD_VALUE
-        )
+    # NO TEMPORAL RANDOMIZATION (FIXED)
+    # The wide t_0 range already provides temporal invariance
     
     # Shuffle
     shuffle_idx = np.random.permutation(len(X))
@@ -570,6 +505,7 @@ def simulate_dataset(
     print(f"  Flat:   {(y==0).sum()} ({(y==0).mean()*100:.1f}%)")
     print(f"  PSPL:   {(y==1).sum()} ({(y==1).mean()*100:.1f}%)")
     print(f"  Binary: {(y==2).sum()} ({(y==2).mean()*100:.1f}%)")
+    print(f"✅ No interpolation artifacts (clean data)")
     
     return X, y, timestamps, params_dict if save_params else None
 
@@ -580,7 +516,7 @@ def simulate_dataset(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate microlensing dataset v15.0',
+        description='Generate microlensing dataset v15.1 (FIXED)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -628,11 +564,6 @@ Examples:
     parser.add_argument('--cadence_mask_prob', type=float, default=None)
     parser.add_argument('--mag_error_std', type=float, default=None)
     
-    # Temporal randomization
-    parser.add_argument('--no_temporal_randomization', action='store_true',
-                       help='Disable temporal randomization (NOT recommended)')
-    parser.add_argument('--max_time_shift', type=float, default=30.0)
-    
     # System
     parser.add_argument('--output', type=str, default='../data/raw/dataset.npz')
     parser.add_argument('--num_workers', type=int, default=1)
@@ -648,7 +579,7 @@ Examples:
     # List presets
     if args.list_presets:
         print("\n" + "="*70)
-        print("AVAILABLE PRESETS")
+        print("AVAILABLE PRESETS (v15.1 FIXED)")
         print("="*70)
         
         print("\nBinary Topologies:")
@@ -715,7 +646,7 @@ Examples:
                 args.mag_error_std = obs['error']
                 args.output = f'../data/raw/{args.preset}.npz'
     
-    # Generate dataset
+    # Generate dataset (FIXED VERSION - NO TEMPORAL RANDOMIZATION)
     X, y, timestamps, params_dict = simulate_dataset(
         n_flat=args.n_flat,
         n_pspl=args.n_pspl,
@@ -723,8 +654,6 @@ Examples:
         binary_preset=args.binary_preset,
         cadence_mask_prob=args.cadence_mask_prob,
         mag_error_std=args.mag_error_std,
-        apply_temporal_randomization_flag=not args.no_temporal_randomization,
-        max_time_shift=args.max_time_shift,
         num_workers=args.num_workers,
         seed=args.seed,
         save_params=not args.no_save_params
@@ -740,9 +669,10 @@ Examples:
         'timestamps': timestamps,
         'n_classes': 3,
         'class_names': ['Flat', 'PSPL', 'Binary'],
-        'version': '15.0',
-        'temporal_randomization': not args.no_temporal_randomization,
-        'max_time_shift': args.max_time_shift if not args.no_temporal_randomization else 0.0,
+        'version': '15.1',  # FIXED VERSION
+        'temporal_randomization': False,  # REMOVED (artifact source)
+        'wide_t0_sampling': True,  # This is how we achieve temporal invariance
+        't0_range': (PSPLParams.T0_MIN, PSPLParams.T0_MAX),
         'binary_preset': args.binary_preset,
         'cadence_mask_prob': args.cadence_mask_prob or SimConfig.CADENCE_MASK_PROB,
         'mag_error_std': args.mag_error_std or SimConfig.MAG_ERROR_STD
@@ -759,7 +689,7 @@ Examples:
     print(f"\n{'='*70}")
     print(f"Dataset saved: {output_path}")
     print(f"Size: {file_size_mb:.1f} MB")
-    print(f"Version: 15.0")
+    print(f"Version: 15.1 (FIXED - No interpolation artifacts)")
     print(f"{'='*70}\n")
 
 
