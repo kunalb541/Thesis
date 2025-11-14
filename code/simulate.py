@@ -32,9 +32,9 @@ import math
 class SimConfig:
     """Built-in simulation parameters"""
     # Temporal
-    N_POINTS = 3000
-    TIME_MIN = -200
-    TIME_MAX = 200
+    N_POINTS = 1500
+    TIME_MIN = -100
+    TIME_MAX = 100
     
     # VBBinaryLensing
     VBM_TOLERANCE = 1e-4
