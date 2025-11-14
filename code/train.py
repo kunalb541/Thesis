@@ -149,7 +149,7 @@ class StableNormalizer:
 
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 device, epoch, rank, world_size, 
-                temporal_inv_weight=0.1,
+                temporal_inv_weight=0.0,
                 caustic_weight=0.8,
                 use_amp=True, grad_clip=1.0):
     """
@@ -365,7 +365,7 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.1)
     
     # v15.0 specific
-    parser.add_argument('--temporal_inv_weight', type=float, default=0.1,
+    parser.add_argument('--temporal_inv_weight', type=float, default=0.0,
                        help='Temporal invariance loss weight')
     parser.add_argument('--caustic_weight', type=float, default=0.8,
                        help='Caustic detection loss weight')
