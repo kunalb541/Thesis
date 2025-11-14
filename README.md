@@ -10,6 +10,9 @@ Real-time classification of gravitational microlensing events using transformer 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
+## 🔬 Project Overview
+
+This project develops a real-time gravitational microlensing event classifier capable of distinguishing between single-lens (PSPL) and binary-lens events at sub-millisecond inference speeds—critical for next-generation surveys like the Roman Space Telescope and LSST. 
 
 ## 🎯 What This Does
 
