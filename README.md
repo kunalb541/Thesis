@@ -37,6 +37,80 @@ This project achieves:
 
 ---
 
+## 🏃 Quick Start
+
+### Installation
+
+```bash
+# Clone repository
+git clone https://github.com/kunalb541/thesis-microlensing.git
+cd thesis-microlensing
+
+# Create environment
+conda env create -f environment.yml
+conda activate microlens
+
+# For AMD GPUs (ROCm 6.0)
+pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
+
+# For NVIDIA GPUs (CUDA 12.1)
+# Already included in environment.yml - uncomment appropriate section
+```
+
+### Quick Test (5 minutes)
+
+```bash
+cd code
+
+# Generate 300 events (Roman quality)
+python simulate.py --preset quick_test
+
+# Train 5 epochs
+python train.py \
+    --data ../data/raw/quick_test.npz \
+    --experiment_name quick_test \
+    --epochs 5 \
+    --batch_size 32
+
+# Evaluate
+python evaluate.py \
+    --experiment_name quick_test \
+    --data ../data/raw/quick_test.npz
+```
+
+**Expected output**:
+- 3×3 confusion matrix
+- Three ROC curves (one-vs-rest)
+- ~70%+ accuracy on 300 events
+- All plots in `results/quick_test_*/evaluation/`
+
+### Full Baseline (3-5 hours on 32 GPUs)
+
+```bash
+# Generate 1M events
+python simulate.py --preset baseline_1M
+
+# Train with multi-node DDP
+srun torchrun \
+    --nnodes=8 --nproc_per_node=4 \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    train.py \
+        --data ../data/raw/baseline_1M.npz \
+        --experiment_name baseline_1M \
+        --epochs 50 \
+        --batch_size 64
+
+# Comprehensive evaluation
+python evaluate.py \
+    --experiment_name baseline_1M \
+    --data ../data/raw/baseline_1M.npz \
+    --early_detection \
+    --n_evolution_per_type 10
+```
+
+---
+
 ## 🧠 Transformer Architecture
 
 ### High-Level Design Philosophy
@@ -379,80 +453,6 @@ python simulate.py \
 ```
 
 Then train and evaluate as usual.
-
----
-
-## 🏃 Quick Start
-
-### Installation
-
-```bash
-# Clone repository
-git clone https://github.com/kunalb541/thesis-microlensing.git
-cd thesis-microlensing
-
-# Create environment
-conda env create -f environment.yml
-conda activate microlens
-
-# For AMD GPUs (ROCm 6.0)
-pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
-
-# For NVIDIA GPUs (CUDA 12.1)
-# Already included in environment.yml - uncomment appropriate section
-```
-
-### Quick Test (5 minutes)
-
-```bash
-cd code
-
-# Generate 300 events (Roman quality)
-python simulate.py --preset quick_test
-
-# Train 5 epochs
-python train.py \
-    --data ../data/raw/quick_test.npz \
-    --experiment_name quick_test \
-    --epochs 5 \
-    --batch_size 32
-
-# Evaluate
-python evaluate.py \
-    --experiment_name quick_test \
-    --data ../data/raw/quick_test.npz
-```
-
-**Expected output**:
-- 3×3 confusion matrix
-- Three ROC curves (one-vs-rest)
-- ~70%+ accuracy on 300 events
-- All plots in `results/quick_test_*/evaluation/`
-
-### Full Baseline (3-5 hours on 32 GPUs)
-
-```bash
-# Generate 1M events
-python simulate.py --preset baseline_1M
-
-# Train with multi-node DDP
-srun torchrun \
-    --nnodes=8 --nproc_per_node=4 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    train.py \
-        --data ../data/raw/baseline_1M.npz \
-        --experiment_name baseline_1M \
-        --epochs 50 \
-        --batch_size 64
-
-# Comprehensive evaluation
-python evaluate.py \
-    --experiment_name baseline_1M \
-    --data ../data/raw/baseline_1M.npz \
-    --early_detection \
-    --n_evolution_per_type 10
-```
 
 ---
 
