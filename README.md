@@ -376,11 +376,10 @@ thesis-microlensing/
 │   ├── simulate.py           # Data generation (VBBinaryLensing)
 │   ├── train.py              # Multi-GPU DDP training
 │   ├── evaluate.py           # Comprehensive evaluation
-│   └── transformer_v15.py    # Anti-cheating architecture
+│   └── transformer.py        # Anti-cheating architecture
 │
 ├── data/
 │   ├── raw/                  # Generated datasets (.npz)
-│   └── processed/            # Optional preprocessed data
 │
 ├── results/
 │   └── experiment_*/         # Training outputs
