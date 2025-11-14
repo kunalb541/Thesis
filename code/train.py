@@ -384,7 +384,12 @@ def main():
     
     # Setup distributed
     rank, local_rank, world_size = setup_distributed()
-    device = torch.device(f'cuda:{local_rank}')
+    if torch.cuda.is_available():
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        device = torch.device('cpu')
+        if rank == 0:
+            print("⚠️  CUDA not available, using CPU (training will be slow)")
     
     # Print configuration
     if rank == 0:
