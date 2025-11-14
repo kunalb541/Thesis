@@ -1,4 +1,4 @@
-# From Light Curves to Labels: Machine Learning in Microlensing
+## From Light Curves to Labels: Machine Learning in Microlensing
 
 **Version 15.0 - Anti-Cheating Edition**  
 MSc Thesis Project | University of Heidelberg | Prof. Dr. Joachim Wambsganß
