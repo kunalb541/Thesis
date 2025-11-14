@@ -74,9 +74,7 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 cd code
 
 # Generate 300 test events
-python simulate.py \
-    --n_flat 300 --n_pspl 300 --n_binary 300 \
-    --preset quick_test
+python simulate.py --preset quick_test
 
 # Train 5 epochs
 python train.py \
@@ -107,7 +105,9 @@ conda activate microlens
 # Generate data
 python simulate.py \
     --n_flat 3000 --n_pspl 3000 --n_binary 3000 \
-    --preset distinct \
+    --binary_preset distinct \
+    --cadence_mask_prob 0.05 \
+    --output ../data/raw/test.npz \
     --save_params \
     --num_workers 200 \
     --seed 42
