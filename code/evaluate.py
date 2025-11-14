@@ -145,9 +145,9 @@ class ComprehensiveEvaluator:
             causal_attention = True
             temp_inv_weight = 0.1
         
-        # Import transformer_v15
+        
         sys.path.insert(0, str(Path(__file__).parent))
-        from transformer_v15 import MicrolensingTransformer, count_parameters
+        from transformer import MicrolensingTransformer, count_parameters
         
         model = MicrolensingTransformer(
             n_points=1500,
