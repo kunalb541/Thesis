@@ -179,36 +179,6 @@ We use a transformer encoder (Vaswani+ 2017) adapted for time-series classificat
 - Relative encoding → model learns magnification patterns, not peak timing
 - Median/MAD → robust to caustic-crossing outliers
 
-### Training Details
-
-**Data Pipeline**:
-```python
-# Temporal randomization
-# - Randomly shift t₀ by ±30 days via interpolation
-# - Forces model to learn morphology, not absolute peak timing
-# - Prevents overfitting to specific observation windows
-
-# Normalization
-# - Median-center and MAD-scale (robust to caustics)
-# - Per-event normalization using valid (non-padded) points
-
-# Batching
-# - Balanced sampling across classes
-# - Pad short sequences to 1500 points with sentinel value
-```
-
-**Optimization**:
-- Optimizer: AdamW (lr=10⁻³, weight decay=10⁻⁴)
-- Scheduler: Cosine annealing with 5-epoch warmup
-- Loss: CrossEntropy (classification) + BCE (caustic detection, weight=0.8)
-- Batch Size: 64 per GPU × 32 GPUs = 2048 effective
-- Epochs: 50 (early stopping patience=15)
-- Mixed Precision: FP16 training on AMD MI300
-
-**Hardware**: 8 nodes × 4 AMD MI300X GPUs (32 GPUs total)  
-**Time**: ~3-5 hours per 1M-event experiment
-
----
 
 ## 📈 Results Interpretation
 
