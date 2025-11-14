@@ -4,9 +4,11 @@ Microlensing Event Simulation v15.0
 ====================================
 
 Self-contained simulation with built-in presets for:
-- Binary topology studies (distinct, planetary, stellar, challenging)
+- Binary topology studies (distinct, planetary, stellar, baseline)
 - Cadence studies (5%, 15%, 30%, 50% missing)
 - Photometric error studies (0.03, 0.05, 0.10, 0.15 mag)
+
+Default: Roman Space Telescope quality (5% missing, 0.05 mag error)
 
 NO external config.py dependencies - everything built-in.
 
@@ -38,9 +40,9 @@ class SimConfig:
     VBM_TOLERANCE = 1e-4
     MAX_BINARY_ATTEMPTS = 10
     
-    # Observational - Roman baseline
-    CADENCE_MASK_PROB = 0.05  # 5% missing
-    MAG_ERROR_STD = 0.05       # Space-based
+    # Observational - Roman Space Telescope baseline
+    CADENCE_MASK_PROB = 0.05  # 5% missing (~15 min sampling)
+    MAG_ERROR_STD = 0.05       # Space-based photometry
     BASELINE_MIN = 19.0
     BASELINE_MAX = 22.0
     
@@ -67,8 +69,7 @@ class BinaryPresets:
     - distinct: Clear caustics (optimal detection)
     - planetary: Exoplanet search (small q)
     - stellar: Binary stars (large q)
-    - challenging: Physical limits (wide u0)
-    - baseline: Mixed population (realistic)
+    - baseline: Mixed population (realistic survey conditions)
     """
     
     PRESETS = {
@@ -105,26 +106,15 @@ class BinaryPresets:
             'tE_range': (30.0, 40.0),
         },
         
-        'challenging': {
-            'description': 'Physical limits - wide u0 range',
+        'baseline': {
+            'description': 'Mixed population - full parameter space',
             's_range': (0.1, 3.0),
             'q_range': (0.0001, 1.0),
-            'u0_range': (0.01, 1.0),  # Includes undetectable
+            'u0_range': (0.001, 1.0),  # Includes wide u0 (physical limits)
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
             'tE_range': (10.0, 40.0),
-        },
-        
-        'baseline': {
-            'description': 'Mixed population - realistic survey',
-            's_range': (0.1, 2.5),
-            'q_range': (0.001, 1.0),
-            'u0_range': (0.001, 0.3),
-            'rho_range': (0.001, 0.05),
-            'alpha_range': (0, 2 * math.pi),
-            't0_range': (-80.0, 60.0),  # TEMPORAL INVARIANT
-            'tE_range': (20.0, 40.0),
         }
     }
 
@@ -133,53 +123,64 @@ class ObservationalPresets:
     """
     Cadence and photometric error presets
     
+    Telescope-agnostic naming for comparative studies.
+    Default: Roman Space Telescope quality
+    
     Cadence studies: How does sampling frequency affect classification?
     Error studies: How does photometric quality affect classification?
     """
     
     CADENCE_PRESETS = {
-        'roman': {
-            'description': 'Roman Space Telescope (~15 min)',
+        'cadence_05': {
+            'description': 'High-cadence space-based (~15 min, 5% missing)',
             'mask_prob': 0.05,
-            'error': 0.05
+            'error': 0.05,
+            'example': 'Roman Space Telescope'
         },
-        'lsst_good': {
-            'description': 'LSST good weather (~2 days)',
+        'cadence_15': {
+            'description': 'Good ground-based (~1 day, 15% missing)',
             'mask_prob': 0.15,
-            'error': 0.10
+            'error': 0.10,
+            'example': 'Excellent survey conditions'
         },
-        'lsst_typical': {
-            'description': 'LSST typical (~3 days)',
+        'cadence_30': {
+            'description': 'Typical ground-based (~3 days, 30% missing)',
             'mask_prob': 0.30,
-            'error': 0.10
+            'error': 0.10,
+            'example': 'LSST typical conditions'
         },
-        'lsst_sparse': {
-            'description': 'LSST sparse (~5 days)',
+        'cadence_50': {
+            'description': 'Sparse ground-based (~5 days, 50% missing)',
             'mask_prob': 0.50,
-            'error': 0.10
+            'error': 0.10,
+            'example': 'Weather-limited survey'
         }
     }
     
     ERROR_PRESETS = {
-        'excellent': {
-            'description': 'Space-based quality',
+        'error_003': {
+            'description': 'Excellent space-based (0.03 mag)',
             'mask_prob': 0.05,
-            'error': 0.03
+            'error': 0.03,
+            'example': 'JWST-quality photometry'
         },
-        'good': {
-            'description': 'High-quality ground',
+        'error_005': {
+            'description': 'Space-based quality (0.05 mag)',
             'mask_prob': 0.05,
-            'error': 0.05
+            'error': 0.05,
+            'example': 'Roman Space Telescope'
         },
-        'typical': {
-            'description': 'Typical ground survey',
+        'error_010': {
+            'description': 'High-quality ground (0.10 mag)',
             'mask_prob': 0.05,
-            'error': 0.10
+            'error': 0.10,
+            'example': 'Professional ground-based'
         },
-        'poor': {
-            'description': 'Challenging conditions',
+        'error_015': {
+            'description': 'Typical ground (0.15 mag)',
             'mask_prob': 0.05,
-            'error': 0.15
+            'error': 0.15,
+            'example': 'Amateur/wide-field surveys'
         }
     }
 
@@ -583,22 +584,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Baseline (1M events, Roman quality)
-  python simulate_v15.py --preset baseline_1M
+  # Baseline (1M events, Roman quality - DEFAULT)
+  python simulate.py --preset baseline_1M
   
-  # Topology study
-  python simulate_v15.py --preset distinct --n_flat 50000 --n_pspl 50000 --n_binary 50000
+  # Topology studies
+  python simulate.py --preset distinct --n_flat 50000 --n_pspl 50000 --n_binary 50000
+  python simulate.py --preset planetary --n_flat 50000 --n_pspl 50000 --n_binary 50000
   
-  # Cadence study
-  python simulate_v15.py --preset cadence_roman --n_flat 30000 --n_pspl 30000 --n_binary 30000
-  python simulate_v15.py --preset cadence_lsst_typical --n_flat 30000 --n_pspl 30000 --n_binary 30000
+  # Cadence studies
+  python simulate.py --preset cadence_05 --n_flat 30000 --n_pspl 30000 --n_binary 30000  # Roman
+  python simulate.py --preset cadence_15 --n_flat 30000 --n_pspl 30000 --n_binary 30000  # Good ground
+  python simulate.py --preset cadence_30 --n_flat 30000 --n_pspl 30000 --n_binary 30000  # Typical ground
   
-  # Error study
-  python simulate_v15.py --preset error_excellent --n_flat 30000 --n_pspl 30000 --n_binary 30000
-  python simulate_v15.py --preset error_typical --n_flat 30000 --n_pspl 30000 --n_binary 30000
+  # Error studies
+  python simulate.py --preset error_003 --n_flat 30000 --n_pspl 30000 --n_binary 30000  # Excellent
+  python simulate.py --preset error_005 --n_flat 30000 --n_pspl 30000 --n_binary 30000  # Roman
+  python simulate.py --preset error_010 --n_flat 30000 --n_pspl 30000 --n_binary 30000  # Ground
   
   # Custom
-  python simulate_v15.py --n_flat 10000 --n_pspl 10000 --n_binary 10000 \\
+  python simulate.py --n_flat 10000 --n_pspl 10000 --n_binary 10000 \\
       --binary_preset planetary --cadence_mask_prob 0.10 --mag_error_std 0.08
         """
     )
@@ -611,9 +615,9 @@ Examples:
     # Presets
     parser.add_argument('--preset', type=str, choices=[
         'baseline_1M', 'quick_test',
-        'distinct', 'planetary', 'stellar', 'challenging',
-        'cadence_roman', 'cadence_lsst_good', 'cadence_lsst_typical', 'cadence_lsst_sparse',
-        'error_excellent', 'error_good', 'error_typical', 'error_poor'
+        'distinct', 'planetary', 'stellar', 'baseline',
+        'cadence_05', 'cadence_15', 'cadence_30', 'cadence_50',
+        'error_003', 'error_005', 'error_010', 'error_015'
     ], help='Use predefined experiment preset')
     
     # Binary topology
@@ -653,19 +657,23 @@ Examples:
         
         print("\nCadence Presets:")
         for name, config in ObservationalPresets.CADENCE_PRESETS.items():
-            print(f"  cadence_{name:15s}: {config['description']} ({config['mask_prob']*100:.0f}% missing)")
+            print(f"  {name:15s}: {config['description']}")
+            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
+            print(f"                  Example: {config['example']}")
         
         print("\nError Presets:")
         for name, config in ObservationalPresets.ERROR_PRESETS.items():
-            print(f"  error_{name:15s}: {config['description']} ({config['error']:.3f} mag)")
+            print(f"  {name:15s}: {config['description']}")
+            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
+            print(f"                  Example: {config['example']}")
         
         print("\nExperiment Presets:")
-        print("  baseline_1M    : 1M events, Roman quality")
+        print("  baseline_1M    : 1M events, Roman quality (5% missing, 0.05 mag)")
         print("  quick_test     : 300 events, quick validation")
         print("  distinct       : Topology study (clear caustics)")
         print("  planetary      : Topology study (exoplanets)")
         print("  stellar        : Topology study (binary stars)")
-        print("  challenging    : Topology study (physical limits)")
+        print("  baseline       : Topology study (full parameter space)")
         print()
         return
     
@@ -678,7 +686,7 @@ Examples:
             args.binary_preset = 'baseline'
             args.cadence_mask_prob = 0.05
             args.mag_error_std = 0.05
-            args.output = '../data/raw/roman_baseline_1M.npz'
+            args.output = '../data/raw/baseline_1M.npz'
         
         elif args.preset == 'quick_test':
             args.n_flat = 100
@@ -692,20 +700,20 @@ Examples:
             args.output = f'../data/raw/{args.preset}.npz'
         
         elif args.preset.startswith('cadence_'):
-            obs_name = args.preset.replace('cadence_', '')
+            obs_name = args.preset
             if obs_name in ObservationalPresets.CADENCE_PRESETS:
                 obs = ObservationalPresets.CADENCE_PRESETS[obs_name]
                 args.cadence_mask_prob = obs['mask_prob']
                 args.mag_error_std = obs['error']
-                args.output = f'../data/raw/cadence_{obs_name}.npz'
+                args.output = f'../data/raw/{args.preset}.npz'
         
         elif args.preset.startswith('error_'):
-            obs_name = args.preset.replace('error_', '')
+            obs_name = args.preset
             if obs_name in ObservationalPresets.ERROR_PRESETS:
                 obs = ObservationalPresets.ERROR_PRESETS[obs_name]
                 args.cadence_mask_prob = obs['mask_prob']
                 args.mag_error_std = obs['error']
-                args.output = f'../data/raw/error_{obs_name}.npz'
+                args.output = f'../data/raw/{args.preset}.npz'
     
     # Generate dataset
     X, y, timestamps, params_dict = simulate_dataset(
