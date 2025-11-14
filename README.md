@@ -30,7 +30,7 @@ This project develops a real-time gravitational microlensing event classifier ca
 **Key Innovation:**
 - Semi-causal attention (no future peeking)
 - Relative positional encoding (no temporal shortcuts)
-- Temporal invariance loss (learns morphology, not timing)
+
 
 ---
 
@@ -171,8 +171,7 @@ srun torchrun \
         --data ../data/raw/baseline_1M.npz \
         --experiment_name baseline_1M \
         --epochs 50 \
-        --batch_size 64 \
-        --temporal_inv_weight 0.1 \
+        --batch_size 64  \
         --caustic_weight 0.8
 
 # Evaluate
@@ -212,9 +211,6 @@ Task Heads:
   ├─ Caustic: [B, 1] (Binary morphology)
   └─ Confidence: [B, 1] (Prediction certainty)
     ↓
-Temporal Invariance Loss
-  • Penalizes time-dependent features
-  • Forces morphology learning
 ```
 
 **Model Stats:**
@@ -222,12 +218,6 @@ Temporal Invariance Loss
 - d_model: 128, heads: 4, layers: 4
 - Inference: <1ms per event
 - Throughput: 10,000+ events/sec
-
-**Anti-Cheating Features:**
-1. **Semi-causal attention**: Can only see past, not future
-2. **Relative encoding**: No absolute time information
-3. **Temporal invariance loss**: Penalizes shortcuts
-4. **Temporal randomization**: Random peak shifts in data
 
 ---
 
@@ -444,7 +434,6 @@ python train.py --help
 --epochs                    # Training epochs
 --batch_size                # Per-GPU batch size
 --lr                        # Learning rate
---temporal_inv_weight       # Temporal invariance loss weight (0.1)
 --caustic_weight            # Caustic detection loss weight (0.8)
 --no_causal_attention       # Disable causal attention (NOT recommended)
 --gradient_checkpointing    # Enable for memory savings
@@ -512,8 +501,6 @@ python evaluate.py --help
 **Major Changes:**
 - ✨ Semi-causal attention (prevents future peeking)
 - ✨ Relative positional encoding (no absolute time)
-- ✨ Temporal invariance loss (penalizes shortcuts)
-- ✨ Temporal randomization (random peak shifts)
 - ✨ High-res evolution plots (20 points)
 - ✨ Fine-grained early detection (15 fractions)
 - ✨ Temporal bias diagnostics (KS tests)
