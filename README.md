@@ -36,8 +36,8 @@ Real-time classification of gravitational microlensing events using transformer 
 ### 1️⃣ Installation
 ```bash
 # Clone repository
-git clone https://github.com/kunalb541/thesis-microlensing.git
-cd thesis-microlensing
+git clone https://github.com/kunalb541/Thesis.git
+cd Thesis
 
 # Create base environment
 conda env create -f environment.yml
@@ -54,11 +54,6 @@ pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorc
 **For NVIDIA GPUs (CUDA 12.1)** - e.g., A100, H100:
 ```bash
 pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
-```
-
-**For NVIDIA GPUs (CUDA 11.8)** - older GPUs:
-```bash
-pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu118
 ```
 
 **For CPU only** (slow, not recommended):
@@ -78,7 +73,7 @@ cd code
 # Generate 300 test events
 python simulate.py \
     --n_flat 300 --n_pspl 300 --n_binary 300 \
-    --binary_preset distinct \
+    --preset distinct \
     --output ../data/raw/test.npz \
     --save_params \
     --num_workers 8 \
@@ -113,7 +108,7 @@ conda activate microlens
 # Generate data
 python simulate.py \
     --n_flat 3000 --n_pspl 3000 --n_binary 3000 \
-    --binary_preset distinct \
+    --preset distinct \
     --output ../data/raw/test.npz \
     --save_params \
     --num_workers 200 \
@@ -151,7 +146,8 @@ python evaluate.py \
     --batch_size 64 \
     --n_samples 10000 \
     --early_detection \
-    --n_evolution_per_type 10
+    --n_evolution_per_type 10 \
+    --temporal_bias_check
 ```
 
 ### Baseline 1M (32 GPUs, 3-5 hours)
@@ -330,7 +326,7 @@ python evaluate.py \
 
 ---
 
-## 📊 Performance
+## 📊 Performance (Expected)
 
 ### Baseline Results (1M events, Roman quality)
 ```
