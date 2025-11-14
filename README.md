@@ -76,23 +76,19 @@ cd code
 # Generate 300 test events
 python simulate.py \
     --n_flat 300 --n_pspl 300 --n_binary 300 \
-    --preset distinct \
-    --output ../data/raw/test.npz \
-    --save_params \
-    --num_workers 8 \
-    --seed 42
+    --preset quick_test
 
 # Train 5 epochs
 python train.py \
-    --data ../data/raw/test.npz \
-    --experiment_name test \
+    --data ../data/raw/quick_test.npz \
+    --experiment_name quick_test \
     --epochs 5 \
     --batch_size 32
 
 # Evaluate
 python evaluate.py \
-    --experiment_name test \
-    --data ../data/raw/test.npz
+    --experiment_name quick_test \
+    --data ../data/raw/quick_test.npz
 ```
 
 ---
@@ -112,7 +108,6 @@ conda activate microlens
 python simulate.py \
     --n_flat 3000 --n_pspl 3000 --n_binary 3000 \
     --preset distinct \
-    --output ../data/raw/test.npz \
     --save_params \
     --num_workers 200 \
     --seed 42
