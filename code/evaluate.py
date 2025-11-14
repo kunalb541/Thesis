@@ -131,11 +131,11 @@ class ComprehensiveEvaluator:
             num_layers = config.get('num_layers', 4)
             dropout = config.get('dropout', 0.1)
             causal_attention = not config.get('no_causal_attention', False)
-            temp_inv_weight = config.get('temporal_inv_weight', 0.1)
+            temp_inv_weight = config.get('temporal_inv_weight', 0.0) # Keep for old v15.0 models
+            feat_div_weight = config.get('feature_diversity_weight', temp_inv_weight)
             
             print(f"   d_model={d_model}, nhead={nhead}, layers={num_layers}")
             print(f"   Causal attention: {causal_attention}")
-            print(f"   Temporal inv weight: {temp_inv_weight}")
         else:
             print("   Warning: config.json not found, using defaults")
             d_model = 128
@@ -143,7 +143,7 @@ class ComprehensiveEvaluator:
             num_layers = 4
             dropout = 0.1
             causal_attention = True
-            temp_inv_weight = 0.1
+            feat_div_weight = 0.0
         
         
         sys.path.insert(0, str(Path(__file__).parent))
@@ -158,7 +158,7 @@ class ComprehensiveEvaluator:
             dropout=dropout,
             pad_value=-1.0,
             causal_attention=causal_attention,
-            temporal_invariance_weight=temp_inv_weight
+            feat_div_weight=feat_div_weight
         )
         
         state_dict = checkpoint['model_state_dict']
