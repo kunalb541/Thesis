@@ -394,7 +394,6 @@ thesis-microlensing/
 │   └── RESEARCH_GUIDE.md     # Experimental workflow
 │
 ├── environment.yml           # Conda environment (base)
-├── requirements.txt          # Pip requirements
 ├── README.md                 # This file
 ├── LICENSE                   # MIT License
 └── .gitignore
