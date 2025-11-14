@@ -781,8 +781,6 @@ python train.py --no_causal_attention  # NOT recommended
 
 - **v11.0**: CNN + LSTM architecture, 2-class (PSPL/Binary)
 - **v10.0**: TimeDistributed CNN, temporal aggregation
-- **v9.0**: Autoencoder approach, anomaly detection
-- **v8.0**: ConvNeXt ensembles for LSST Strong Lensing Challenge
 
 ---
 

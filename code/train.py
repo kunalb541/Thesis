@@ -500,7 +500,7 @@ def main():
     
     # Import transformer v15
     sys.path.insert(0, str(Path(__file__).parent))
-    from transformer_v15 import MicrolensingTransformer, count_parameters
+    from transformer import MicrolensingTransformer, count_parameters
     
     # Create model
     print_rank0("\nCreating model...", rank)
