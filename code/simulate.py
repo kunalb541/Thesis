@@ -439,14 +439,14 @@ def simulate_dataset(
     
     # Print configuration
     print("="*70)
-    print("MICROLENSING SIMULATION v15.1 (FIXED)")
+    print("MICROLENSING SIMULATION")
     print("="*70)
     print(f"Dataset: Flat={n_flat}, PSPL={n_pspl}, Binary={n_binary}")
     print(f"Binary topology: {binary_preset}")
     print(f"Cadence: {cadence*100:.0f}% missing")
     print(f"Error: {error:.3f} mag")
     print(f"Temporal invariance: Via wide t_0 sampling (-80 to +60 days)")
-    print(f"  ✅ NO post-hoc interpolation (artifact-free)")
+
     print(f"Workers: {num_workers}")
     
     # Generate parameters
@@ -516,7 +516,7 @@ def simulate_dataset(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate microlensing dataset v15.1 (FIXED)',
+        description='Generate microlensing dataset',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -689,7 +689,6 @@ Examples:
     print(f"\n{'='*70}")
     print(f"Dataset saved: {output_path}")
     print(f"Size: {file_size_mb:.1f} MB")
-    print(f"Version: 15.1 (FIXED - No interpolation artifacts)")
     print(f"{'='*70}\n")
 
 
