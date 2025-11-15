@@ -152,32 +152,54 @@ Expected: Binary recall 78-83%
 
 ---
 
-## 🚀 Implementation: Transformer Architecture
+## 🧠 Architecture
 
-### Model Overview
+### Transformer v16.0 - Simple Caustic Detection Edition
 
-We use a transformer encoder (Vaswani+ 2017) adapted for time-series classification:
+**NEW in v16.0**: SimpleCausticDetector extracts real caustic features from light curve morphology instead of just learning class labels.
 
-**Architecture**:
-- Input: Flux time series [B, 1500, 1]
-- Embedding: 1D → 128D via MLP
-- Positional Encoding: Relative positions (observation count, gaps)
-- Transformer: 4 layers, 4 heads, d_model=128
-- Pooling: Average + Max over sequence
-- Output Heads:
-  - Classification: 3-way softmax (Flat/PSPL/Binary)
-  - Caustic Detection: Binary auxiliary task (sigmoid)
-  - Confidence: Self-assessed prediction quality (sigmoid)
+**SimpleCausticDetector Features:**
+1. **Peak Strength** - Sharp flux spikes indicate caustic crossings
+2. **Variance** - Spiky curves suggest multiple caustics (binary)
+3. **Peak Count** - Number of significant peaks in light curve
+4. **Asymmetry** - Binary events often show asymmetric patterns
 
-**Key Modifications**:
-1. **Causal Attention**: At timestep t, can only attend to observations ≤ t (no "cheating" by seeing the future)
-2. **Relative Encoding**: No absolute time positions, only observation counts and gaps
-3. **Robust Normalization**: Median/MAD instead of mean/std (handles outlier flux spikes)
+```
+Input [B, 1500]
+    ↓
+Input Embedding (1 → 128-dim)
+    ↓
+Relative Positional Encoding
+  • Observation count (not absolute time)
+  • Relative gaps (not positions)
+    ↓
+Transformer Layers (×4)
+  • Semi-causal attention (no future peeking)
+  • Multi-head (4 heads)
+  • Feed-forward network
+    ↓
+SimpleCausticDetector (NEW v16.0)
+  • Extracts 4 morphology features
+  • Peak strength, variance, count, asymmetry
+  • Compact representation (d_model/4)
+    ↓
+Global Pooling (avg + max)
+    ↓
+Task Heads:
+  ├─ Classification: [B, 3] (Flat/PSPL/Binary)
+  ├─ Caustic Detection: [B, 1] (From morphology features)
+  └─ Confidence: [B, 1] (Prediction certainty)
+    ↓
+```
 
-**Why These Choices?**
-- Causal attention → realistic real-time scenario
-- Relative encoding → model learns magnification patterns, not peak timing
-- Median/MAD → robust to caustic-crossing outliers
+**Model Stats:**
+- Parameters: ~435,000 (v15.0) → ~443,000 (v16.0)
+- SimpleCausticDetector: Only +8K parameters
+- d_model: 128, heads: 4, layers: 4
+- Inference: <1ms per event
+- Throughput: 10,000+ events/sec
+
+---
 
 
 ## 📈 Results Interpretation

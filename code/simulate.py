@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Microlensing Event Simulation v15.1 (FIXED)
-==========================================
+Microlensing Event Simulation v16.0 
+===================================
 
 CRITICAL FIX (v15.1):
 - **REMOVED apply_temporal_randomization function** (was creating interpolation artifacts)

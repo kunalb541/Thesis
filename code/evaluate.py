@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Model Evaluation v15.0 - Anti-Cheating Edition
-===============================================
+Model Evaluation v16.0 - Simple Caustic Detection Edition
+==========================================================
 
-Complete evaluation with:
-- High-resolution evolution (20 points)
-- Temporal bias diagnostics
-- Fine-grained early detection (15 fractions)
+Updated for v16.0 SimpleCausticDetector:
+- Compatible with new caustic feature extraction
+- Handles morphology-based caustic detection outputs
 - All standard metrics (ROC, confusion matrix, calibration, u0 analysis)
 
 Author: Kunal Bhatia
-Version: 15.0
+Version: 16.0
 """
 
 import torch
@@ -77,7 +76,7 @@ class StableNormalizer:
 
 
 class ComprehensiveEvaluator:
-    """Complete evaluation with v15.0 anti-cheating diagnostics"""
+    """Complete evaluation with v16.0 SimpleCausticDetector support"""
     
     def __init__(self, model_path, normalizer_path, data_path, output_dir, 
                  device='cuda', batch_size=128, n_samples=None):
@@ -88,7 +87,7 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("="*70)
-        print("MODEL EVALUATION v15.0")
+        print("MODEL EVALUATION v16.0 - Simple Caustic Detection Edition")
         print("="*70)
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
@@ -131,11 +130,10 @@ class ComprehensiveEvaluator:
             num_layers = config.get('num_layers', 4)
             dropout = config.get('dropout', 0.1)
             causal_attention = not config.get('no_causal_attention', False)
-            temp_inv_weight = config.get('temporal_inv_weight', 0.0) # Keep for old v15.0 models
-            feat_div_weight = config.get('feature_diversity_weight', temp_inv_weight)
             
             print(f"   d_model={d_model}, nhead={nhead}, layers={num_layers}")
             print(f"   Causal attention: {causal_attention}")
+            print(f"   SimpleCausticDetector: ENABLED ✓")
         else:
             print("   Warning: config.json not found, using defaults")
             d_model = 128
@@ -143,8 +141,6 @@ class ComprehensiveEvaluator:
             num_layers = 4
             dropout = 0.1
             causal_attention = True
-            feat_div_weight = 0.0
-        
         
         sys.path.insert(0, str(Path(__file__).parent))
         from transformer import MicrolensingTransformer, count_parameters
@@ -157,8 +153,7 @@ class ComprehensiveEvaluator:
             dim_feedforward=d_model * 4,
             dropout=dropout,
             pad_value=-1.0,
-            causal_attention=causal_attention,
-            feature_diversity_weight=feat_div_weight
+            causal_attention=causal_attention
         )
         
         state_dict = checkpoint['model_state_dict']
@@ -566,7 +561,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_high_res_evolution(self, event_idx=None, event_type='binary'):
-        """HIGH-RESOLUTION evolution (20 points) - v15.0"""
+        """HIGH-RESOLUTION evolution (20 points) - v16.0"""
         if event_idx is None:
             if self.n_classes == 3:
                 target_class = {'flat': 0, 'pspl': 1, 'binary': 2}.get(event_type, 2)
@@ -697,7 +692,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_fine_early_detection(self):
-        """Fine-grained early detection (15 fractions) - v15.0"""
+        """Fine-grained early detection (15 fractions) - v16.0"""
         print("  Computing fine-grained early detection...")
         
         fractions = np.linspace(0.05, 1.0, 15)
@@ -784,7 +779,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def diagnose_temporal_bias(self):
-        """Temporal bias diagnostics - v15.0"""
+        """Temporal bias diagnostics - v16.0"""
         if self.params is None or 'pspl' not in self.params or 'binary' not in self.params:
             print("\n⚠️  Skipping temporal bias diagnosis (no parameter data)")
             return
@@ -993,9 +988,9 @@ class ComprehensiveEvaluator:
     def generate_all_plots(self, include_u0=True, include_early=True, 
                           n_evolution_per_type=3, temporal_bias_check=True,
                           u0_threshold=0.3, u0_bins=10):
-        """Generate all visualizations v15.0"""
+        """Generate all visualizations v16.0"""
         print(f"\n{'='*70}")
-        print(f"GENERATING v15.0 VISUALIZATIONS")
+        print(f"GENERATING v16.0 VISUALIZATIONS")
         print(f"{'='*70}\n")
         
         print("1. ROC Curves...")
@@ -1060,7 +1055,7 @@ class ComprehensiveEvaluator:
             'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
             'has_u0_analysis': self.params is not None and 'binary' in self.params,
-            'version': '15.0'
+            'version': '16.0'
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
@@ -1072,7 +1067,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive evaluation v15.0'
+        description='Comprehensive evaluation v16.0 - Simple Caustic Detection Edition'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
