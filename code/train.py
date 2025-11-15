@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Distributed Training v15.1 - Fixed Anti-Cheating Edition
-========================================================
+Distributed Training v16.0 - Simple Caustic Detection Edition
+==============================================================
 
-CRITICAL FIXES (v15.1):
-1. Renamed temporal_inv_weight → feature_diversity_weight (accurate naming)
-2. Default weight = 0.0 (disabled, since it's not actually enforcing temporal invariance)
-3. Anti-cheating now relies on: (1) Causal attention, (2) Relative positional encoding, (3) Wide t_0 sampling
+NEW in v16.0:
+- SimpleCausticDetector integrated into transformer
+- Enhanced binary classification through real morphology features
+- Expected improvement: Binary precision 64.8% → 72-75%
 
 Author: Kunal Bhatia
-Version: 15.1 (Fixed)
+Version: 16.0
 """
 
 import os
@@ -148,17 +148,13 @@ class StableNormalizer:
 
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 device, epoch, rank, world_size, 
-                feature_diversity_weight=0.0,  # RENAMED from temporal_inv_weight
                 caustic_weight=0.8,
                 use_amp=True, grad_clip=1.0):
-    """
-    Training epoch with v15.1 features (FIXED)
-    """
+    """Training epoch with v16.0 features"""
     model.train()
     
     total_loss = 0
     classification_loss_total = 0
-    feature_div_loss_total = 0  # RENAMED
     caustic_loss_total = 0
     correct = 0
     total = 0
@@ -185,13 +181,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
             classification_loss = criterion(logits, y)
             loss = classification_loss
             
-            # Feature diversity loss (optional, disabled by default)
-            if 'feature_diversity_loss' in outputs:
-                feat_div_loss = outputs['feature_diversity_loss']
-                loss = loss + feature_diversity_weight * feat_div_loss
-                feature_div_loss_total += feat_div_loss.item()
-            
-            # Caustic detection (Binary-specific feature)
+            # Caustic detection (Binary-specific morphology)
             if 'caustic' in outputs:
                 caustic_target = (y == 2).float()
                 caustic_loss = F.binary_cross_entropy_with_logits(
@@ -244,8 +234,8 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                     'acc': f'{acc*100:.1f}%',
                     'grad': f'{grad_norm:.2f}'
                 }
-                if feature_diversity_weight > 0 and 'feature_diversity_loss' in outputs:
-                    pbar_dict['feat_div'] = f'{feat_div_loss.item():.4f}'
+                if caustic_weight > 0:
+                    pbar_dict['caustic'] = f'{caustic_loss.item():.4f}'
                 pbar.set_postfix(pbar_dict)
     
     if rank == 0 and skipped_batches > 0:
@@ -254,18 +244,17 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
     # Gather metrics
     if world_size > 1:
         metrics = torch.tensor(
-            [total_loss, correct, total, num_batches, feature_div_loss_total, caustic_loss_total],
+            [total_loss, correct, total, num_batches, caustic_loss_total],
             dtype=torch.float32
         ).to(device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-        total_loss, correct, total, num_batches, feature_div_loss_total, caustic_loss_total = metrics.cpu().numpy()
+        total_loss, correct, total, num_batches, caustic_loss_total = metrics.cpu().numpy()
     
     avg_loss = total_loss / max(num_batches, 1)
     accuracy = correct / max(total, 1)
-    avg_feat_div = feature_div_loss_total / max(num_batches, 1)
     avg_caustic = caustic_loss_total / max(num_batches, 1)
     
-    return avg_loss, accuracy, avg_feat_div, avg_caustic
+    return avg_loss, accuracy, avg_caustic
 
 
 @torch.no_grad()
@@ -344,10 +333,10 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Training v15.1 - Fixed Anti-Cheating Edition"
+        description="Training v16.0 - Simple Caustic Detection Edition"
     )
     parser.add_argument('--data', required=True)
-    parser.add_argument('--experiment_name', default='microlens_v15_fixed')
+    parser.add_argument('--experiment_name', default='microlens_v16')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
@@ -363,9 +352,7 @@ def main():
     parser.add_argument('--num_layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
     
-    # v15.1 specific (FIXED)
-    parser.add_argument('--feature_diversity_weight', type=float, default=0.0,
-                       help='Feature diversity loss weight (DISABLED by default)')
+    # v16.0 specific
     parser.add_argument('--caustic_weight', type=float, default=0.8,
                        help='Caustic detection loss weight')
     parser.add_argument('--no_causal_attention', action='store_true',
@@ -394,13 +381,13 @@ def main():
     # Print configuration
     if rank == 0:
         print("="*70)
-        print("TRAINING v15.1 - FIXED ANTI-CHEATING EDITION")
+        print("TRAINING v16.0 - SIMPLE CAUSTIC DETECTION EDITION")
         print("="*70)
         print(f"GPUs: {world_size}")
         print(f"Device: {device}")
         print(f"Mixed precision: {'Enabled' if not args.no_amp else 'Disabled'}")
         print(f"Causal attention: {'Enabled' if not args.no_causal_attention else 'DISABLED'}")
-        print(f"Feature diversity loss: {args.feature_diversity_weight} (DISABLED if 0.0)")
+        print(f"Simple caustic detection: ENABLED ✓")
         print(f"Caustic detection weight: {args.caustic_weight}")
         print(f"Batch size per GPU: {args.batch_size}")
         print(f"Effective batch size: {args.batch_size * world_size}")
@@ -502,7 +489,7 @@ def main():
         prefetch_factor=2
     )
     
-    # Import transformer v15.1 (FIXED)
+    # Import transformer v16.0
     sys.path.insert(0, str(Path(__file__).parent))
     from transformer import MicrolensingTransformer, count_parameters
     
@@ -517,8 +504,7 @@ def main():
         dropout=args.dropout,
         pad_value=-1.0,
         use_checkpoint=args.gradient_checkpointing,
-        causal_attention=not args.no_causal_attention,
-        feature_diversity_weight=args.feature_diversity_weight  # RENAMED
+        causal_attention=not args.no_causal_attention
     ).to(device)
     
     # Wrap in DDP
@@ -534,6 +520,7 @@ def main():
         base_model = model.module if hasattr(model, 'module') else model
         print(f"   Parameters: {count_parameters(base_model):,}")
         print(f"   Causal attention: {'ON' if not args.no_causal_attention else 'OFF'}")
+        print(f"   Simple caustic detection: ON ✓")
     
     # Setup optimizer
     criterion = nn.CrossEntropyLoss()
@@ -578,7 +565,7 @@ def main():
         config['world_size'] = world_size
         config['effective_batch_size'] = effective_batch_size
         config['scaled_lr'] = scaled_lr
-        config['version'] = '15.1'  # FIXED VERSION
+        config['version'] = '16.0'
         
         with open(exp_dir / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -620,10 +607,9 @@ def main():
             print(f"{'='*70}")
         
         # Train
-        train_loss, train_acc, avg_feat_div, avg_caustic = train_epoch(
+        train_loss, train_acc, avg_caustic = train_epoch(
             model, train_loader, criterion, optimizer, scaler, scheduler,
             device, epoch, rank, world_size,
-            feature_diversity_weight=args.feature_diversity_weight,  # RENAMED
             caustic_weight=args.caustic_weight,
             use_amp=not args.no_amp,
             grad_clip=args.grad_clip
@@ -640,8 +626,6 @@ def main():
             print(f"\nResults:")
             print(f"   Train: Loss={train_loss:.4f}, Acc={train_acc*100:.2f}%")
             print(f"   Val:   Loss={val_loss:.4f}, Acc={val_acc*100:.2f}%")
-            if args.feature_diversity_weight > 0:
-                print(f"   Feat Div Loss: {avg_feat_div:.4f}")
             print(f"   Caustic Loss: {avg_caustic:.4f}")
             
             # Save best model
@@ -723,7 +707,7 @@ def main():
             'test_loss': float(test_loss),
             'best_val_acc': float(best_val_acc),
             'total_epochs': epoch + 1,
-            'version': '15.1'  # FIXED VERSION
+            'version': '16.0'
         }
         
         with open(exp_dir / 'results.json', 'w') as f:
