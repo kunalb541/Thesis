@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Transformer Visualization v16.0.1
-=================================
+Transformer Visualization v16.1.1 - FIXED
+==========================================
 
-FIXED: Dynamic array sizing based on actual data shape
-ENHANCED: Ultra-high resolution evolution plots (100 points)
+CRITICAL FIX: SimpleCausticDetector now receives RAW flux, not embeddings
 
 Author: Kunal Bhatia
-Version: 16.0.1
+Version: 16.1.1
 """
 
 import torch
@@ -209,43 +208,20 @@ def visualize_attention_patterns(model, X_norm, y, timestamps, event_idx, output
 
 
 def visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_dir):
-    """Visualize SimpleCausticDetector feature extraction"""
+    """Visualize SimpleCausticDetector feature extraction - FIXED v16.1.1"""
     
     light_curve = X_norm[event_idx]
-    light_curve_raw = X_norm[event_idx]
     true_label = y[event_idx]
     class_names = ['Flat', 'PSPL', 'Binary']
     
-    # Get embeddings and caustic features
-    x_tensor = torch.from_numpy(light_curve).unsqueeze(0).float()
+    # Get raw flux tensor
+    x_tensor = torch.from_numpy(light_curve).unsqueeze(0).float()  # [1, T]
     
     with torch.no_grad():
-        # Get intermediate embeddings
         padding_mask = model.create_padding_mask(x_tensor)
         
-        # Input embedding
-        if x_tensor.dim() == 2:
-            x_tensor_3d = x_tensor.unsqueeze(-1)
-        else:
-            x_tensor_3d = x_tensor
-        
-        x_clean = x_tensor_3d.clone()
-        x_clean[padding_mask.unsqueeze(-1)] = 0.0
-        
-        x_embed = model.input_embed(x_clean)
-        
-        # Add positional encoding
-        pos_encoding = model.pos_encoding(x_embed, padding_mask)
-        x_embed = x_embed + pos_encoding
-        
-        # Through transformer
-        for layer in model.layers:
-            x_embed, _ = layer(x_embed, padding_mask)
-        
-        x_embed = model.norm(x_embed)
-        
-        # Extract caustic features
-        caustic_features = model.caustic_detector(x_embed, padding_mask)
+        # FIXED: Extract caustic features from RAW FLUX, not embeddings!
+        caustic_features = model.caustic_detector(x_tensor, padding_mask)
         
         # Get predictions
         outputs = model(x_tensor, return_all=True)
@@ -253,12 +229,12 @@ def visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_d
         caustic_prob = torch.sigmoid(outputs['caustic']).item()
     
     # Create figure
-    fig = plt.figure(figsize=(16, 12))
-    gs = fig.add_gridspec(4, 2, hspace=0.3, wspace=0.3)
+    fig = plt.figure(figsize=(16, 10))
+    gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
     
     valid_mask = light_curve != -1.0
     times = timestamps[valid_mask]
-    values = light_curve_raw[valid_mask]
+    values = light_curve[valid_mask]
     
     # 1. Light curve
     ax1 = fig.add_subplot(gs[0, :])
@@ -271,72 +247,54 @@ def visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_d
     ax1.grid(True, alpha=0.3)
     ax1.axvline(x=0, color='red', linestyle='--', linewidth=1, alpha=0.5)
     
-    # 2. Embedding evolution (take max over d_model dimension)
-    ax2 = fig.add_subplot(gs[1, :])
-    embed_strength = x_embed[0].max(dim=-1)[0].cpu().numpy()
-    embed_strength_valid = embed_strength[valid_mask]
-    
-    ax2.plot(times, embed_strength_valid, 'o-', linewidth=2, markersize=4, 
-            color='purple', label='Max Embedding Strength')
-    ax2.set_xlabel('Time (days)', fontweight='bold')
-    ax2.set_ylabel('Embedding Strength', fontweight='bold')
-    ax2.set_title('Transformer Embeddings (max over d_model)', fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend()
-    
-    # 3. Caustic feature values
-    ax3 = fig.add_subplot(gs[2, 0])
-    
-    # Manually compute the 4 features to show them
-    valid_expand = (~padding_mask).unsqueeze(-1).float()
-    x_pooled = (x_embed * valid_expand).sum(dim=1) / (valid_expand.sum(dim=1) + 1e-8)
+    # 2. Manually compute morphology features from RAW flux
+    ax2 = fig.add_subplot(gs[1, 0])
     
     # Feature 1: Peak strength
-    x_masked = x_embed.masked_fill(padding_mask.unsqueeze(-1), -65000.0)
-    max_strength = x_masked.max(dim=1)[0].max(dim=-1)[0].item()
+    max_flux = values.max()
     
     # Feature 2: Variance
-    x_var = ((x_embed - x_pooled.unsqueeze(1))**2 * valid_expand).sum(dim=1) / (valid_expand.sum(dim=1) + 1e-8)
-    variance = x_var.max(dim=-1)[0].item()
+    flux_std = values.std()
     
-    # Feature 3: Peak count (approximate)
-    threshold = x_pooled.max(dim=-1, keepdim=True)[0] * 0.7
-    high_act = (x_embed > threshold.unsqueeze(1)).float()
-    peak_count = (high_act * valid_expand).sum(dim=1).max(dim=-1)[0].item()
+    # Feature 3: Peak count (threshold at 95% of max)
+    threshold = max_flux * 0.95
+    high_flux = values > threshold
+    # Count transitions (rising edges)
+    transitions = np.diff(high_flux.astype(int))
+    peak_count = np.sum(transitions > 0)
     
     # Feature 4: Asymmetry
-    T = x_embed.shape[1]
-    mid = T // 2
-    early = (x_embed[:, :mid] * valid_expand[:, :mid]).sum(dim=1).max(dim=-1)[0].item()
-    late = (x_embed[:, mid:] * valid_expand[:, mid:]).sum(dim=1).max(dim=-1)[0].item()
-    asymmetry = abs(early - late)
+    mid = len(values) // 2
+    early_flux = values[:mid].mean()
+    late_flux = values[mid:].mean()
+    asymmetry = abs(early_flux - late_flux) / (early_flux + late_flux + 1e-8)
     
     features = ['Peak\nStrength', 'Variance\n(Spikiness)', 'Peak\nCount', 'Asymmetry']
-    values_feat = [max_strength, variance, peak_count, asymmetry]
+    values_feat = [max_flux, flux_std, peak_count, asymmetry]
     colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12']
     
-    bars = ax3.bar(features, values_feat, color=colors, alpha=0.7, edgecolor='black', linewidth=2)
-    ax3.set_ylabel('Feature Value', fontweight='bold')
-    ax3.set_title('SimpleCausticDetector Features', fontweight='bold')
-    ax3.grid(True, alpha=0.3, axis='y')
+    bars = ax2.bar(features, values_feat, color=colors, alpha=0.7, edgecolor='black', linewidth=2)
+    ax2.set_ylabel('Feature Value', fontweight='bold')
+    ax2.set_title('SimpleCausticDetector Features (from RAW flux)', fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='y')
     
     # Add values on bars
     for bar, val in zip(bars, values_feat):
         height = bar.get_height()
-        ax3.text(bar.get_x() + bar.get_width()/2., height,
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
                 f'{val:.2f}', ha='center', va='bottom', fontweight='bold')
     
-    # 4. Class probabilities
-    ax4 = fig.add_subplot(gs[2, 1])
+    # 3. Class probabilities
+    ax3 = fig.add_subplot(gs[1, 1])
     
     class_colors = ['gray', 'darkred', 'darkblue']
-    bars = ax4.bar(class_names, probs, color=class_colors, alpha=0.7, 
+    bars = ax3.bar(class_names, probs, color=class_colors, alpha=0.7, 
                   edgecolor='black', linewidth=2)
-    ax4.axhline(y=0.5, color='black', linestyle='--', linewidth=1, alpha=0.5)
-    ax4.set_ylabel('Probability', fontweight='bold')
-    ax4.set_title('Classification Output', fontweight='bold')
-    ax4.set_ylim([0, 1.05])
-    ax4.grid(True, alpha=0.3, axis='y')
+    ax3.axhline(y=0.5, color='black', linestyle='--', linewidth=1, alpha=0.5)
+    ax3.set_ylabel('Probability', fontweight='bold')
+    ax3.set_title('Classification Output', fontweight='bold')
+    ax3.set_ylim([0, 1.05])
+    ax3.grid(True, alpha=0.3, axis='y')
     
     # Highlight predicted class
     bars[probs.argmax()].set_edgecolor('gold')
@@ -345,53 +303,53 @@ def visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_d
     # Add values
     for bar, prob in zip(bars, probs):
         height = bar.get_height()
-        ax4.text(bar.get_x() + bar.get_width()/2., height,
+        ax3.text(bar.get_x() + bar.get_width()/2., height,
                 f'{prob*100:.1f}%', ha='center', va='bottom', fontweight='bold')
     
-    # 5. Caustic detection
-    ax5 = fig.add_subplot(gs[3, 0])
+    # 4. Caustic detection
+    ax4 = fig.add_subplot(gs[2, 0])
     
-    ax5.bar(['Not Binary', 'Binary'], [1-caustic_prob, caustic_prob],
+    ax4.bar(['Not Binary', 'Binary'], [1-caustic_prob, caustic_prob],
            color=['lightgray', 'darkblue'], alpha=0.7, edgecolor='black', linewidth=2)
-    ax5.axhline(y=0.5, color='black', linestyle='--', linewidth=1, alpha=0.5)
-    ax5.set_ylabel('Probability', fontweight='bold')
-    ax5.set_title('Caustic Detection (Morphology-Based)', fontweight='bold')
-    ax5.set_ylim([0, 1.05])
-    ax5.grid(True, alpha=0.3, axis='y')
-    ax5.text(0, 1-caustic_prob, f'{(1-caustic_prob)*100:.1f}%', 
+    ax4.axhline(y=0.5, color='black', linestyle='--', linewidth=1, alpha=0.5)
+    ax4.set_ylabel('Probability', fontweight='bold')
+    ax4.set_title('Caustic Detection (Morphology-Based)', fontweight='bold')
+    ax4.set_ylim([0, 1.05])
+    ax4.grid(True, alpha=0.3, axis='y')
+    ax4.text(0, 1-caustic_prob, f'{(1-caustic_prob)*100:.1f}%', 
             ha='center', va='bottom', fontweight='bold')
-    ax5.text(1, caustic_prob, f'{caustic_prob*100:.1f}%', 
+    ax4.text(1, caustic_prob, f'{caustic_prob*100:.1f}%', 
             ha='center', va='bottom', fontweight='bold')
     
-    # 6. Feature interpretation
-    ax6 = fig.add_subplot(gs[3, 1])
-    ax6.axis('off')
+    # 5. Feature interpretation
+    ax5 = fig.add_subplot(gs[2, 1])
+    ax5.axis('off')
     
     interpretation = f"""
     Feature Interpretation:
     
-    Peak Strength: {max_strength:.2f}
-    → {'High' if max_strength > 2 else 'Low'} caustic crossing strength
+    Peak Strength: {max_flux:.2f}
+    → {'High' if max_flux > 2 else 'Low'} caustic crossing strength
     
-    Variance: {variance:.2f}
-    → {'Spiky' if variance > 1 else 'Smooth'} light curve
+    Variance: {flux_std:.2f}
+    → {'Spiky' if flux_std > 1 else 'Smooth'} light curve
     
     Peak Count: {peak_count:.0f}
-    → {'Multiple' if peak_count > 100 else 'Single'} peaks detected
+    → {'Multiple' if peak_count > 2 else 'Single'} peaks detected
     
     Asymmetry: {asymmetry:.2f}
-    → {'Asymmetric' if asymmetry > 1 else 'Symmetric'} evolution
+    → {'Asymmetric' if asymmetry > 0.1 else 'Symmetric'} evolution
     
     Binary Indicators:
-    {'✓' if max_strength > 2 else '✗'} High peak strength
-    {'✓' if variance > 1 else '✗'} High variance
-    {'✓' if peak_count > 100 else '✗'} Multiple peaks
-    {'✓' if asymmetry > 1 else '✗'} Asymmetric
+    {'✓' if max_flux > 2 else '✗'} High peak strength
+    {'✓' if flux_std > 1 else '✗'} High variance
+    {'✓' if peak_count > 2 else '✗'} Multiple peaks
+    {'✓' if asymmetry > 0.1 else '✗'} Asymmetric
     
     Caustic Probability: {caustic_prob*100:.1f}%
     """
     
-    ax6.text(0.1, 0.5, interpretation, fontsize=10, family='monospace',
+    ax5.text(0.1, 0.5, interpretation, fontsize=10, family='monospace',
             verticalalignment='center')
     
     plt.suptitle(f'SimpleCausticDetector Analysis - Event {event_idx}',
@@ -404,7 +362,7 @@ def visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_d
 
 
 def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, output_dir, n_points):
-    """ULTRA-HIGH-RES: Show how classification evolves (100 points) - v16.0.1 FIXED"""
+    """ULTRA-HIGH-RES: Show how classification evolves (100 points)"""
     
     light_curve = X_norm[event_idx]
     true_label = y[event_idx]
@@ -591,7 +549,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\n{'='*70}")
-    print("TRANSFORMER VISUALIZATION v16.0.1")
+    print("TRANSFORMER VISUALIZATION v16.1.1 - FIXED")
     print(f"{'='*70}\n")
     
     # Select events to visualize
@@ -623,7 +581,7 @@ def main():
         print("  → Caustic features...")
         visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_dir)
         
-        # 3. Classification evolution (ULTRA-HIGH-RES: 100 points)
+        # 3. Classification evolution
         print("  → Classification evolution (ULTRA-HIGH-RES)...")
         visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, output_dir, n_points)
     
