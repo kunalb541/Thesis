@@ -148,7 +148,7 @@ class StableNormalizer:
 
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler,
                 device, epoch, rank, world_size, 
-                caustic_weight=0.8,
+                caustic_weight=0.4,
                 use_amp=True, grad_clip=1.0):
     """Training epoch with v16.0 features"""
     model.train()
@@ -341,8 +341,8 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--warmup_epochs', type=int, default=5)
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--grad_clip', type=float, default=1.0)
+    parser.add_argument('--weight_decay', type=float, default=1e-3)
+    parser.add_argument('--grad_clip', type=float, default=10.0)
     parser.add_argument('--no_amp', action='store_true')
     parser.add_argument('--quick', action='store_true')
     
@@ -353,7 +353,7 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.1)
     
     # v16.0 specific
-    parser.add_argument('--caustic_weight', type=float, default=0.8,
+    parser.add_argument('--caustic_weight', type=float, default=0.4,
                        help='Caustic detection loss weight')
     parser.add_argument('--no_causal_attention', action='store_true',
                        help='Disable causal attention (NOT recommended)')
