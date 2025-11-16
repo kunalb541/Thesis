@@ -57,8 +57,8 @@ class PSPLParams:
     T0_MAX = 80.0    # Can peak late in observation
     U0_MIN = 0.001
     U0_MAX = 0.3
-    TE_MIN = 10.0
-    TE_MAX = 40.0
+    TE_MIN = 1.0
+    TE_MAX = 80.0
 
 
 class BinaryPresets:
@@ -81,7 +81,7 @@ class BinaryPresets:
             'rho_range': (0.001, 0.01),
             'alpha_range': (0, math.pi),
             't0_range': (-80.0, 80.0),  # TEMPORAL INVARIANT
-            'tE_range': (10.0, 40.0),
+            'tE_range': (1.0, 80.0),
         },
         
         'planetary': {
@@ -92,7 +92,7 @@ class BinaryPresets:
             'rho_range': (0.0001, 0.01),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 80.0),  # TEMPORAL INVARIANT
-            'tE_range': (10.0, 40.0),
+            'tE_range': (1.0, 80.0),
         },
         
         'stellar': {
@@ -103,7 +103,7 @@ class BinaryPresets:
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 80.0),  # TEMPORAL INVARIANT
-            'tE_range': (10.0, 40.0),
+            'tE_range': (1.0, 80.0),
         },
         
         'baseline': {
@@ -114,7 +114,7 @@ class BinaryPresets:
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 80.0),  # TEMPORAL INVARIANT
-            'tE_range': (10.0, 40.0),
+            'tE_range': (1.0, 80.0),
         }
     }
 
