@@ -333,10 +333,10 @@ def evaluate(model, loader, criterion, device, rank, world_size):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Training v16.0 - Simple Caustic Detection Edition"
+        description="Training"
     )
     parser.add_argument('--data', required=True)
-    parser.add_argument('--experiment_name', default='microlens_v16')
+    parser.add_argument('--experiment_name', default='microlens')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
@@ -347,7 +347,7 @@ def main():
     parser.add_argument('--quick', action='store_true')
     
     # Model hyperparameters
-    parser.add_argument('--d_model', type=int, default=128)
+    parser.add_argument('--d_model', type=int, default=64)
     parser.add_argument('--nhead', type=int, default=4)
     parser.add_argument('--num_layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
@@ -381,13 +381,12 @@ def main():
     # Print configuration
     if rank == 0:
         print("="*70)
-        print("TRAINING v16.0 - SIMPLE CAUSTIC DETECTION EDITION")
+    
         print("="*70)
         print(f"GPUs: {world_size}")
         print(f"Device: {device}")
         print(f"Mixed precision: {'Enabled' if not args.no_amp else 'Disabled'}")
         print(f"Causal attention: {'Enabled' if not args.no_causal_attention else 'DISABLED'}")
-        print(f"Simple caustic detection: ENABLED ✓")
         print(f"Caustic detection weight: {args.caustic_weight}")
         print(f"Batch size per GPU: {args.batch_size}")
         print(f"Effective batch size: {args.batch_size * world_size}")
@@ -520,7 +519,6 @@ def main():
         base_model = model.module if hasattr(model, 'module') else model
         print(f"   Parameters: {count_parameters(base_model):,}")
         print(f"   Causal attention: {'ON' if not args.no_causal_attention else 'OFF'}")
-        print(f"   Simple caustic detection: ON ✓")
     
     # Setup optimizer
     criterion = nn.CrossEntropyLoss()

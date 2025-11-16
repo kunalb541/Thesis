@@ -87,7 +87,6 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("="*70)
-        print("MODEL EVALUATION v16.0 - Simple Caustic Detection Edition")
         print("="*70)
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
@@ -125,7 +124,7 @@ class ComprehensiveEvaluator:
             with open(config_path) as f:
                 config = json.load(f)
             
-            d_model = config.get('d_model', 128)
+            d_model = config.get('d_model', 64)
             nhead = config.get('nhead', 4)
             num_layers = config.get('num_layers', 4)
             dropout = config.get('dropout', 0.1)
@@ -133,7 +132,7 @@ class ComprehensiveEvaluator:
             
             print(f"   d_model={d_model}, nhead={nhead}, layers={num_layers}")
             print(f"   Causal attention: {causal_attention}")
-            print(f"   SimpleCausticDetector: ENABLED ✓")
+            
         else:
             print("   Warning: config.json not found, using defaults")
             d_model = 128
@@ -389,7 +388,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'confusion_matrix.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_confidence_distribution(self):
@@ -413,7 +412,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'confidence_distribution.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
         plt.close()
     
     def plot_calibration_curve(self):
@@ -474,7 +473,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'calibration.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
         plt.close()
     
     def plot_example_grid(self, n_per_class=4):
@@ -557,7 +556,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / f'example_grid.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
         plt.close()
     
     def plot_high_res_evolution(self, event_idx=None, event_type='binary'):
@@ -688,7 +687,7 @@ class ComprehensiveEvaluator:
         event_type_str = event_type.lower()
         output_path = self.output_dir / f'highres_evolution_{event_type_str}_{event_idx}.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
         plt.close()
     
     def plot_fine_early_detection(self):
@@ -775,7 +774,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'fine_early_detection.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
         plt.close()
     
     def diagnose_temporal_bias(self):
@@ -982,7 +981,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'u0_dependency.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
         plt.close()
     
     def generate_all_plots(self, include_u0=True, include_early=True, 
@@ -990,7 +989,7 @@ class ComprehensiveEvaluator:
                           u0_threshold=0.3, u0_bins=10):
         """Generate all visualizations v16.0"""
         print(f"\n{'='*70}")
-        print(f"GENERATING v16.0 VISUALIZATIONS")
+        print(f"GENERATING VISUALIZATIONS")
         print(f"{'='*70}\n")
         
         print("1. ROC Curves...")
@@ -1067,7 +1066,7 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive evaluation v16.0 - Simple Caustic Detection Edition'
+        description='Comprehensive evaluation'
     )
     parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--data', type=str, required=True)
@@ -1122,7 +1121,7 @@ def main():
     )
     
     evaluator.save_results()
-    print("\n✅ Evaluation complete!")
+    print("Evaluation complete!")
 
 
 if __name__ == '__main__':

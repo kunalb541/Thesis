@@ -32,7 +32,7 @@ import math
 class SimConfig:
     """Built-in simulation parameters"""
     # Temporal
-    N_POINTS = 1500
+    N_POINTS = 1000
     TIME_MIN = -100
     TIME_MAX = 100
     

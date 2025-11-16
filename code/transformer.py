@@ -354,14 +354,14 @@ class MicrolensingTransformer(nn.Module):
     
     def __init__(
         self,
-        n_points: int = 1500,
-        d_model: int = 128,
+        n_points: int = 3000,
+        d_model: int = 64,
         nhead: int = 4,
         num_layers: int = 4,
-        dim_feedforward: int = 512,
+        dim_feedforward: int = 64*4,
         dropout: float = 0.1,
         pad_value: float = -1.0,
-        max_seq_len: int = 2000,
+        max_seq_len: int = 5000,
         use_checkpoint: bool = False,
         causal_attention: bool = True,
         feature_diversity_weight: float = 0.0  # Legacy parameter, kept for compatibility
@@ -592,37 +592,3 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-if __name__ == "__main__":
-    print("="*70)
-    print("MicrolensingTransformer v16.0 - Simple Caustic Detection")
-    print("="*70)
-    
-    model = MicrolensingTransformer(
-        n_points=1500,
-        d_model=128,
-        nhead=4,
-        num_layers=4,
-        dim_feedforward=512,
-        dropout=0.1,
-        causal_attention=True
-    )
-    
-    print(f"\nParameters: {count_parameters(model):,}")
-    print(f"Causal attention: ENABLED ✓")
-    print(f"Relative positional encoding: ENABLED ✓")
-    print(f"Simple caustic detection: ENABLED ✓")
-    
-    # Test forward pass
-    x = torch.randn(8, 1500)
-    x[:, 500:] = -1.0  # Add padding
-    
-    outputs = model(x, return_all=True)
-    
-    print(f"\nOutput shapes:")
-    print(f"  Logits: {outputs['logits'].shape}")
-    print(f"  Caustic: {outputs['caustic'].shape}")
-    print(f"  Confidence: {outputs['confidence'].shape}")
-    
-    print("\n" + "="*70)
-    print("✅ Model initialized successfully (v16.0)")
-    print("="*70)
