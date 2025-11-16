@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Transformer Visualization v16.0
-================================
+Transformer Visualization v16.0.1
+=================================
 
-Visualize what the SimpleCausticDetector and transformer attention are learning:
-1. Attention patterns across layers
-2. Caustic feature extraction
-3. Classification evolution through the light curve
-4. Binary vs PSPL discrimination
+FIXED: Dynamic array sizing based on actual data shape
+ENHANCED: Ultra-high resolution evolution plots (100 points)
 
 Author: Kunal Bhatia
-Version: 16.0
+Version: 16.0.1
 """
 
 import torch
@@ -77,7 +74,7 @@ def load_model_and_data(experiment_name, data_path):
     
     if not exp_dirs:
         print(f"No experiment found: {experiment_name}")
-        return None, None, None, None
+        return None, None, None, None, None
     
     exp_dir = exp_dirs[-1]
     print(f"Loading experiment: {exp_dir.name}")
@@ -96,7 +93,7 @@ def load_model_and_data(experiment_name, data_path):
     
     # Create model
     model = MicrolensingTransformer(
-        n_points=1500,
+        n_points=1500,  # Will be overridden
         d_model=config.get('d_model', 128),
         nhead=config.get('nhead', 4),
         num_layers=config.get('num_layers', 4),
@@ -129,11 +126,12 @@ def load_model_and_data(experiment_name, data_path):
     if X.ndim == 3:
         X = X.squeeze(1)
     
+    n_points = X.shape[1]
     X_norm = normalizer.transform(X)
     
-    print(f"✅ Data loaded ({len(X)} events)")
+    print(f"✅ Data loaded ({len(X)} events, n_points={n_points})")
     
-    return model, X_norm, y, timestamps
+    return model, X_norm, y, timestamps, n_points
 
 
 def visualize_attention_patterns(model, X_norm, y, timestamps, event_idx, output_dir):
@@ -405,15 +403,15 @@ def visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_d
     plt.close()
 
 
-def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, output_dir):
-    """Show how classification evolves as more observations are seen"""
+def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, output_dir, n_points):
+    """ULTRA-HIGH-RES: Show how classification evolves (100 points) - v16.0.1 FIXED"""
     
     light_curve = X_norm[event_idx]
     true_label = y[event_idx]
     class_names = ['Flat', 'PSPL', 'Binary']
     
-    # Test at different completion levels
-    fractions = np.linspace(0.1, 1.0, 20)
+    # ULTRA-HIGH RESOLUTION: 100 fractions
+    fractions = np.linspace(0.1, 1.0, 100)
     
     flat_probs, pspl_probs, binary_probs = [], [], []
     caustic_probs = []
@@ -421,9 +419,9 @@ def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, 
     
     with torch.no_grad():
         for frac in fractions:
-            n_points = int(1500 * frac)
-            partial_curve = np.full(1500, -1.0, dtype=np.float32)
-            partial_curve[:n_points] = light_curve[:n_points]
+            n_pts = int(n_points * frac)
+            partial_curve = np.full(n_points, -1.0, dtype=np.float32)
+            partial_curve[:n_pts] = light_curve[:n_pts]
             
             x = torch.from_numpy(partial_curve).unsqueeze(0).float()
             outputs = model(x, return_all=True)
@@ -451,7 +449,7 @@ def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, 
     ax.scatter(times, values, c='darkblue', s=15, alpha=0.7, 
               edgecolors='black', linewidth=0.5)
     ax.set_ylabel('Normalized Flux', fontweight='bold')
-    ax.set_title(f'Classification Evolution - True: {class_names[true_label]}',
+    ax.set_title(f'ULTRA-HIGH-RES Classification Evolution (100 Points) - True: {class_names[true_label]}',
                 fontsize=13, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.axvline(x=0, color='red', linestyle='--', linewidth=1, alpha=0.5)
@@ -459,11 +457,11 @@ def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, 
     # Middle: Class probabilities
     ax = axes[1]
     
-    ax.plot(completeness, flat_probs, 'o-', linewidth=2.5, markersize=6,
+    ax.plot(completeness, flat_probs, '-', linewidth=1.5,
            color='gray', label='Flat', alpha=0.8)
-    ax.plot(completeness, pspl_probs, 's-', linewidth=2.5, markersize=6,
+    ax.plot(completeness, pspl_probs, '-', linewidth=1.5,
            color='darkred', label='PSPL', alpha=0.8)
-    ax.plot(completeness, binary_probs, '^-', linewidth=2.5, markersize=6,
+    ax.plot(completeness, binary_probs, '-', linewidth=1.5,
            color='darkblue', label='Binary', alpha=0.8)
     
     ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, alpha=0.5)
@@ -475,9 +473,9 @@ def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, 
     # Bottom: Caustic detection + confidence
     ax = axes[2]
     
-    ax.plot(completeness, caustic_probs, 'd-', linewidth=2.5, markersize=6,
+    ax.plot(completeness, caustic_probs, '-', linewidth=1.5,
            color='purple', label='Caustic Probability')
-    ax.plot(completeness, confidences, 'o-', linewidth=2.5, markersize=6,
+    ax.plot(completeness, confidences, '-', linewidth=1.5,
            color='orange', label='Confidence', alpha=0.7)
     
     ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, alpha=0.5)
@@ -492,7 +490,7 @@ def visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, 
     
     plt.tight_layout()
     
-    output_path = output_dir / f'classification_evolution_event{event_idx}.png'
+    output_path = output_dir / f'ultrahighres_classification_evolution_event{event_idx}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"✅ Saved: {output_path.name}")
     plt.close()
@@ -583,7 +581,7 @@ def main():
     args = parser.parse_args()
     
     # Load model and data
-    model, X_norm, y, timestamps = load_model_and_data(args.experiment_name, args.data)
+    model, X_norm, y, timestamps, n_points = load_model_and_data(args.experiment_name, args.data)
     
     if model is None:
         return
@@ -593,7 +591,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\n{'='*70}")
-    print("TRANSFORMER VISUALIZATION v16.0")
+    print("TRANSFORMER VISUALIZATION v16.0.1")
     print(f"{'='*70}\n")
     
     # Select events to visualize
@@ -625,9 +623,9 @@ def main():
         print("  → Caustic features...")
         visualize_caustic_features(model, X_norm, y, timestamps, event_idx, output_dir)
         
-        # 3. Classification evolution
-        print("  → Classification evolution...")
-        visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, output_dir)
+        # 3. Classification evolution (ULTRA-HIGH-RES: 100 points)
+        print("  → Classification evolution (ULTRA-HIGH-RES)...")
+        visualize_classification_evolution(model, X_norm, y, timestamps, event_idx, output_dir, n_points)
     
     # 4. Binary vs PSPL comparison
     print("\n  → Binary vs PSPL comparison...")

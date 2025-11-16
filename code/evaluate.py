@@ -3,13 +3,11 @@
 Model Evaluation v16.0 - Simple Caustic Detection Edition
 ==========================================================
 
-Updated for v16.0 SimpleCausticDetector:
-- Compatible with new caustic feature extraction
-- Handles morphology-based caustic detection outputs
-- All standard metrics (ROC, confusion matrix, calibration, u0 analysis)
+FIXED: Dynamic array sizing based on actual data shape
+ENHANCED: Ultra-high resolution evolution plots (100 points)
 
 Author: Kunal Bhatia
-Version: 16.0
+Version: 16.0.1
 """
 
 import torch
@@ -104,7 +102,7 @@ class ComprehensiveEvaluator:
         print("✅ Normalizer loaded")
         
         print("\nLoading data...")
-        self.X, self.y, self.params, self.timestamps, self.n_classes = self._load_data(data_path)
+        self.X, self.y, self.params, self.timestamps, self.n_classes, self.n_points = self._load_data(data_path)
         
         print("\nNormalizing...")
         self.X_norm = self.normalizer.transform(self.X)
@@ -145,7 +143,7 @@ class ComprehensiveEvaluator:
         from transformer import MicrolensingTransformer, count_parameters
         
         model = MicrolensingTransformer(
-            n_points=1500,
+            n_points=1500,  # Will be overridden by actual data
             d_model=d_model,
             nhead=nhead,
             num_layers=num_layers,
@@ -185,13 +183,17 @@ class ComprehensiveEvaluator:
         if X.ndim == 3:
             X = X.squeeze(1)
         
+        # Get actual data dimensions
+        n_points = X.shape[1]
+        
         if 'timestamps' in data:
             timestamps = data['timestamps']
         else:
-            timestamps = np.linspace(-120, 120, X.shape[1])
+            timestamps = np.linspace(-120, 120, n_points)
         
         n_classes = len(np.unique(y))
         print(f"   Dataset: {n_classes} classes")
+        print(f"   Data shape: {X.shape} (n_points={n_points})")
         
         params = None
         if 'params_binary_json' in data:
@@ -243,7 +245,7 @@ class ComprehensiveEvaluator:
         else:
             print("   ⚠️  No parameter data (u0 analysis disabled)")
         
-        return X, y, params, timestamps, n_classes
+        return X, y, params, timestamps, n_classes, n_points
     
     def _get_predictions(self):
         predictions = []
@@ -560,7 +562,7 @@ class ComprehensiveEvaluator:
         plt.close()
     
     def plot_high_res_evolution(self, event_idx=None, event_type='binary'):
-        """HIGH-RESOLUTION evolution (20 points) - v16.0"""
+        """ULTRA-HIGH-RESOLUTION evolution (100 points) - v16.0.1 FIXED"""
         if event_idx is None:
             if self.n_classes == 3:
                 target_class = {'flat': 0, 'pspl': 1, 'binary': 2}.get(event_type, 2)
@@ -585,8 +587,8 @@ class ComprehensiveEvaluator:
         light_curve_norm = self.X_norm[event_idx]
         true_label = self.y[event_idx]
         
-        # HIGH RESOLUTION: 20 fractions
-        fractions = np.linspace(0.05, 1.0, 20)
+        # ULTRA-HIGH RESOLUTION: 100 fractions for maximum granularity
+        fractions = np.linspace(0.05, 1.0, 100)
         
         if self.n_classes == 3:
             flat_probs, pspl_probs, binary_probs = [], [], []
@@ -597,8 +599,8 @@ class ComprehensiveEvaluator:
         
         with torch.no_grad():
             for frac in fractions:
-                n_points = int(1500 * frac)
-                partial_curve = np.full(1500, -1.0, dtype=np.float32)
+                n_points = int(self.n_points * frac)
+                partial_curve = np.full(self.n_points, -1.0, dtype=np.float32)
                 partial_curve[:n_points] = light_curve_norm[:n_points]
                 
                 x = torch.from_numpy(partial_curve).unsqueeze(0).to(self.device)
@@ -641,7 +643,7 @@ class ComprehensiveEvaluator:
         true_str = class_names[true_label]
         pred_str = class_names[self.predictions[event_idx]]
         ax1.set_ylabel('Magnitude', fontsize=13, fontweight='bold')
-        ax1.set_title(f'HIGH-RES Evolution - True: {true_str}, Pred: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
+        ax1.set_title(f'ULTRA-HIGH-RES Evolution (100 Points) - True: {true_str}, Pred: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
                      fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
@@ -650,16 +652,16 @@ class ComprehensiveEvaluator:
         completeness = [f*100 for f in fractions]
         
         if self.n_classes == 3:
-            ax2.plot(completeness, flat_probs, 'o-', linewidth=2.5, markersize=6, 
+            ax2.plot(completeness, flat_probs, '-', linewidth=1.5, 
                     color='gray', label='Flat', alpha=0.8)
-            ax2.plot(completeness, pspl_probs, 's-', linewidth=2.5, markersize=6, 
+            ax2.plot(completeness, pspl_probs, '-', linewidth=1.5, 
                     color='darkred', label='PSPL', alpha=0.8)
-            ax2.plot(completeness, binary_probs, '^-', linewidth=2.5, markersize=6, 
+            ax2.plot(completeness, binary_probs, '-', linewidth=1.5, 
                     color='darkblue', label='Binary', alpha=0.8)
         else:
-            ax2.plot(completeness, pspl_probs, 's-', linewidth=2.5, markersize=6, 
+            ax2.plot(completeness, pspl_probs, '-', linewidth=1.5, 
                     color='darkred', label='PSPL', alpha=0.8)
-            ax2.plot(completeness, binary_probs, '^-', linewidth=2.5, markersize=6, 
+            ax2.plot(completeness, binary_probs, '-', linewidth=1.5, 
                     color='darkblue', label='Binary', alpha=0.8)
         
         ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, label='50% Threshold')
@@ -672,7 +674,7 @@ class ComprehensiveEvaluator:
         
         # Bottom: Confidence
         ax3 = fig.add_subplot(gs[2])
-        ax3.plot(completeness, confidences, 'd-', linewidth=2.5, markersize=6, color='purple', label='Confidence')
+        ax3.plot(completeness, confidences, '-', linewidth=1.5, color='purple', label='Confidence')
         ax3.axhline(y=0.8, color='orange', linestyle='--', linewidth=2, label='80%')
         ax3.axhline(y=0.9, color='red', linestyle='--', linewidth=2, label='90%')
         ax3.set_xlabel('Observation Completeness (%)', fontsize=13, fontweight='bold')
@@ -681,20 +683,21 @@ class ComprehensiveEvaluator:
         ax3.grid(True, alpha=0.3)
         ax3.set_ylim([0.3 if self.n_classes == 3 else 0.4, 1.05])
         
-        plt.suptitle(f'HIGH-RES Classification Evolution ({self.n_classes}-Class, 20 Points)', 
+        plt.suptitle(f'ULTRA-HIGH-RES Classification Evolution ({self.n_classes}-Class, 100 Points)', 
                     fontsize=15, fontweight='bold')
         
         event_type_str = event_type.lower()
-        output_path = self.output_dir / f'highres_evolution_{event_type_str}_{event_idx}.png'
+        output_path = self.output_dir / f'ultrahighres_evolution_{event_type_str}_{event_idx}.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"   Saved: {output_path.name}")
         plt.close()
     
     def plot_fine_early_detection(self):
-        """Fine-grained early detection (15 fractions) - v16.0"""
+        """Fine-grained early detection (50 fractions) - v16.0.1 ENHANCED"""
         print("  Computing fine-grained early detection...")
         
-        fractions = np.linspace(0.05, 1.0, 15)
+        # ENHANCED: 50 fractions for smoother curves
+        fractions = np.linspace(0.05, 1.0, 50)
         overall_accs = []
         per_class_recalls = [[] for _ in range(self.n_classes)]
         
@@ -705,9 +708,9 @@ class ComprehensiveEvaluator:
                 for i in range(0, len(self.X_norm), self.batch_size):
                     batch_end = min(i + self.batch_size, len(self.X_norm))
                     batch_size_actual = batch_end - i
-                    n_points = int(1500 * frac)
+                    n_points = int(self.n_points * frac)
                     
-                    partial_curves_np = np.full((batch_size_actual, 1500), -1.0, dtype=np.float32)
+                    partial_curves_np = np.full((batch_size_actual, self.n_points), -1.0, dtype=np.float32)
                     partial_curves_np[:, :n_points] = self.X_norm[i:batch_end, :n_points]
                     
                     x_batch = torch.from_numpy(partial_curves_np).to(self.device)
@@ -732,7 +735,7 @@ class ComprehensiveEvaluator:
         fig, ax = plt.subplots(figsize=(14, 8))
         completeness = [f*100 for f in fractions]
         
-        ax.plot(completeness, [a*100 for a in overall_accs], 'o-', linewidth=3.5, markersize=10,
+        ax.plot(completeness, [a*100 for a in overall_accs], '-', linewidth=3.5, 
                color='purple', label='Overall Accuracy', zorder=3)
         
         if self.n_classes == 3:
@@ -745,8 +748,8 @@ class ComprehensiveEvaluator:
             markers = ['^', 'D']
         
         for c, (name, color, marker) in enumerate(zip(class_names, colors, markers)):
-            ax.plot(completeness, [r*100 for r in per_class_recalls[c]], f'{marker}-', 
-                   linewidth=3, markersize=8, color=color, label=f'{name} Recall', alpha=0.8)
+            ax.plot(completeness, [r*100 for r in per_class_recalls[c]], '-', 
+                   linewidth=3, color=color, label=f'{name} Recall', alpha=0.8)
         
         ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', linestyle='--', 
                   linewidth=1.5, alpha=0.5, label='Random')
@@ -763,7 +766,7 @@ class ComprehensiveEvaluator:
         
         ax.set_xlabel('Observation Completeness (%)', fontsize=13, fontweight='bold')
         ax.set_ylabel('Performance (%)', fontsize=13, fontweight='bold')
-        ax.set_title(f'Fine-Grained Early Detection ({self.n_classes}-Class, 15 Points)', 
+        ax.set_title(f'Fine-Grained Early Detection ({self.n_classes}-Class, 50 Points)', 
                      fontsize=15, fontweight='bold')
         ax.legend(fontsize=11, loc='lower right')
         ax.grid(True, alpha=0.3)
@@ -987,7 +990,7 @@ class ComprehensiveEvaluator:
     def generate_all_plots(self, include_u0=True, include_early=True, 
                           n_evolution_per_type=3, temporal_bias_check=True,
                           u0_threshold=0.3, u0_bins=10):
-        """Generate all visualizations v16.0"""
+        """Generate all visualizations v16.0.1"""
         print(f"\n{'='*70}")
         print(f"GENERATING VISUALIZATIONS")
         print(f"{'='*70}\n")
@@ -1007,7 +1010,7 @@ class ComprehensiveEvaluator:
         print("\n5. Example Grid...")
         self.plot_example_grid(n_per_class=3)
         
-        print(f"\n6. HIGH-RES Evolution ({n_evolution_per_type} per class)...")
+        print(f"\n6. ULTRA-HIGH-RES Evolution ({n_evolution_per_type} per class)...")
         
         if self.n_classes == 3:
             event_types = ['flat', 'pspl', 'binary']
@@ -1050,11 +1053,12 @@ class ComprehensiveEvaluator:
             'classification_report': self.metrics['classification_report'],
             'confusion_matrix': self.metrics['confusion_matrix'],
             'n_classes': self.n_classes,
+            'n_points': int(self.n_points),
             'n_samples': int(len(self.y)),
             'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
             'has_u0_analysis': self.params is not None and 'binary' in self.params,
-            'version': '16.0'
+            'version': '16.0.1'
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
