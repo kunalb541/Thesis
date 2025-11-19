@@ -416,6 +416,119 @@ This threshold reflects astrophysical reality: distant sources do not exhibit bi
 
 ---
 
+## Visualization
+
+### Model Internals and Diagnostic Analysis
+
+The `visualize_transformer.py` script provides comprehensive visualization of model behavior and internal representations:
+
+```bash
+python visualize_transformer.py \
+    --experiment_name experiment_name \
+    --data ../data/raw/test.npz \
+    --output_dir ../results/visualizations \
+    --n_examples 2
+```
+
+**Key arguments:**
+- `--experiment_name`: Trained model experiment directory
+- `--data`: Test dataset for visualization
+- `--output_dir`: Directory for output plots
+- `--event_indices`: Specific events to visualize (optional)
+- `--n_examples`: Number of examples per class (default: 2)
+- `--no_attention`: Skip attention visualization (faster)
+- `--no_embedding`: Skip embedding space visualization
+
+### Generated Visualizations
+
+**Per-event diagnostics:**
+
+1. **Attention patterns** (`attention_patterns_event*.png`)
+   - Attention matrices for each transformer layer
+   - Temporal attention distribution across observations
+   - Visualization of causal masking structure
+   - Average attention received by each time step
+
+2. **Temporal encoding** (`temporal_encoding_event*.png`)
+   - Light curve in magnitude space
+   - Observation interval distribution
+   - Temporal encoding dimensions (first 6 components)
+   - PCA projection of temporal representations
+
+3. **Classification evolution** (`classification_evolution_event*.png`)
+   - Class probabilities vs. observation completeness (100 points)
+   - Confidence progression over time
+   - Light curve with observation markers
+   - High-resolution tracking of prediction dynamics
+
+**Global analyses:**
+
+4. **Binary vs PSPL comparison** (`binary_vs_pspl_comparison.png`)
+   - Evolution of binary class probability for true PSPL events
+   - Evolution of binary class probability for true Binary events
+   - Demonstrates discrimination capability between similar classes
+
+5. **Embedding space** (`embedding_space_pca.png`)
+   - PCA projection of final layer embeddings
+   - Visualization of class clustering in latent space
+   - Explained variance by principal components
+
+6. **Confidence evolution by class** (`confidence_evolution_by_class.png`)
+   - Mean confidence trajectories for each class
+   - Standard deviation bands
+   - Comparison across observation completeness
+
+### Example Usage
+
+**Visualize specific events:**
+```bash
+python visualize_transformer.py \
+    --experiment_name baseline_1M \
+    --data ../data/raw/baseline_1M.npz \
+    --event_indices 42 137 289
+```
+
+**Quick visualization without attention (faster):**
+```bash
+python visualize_transformer.py \
+    --experiment_name test_experiment \
+    --data ../data/raw/test.npz \
+    --no_attention \
+    --n_examples 3
+```
+
+**CPU execution:**
+```bash
+python visualize_transformer.py \
+    --experiment_name experiment \
+    --data ../data/raw/test.npz \
+    --no_cuda
+```
+
+### Interpretation Guidelines
+
+**Attention patterns:**
+- Strong diagonal indicates temporal locality (recent observations most important)
+- Off-diagonal attention suggests long-range dependencies
+- Causal boundary should be clearly visible (no future peeking)
+
+**Temporal encoding:**
+- Smooth encoding dimensions indicate learned temporal structure
+- PCA clustering by time suggests proper temporal ordering
+- Irregular intervals should be handled gracefully
+
+**Classification evolution:**
+- Stable predictions indicate robust classification
+- Early convergence suggests strong signal
+- Late changes may indicate confusion or ambiguous morphology
+
+**Embedding space:**
+- Clear class separation indicates effective feature learning
+- Overlap between PSPL and Binary is expected (physical similarity)
+- Flat events should be well-separated from lensing classes
+
+---
+
 ## Performance Benchmarks
 
 ### Baseline Results (1M events, balanced classes)
@@ -466,7 +579,7 @@ thesis-microlensing/
 │   ├── train.py             # Distributed training pipeline
 │   ├── evaluate.py          # Comprehensive evaluation suite
 │   ├── transformer.py       # Model architecture (v1.0)
-│   └── visualize_*.py       # Specialized visualization tools
+│   └── visualize_transformer.py  # Visualization suite
 │
 ├── data/
 │   └── raw/                 # Generated datasets (.npz format)
@@ -478,6 +591,8 @@ thesis-microlensing/
 │       ├── normalizer.pkl   # Input normalization parameters
 │       ├── results.json     # Training metrics
 │       └── evaluation/      # Diagnostic plots and analysis
+│
+├── visualizations/          # Model visualization outputs
 │
 ├── docs/
 │   └── RESEARCH_GUIDE.md    # Experimental protocols

@@ -78,7 +78,7 @@ class ComprehensiveEvaluator:
         self.model, self.config = self._load_model(model_path)
         self.model.to(self.device)
         self.model.eval()
-        print("✅ Model loaded")
+        print("Model loaded")
         
         print("\nLoading data...")
         self.flux, self.delta_t, self.y, self.params, self.timestamps, \
@@ -270,9 +270,9 @@ class ComprehensiveEvaluator:
             print(f"   Binary: {(y == 2).sum()} ({(y == 2).mean()*100:.1f}%)")
         
         if params is not None:
-            print(f"   ✅ Parameter data available (u0 analysis enabled)")
+            print(f"   Parameter data available (u0 analysis enabled)")
         else:
-            print("   ⚠️  No parameter data (u0 analysis disabled)")
+            print("   WARNING: No parameter data (u0 analysis disabled)")
         
         return flux, delta_t, y, params, timestamps, n_classes, n_points
     
@@ -398,7 +398,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'roc_curve.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_confusion_matrix(self):
@@ -432,7 +432,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'confusion_matrix.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_confidence_distribution(self):
@@ -456,7 +456,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'confidence_distribution.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_calibration_curve(self):
@@ -521,7 +521,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'calibration.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_example_grid(self, n_per_class=4):
@@ -610,7 +610,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / f'example_grid.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_high_res_evolution(self, event_idx=None, event_type='binary'):
@@ -640,8 +640,8 @@ class ComprehensiveEvaluator:
         true_label = self.y[event_idx]
         full_length = self.lengths[event_idx]
         
-        # Ultra-high resolution
-        fractions = np.linspace(0.05, 1.0, 20)
+        # Ultra-high resolution: 100 fractions
+        fractions = np.linspace(0.05, 1.0, 100)
         
         if self.n_classes == 3:
             flat_probs, pspl_probs, binary_probs = [], [], []
@@ -750,15 +750,15 @@ class ComprehensiveEvaluator:
         event_type_str = event_type.lower()
         output_path = self.output_dir / f'ultrahighres_evolution_{event_type_str}_{event_idx}.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def plot_fine_early_detection(self):
-        """Fine-grained early detection analysis (20 fractions)"""
+        """Fine-grained early detection analysis (50 fractions)"""
         print("  Computing fine-grained early detection...")
         
-        #fractions for smooth curves
-        fractions = np.linspace(0.05, 1.0, 20)
+        # 50 fractions for smooth curves
+        fractions = np.linspace(0.05, 1.0, 50)
         overall_accs = []
         per_class_recalls = [[] for _ in range(self.n_classes)]
         
@@ -863,13 +863,13 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'fine_early_detection.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def diagnose_temporal_bias(self):
         """Temporal bias diagnostics"""
         if self.params is None or 'pspl' not in self.params or 'binary' not in self.params:
-            print("\n⚠️  Skipping temporal bias diagnosis (no parameter data)")
+            print("\nWARNING: Skipping temporal bias diagnosis (no parameter data)")
             return
         
         print("\n" + "="*70)
@@ -889,9 +889,9 @@ class ComprehensiveEvaluator:
         print(f"  P-value: {pval:.4f}")
         
         if pval < 0.05:
-            print(f"  ⚠️  SIGNIFICANT DIFFERENCE - Potential data leakage!")
+            print(f"  WARNING: SIGNIFICANT DIFFERENCE - Potential data leakage!")
         else:
-            print(f"  ✅ No significant difference (good!)")
+            print(f"  No significant difference (good!)")
         
         # Test 2: Correlation
         print(f"\nTest 2: t0 vs Predicted Class Correlation")
@@ -914,7 +914,7 @@ class ComprehensiveEvaluator:
             stat, pval = ks_2samp(pspl_correct_t0, pspl_wrong_t0)
             print(f"    KS test: stat={stat:.4f}, p={pval:.4f}")
             if pval < 0.05:
-                print(f"    ⚠️  Timing affects PSPL classification!")
+                print(f"    WARNING: Timing affects PSPL classification!")
         
         print(f"\n  Binary events:")
         print(f"    Correct (n={len(binary_correct_t0)}): mean t0={np.mean(binary_correct_t0):.1f}")
@@ -925,7 +925,7 @@ class ComprehensiveEvaluator:
             stat, pval = ks_2samp(binary_correct_t0, binary_wrong_t0)
             print(f"    KS test: stat={stat:.4f}, p={pval:.4f}")
             if pval < 0.05:
-                print(f"    ⚠️  Timing affects Binary classification!")
+                print(f"    WARNING: Timing affects Binary classification!")
         
         # Visualize
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
@@ -966,7 +966,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'temporal_bias_diagnosis.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"\n✓ Saved: {output_path.name}")
+        print(f"\nSaved: {output_path.name}")
         plt.close()
         
         print("="*70)
@@ -974,7 +974,7 @@ class ComprehensiveEvaluator:
     def analyze_u0_dependency(self, n_bins=10, threshold=0.3):
         """Analyze u0 dependency (Binary class only)"""
         if self.params is None or 'binary' not in self.params:
-            print("\n⚠️  Skipping u0 analysis (no binary parameter data)")
+            print("\nWARNING: Skipping u0 analysis (no binary parameter data)")
             return None
         
         print(f"\n{'='*70}")
@@ -1079,7 +1079,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'u0_dependency.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"  Saved: {output_path.name}")
         plt.close()
     
     def generate_all_plots(self, include_u0=True, include_early=True, 
@@ -1134,7 +1134,7 @@ class ComprehensiveEvaluator:
                 u0_report_path = self.output_dir / 'u0_report.json'
                 with open(u0_report_path, 'w') as f:
                     json.dump(u0_results, f, indent=2)
-                print(f"  ✓ Saved: {u0_report_path.name}")
+                print(f"  Saved: {u0_report_path.name}")
         
         print(f"\n{'='*70}")
         print(f"All visualizations saved to: {self.output_dir}")
@@ -1198,7 +1198,7 @@ def main():
     exp_dirs = sorted(results_dir.glob(f'{args.experiment_name}_*'))
     
     if not exp_dirs:
-        print(f"❌ No experiment found matching: {args.experiment_name}")
+        print(f"ERROR: No experiment found matching: {args.experiment_name}")
         return
     
     exp_dir = exp_dirs[-1]
@@ -1209,7 +1209,7 @@ def main():
         model_path = exp_dir / 'final_model.pt'
     
     if not model_path.exists():
-        print(f"❌ Model not found in: {exp_dir}")
+        print(f"ERROR: Model not found in: {exp_dir}")
         return
     
     print(f"Using experiment: {exp_dir.name}")
@@ -1242,7 +1242,7 @@ def main():
     # Save results
     evaluator.save_results()
     
-    print("\n✅ Evaluation complete!")
+    print("\nEvaluation complete!")
 
 
 if __name__ == '__main__':

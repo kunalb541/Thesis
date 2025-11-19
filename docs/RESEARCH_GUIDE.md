@@ -528,6 +528,178 @@ print('Saved: u0_comparison_across_topologies.png')
 
 ---
 
+## Visualization and Diagnostic Analysis
+
+### Purpose
+
+Visual inspection of model internals provides insights that aggregate metrics cannot capture:
+- Attention mechanism behavior (temporal dependencies)
+- Classification decision dynamics (evolution over observations)
+- Embedding space structure (class separability)
+- Confidence calibration (prediction certainty)
+
+### Workflow
+
+**Phase 5: Model Visualization (30 minutes per experiment)**
+
+```bash
+cd code
+
+# Visualize trained model
+python visualize_transformer.py \
+    --experiment_name baseline_1M \
+    --data ../data/raw/baseline_1M.npz \
+    --output_dir ../results/visualizations/baseline_1M \
+    --n_examples 3 \
+    --event_indices 42 137 289
+
+# Expected outputs (per event):
+#   - attention_patterns_event*.png
+#   - temporal_encoding_event*.png
+#   - classification_evolution_event*.png
+#
+# Global outputs:
+#   - binary_vs_pspl_comparison.png
+#   - embedding_space_pca.png
+#   - confidence_evolution_by_class.png
+```
+
+### Diagnostic Checklist
+
+**1. Attention Pattern Verification**
+
+Examine `attention_patterns_event*.png` for each layer:
+
+- [ ] Causal boundary visible (no future observation access)
+- [ ] Diagonal dominance (temporal locality)
+- [ ] Smooth attention distribution (no isolated spikes)
+- [ ] Layer-wise evolution (deeper layers more global)
+
+**Red flags:**
+- Uniform attention (not learning temporal structure)
+- Strong off-diagonal without physical justification
+- Layer-independent patterns (insufficient depth)
+
+**2. Temporal Encoding Validation**
+
+Examine `temporal_encoding_event*.png`:
+
+- [ ] Encoding dimensions vary smoothly with time
+- [ ] PCA shows temporal ordering (not random)
+- [ ] Handles irregular observation intervals
+- [ ] No discontinuities or artifacts
+
+**Red flags:**
+- Flat encoding dimensions (not using temporal information)
+- Random PCA structure (temporal ordering lost)
+- Sensitivity to small interval perturbations
+
+**3. Classification Dynamics**
+
+Examine `classification_evolution_event*.png`:
+
+- [ ] Early convergence for clear events (< 50% observations)
+- [ ] Stable predictions after convergence
+- [ ] Confidence increases monotonically
+- [ ] Correct class probability dominates
+
+**Red flags:**
+- Late flip-flopping (unstable predictions)
+- Confidence peaks early then drops
+- Incorrect class probability increasing
+
+**4. Class Discrimination**
+
+Examine `binary_vs_pspl_comparison.png`:
+
+- [ ] PSPL events maintain low binary probability
+- [ ] Binary events achieve high binary probability
+- [ ] Clear separation by 50% completeness
+- [ ] Smooth probability evolution (not jumpy)
+
+**Red flags:**
+- PSPL events misclassified as binary
+- Binary events remain ambiguous throughout
+- Noisy probability trajectories
+
+**5. Embedding Space Structure**
+
+Examine `embedding_space_pca.png`:
+
+- [ ] Three visible clusters (Flat, PSPL, Binary)
+- [ ] Flat well-separated from lensing classes
+- [ ] PSPL-Binary overlap acceptable (physical similarity)
+- [ ] PC1 explains > 20% variance
+
+**Red flags:**
+- No visible clustering
+- Flat overlaps with lensing events
+- Single dominant cluster
+
+### Integration with Thesis
+
+**Figure Selection Criteria:**
+
+For thesis inclusion, select visualizations that:
+
+1. **Demonstrate attention mechanism**: Show causal masking and temporal locality
+2. **Illustrate classification dynamics**: Binary event with clear caustic features vs. PSPL-like binary
+3. **Validate design choices**: Temporal encoding handling irregular cadences
+4. **Show failure modes**: High-u₀ binary event misclassified as PSPL (physical limit)
+
+**Recommended figures:**
+
+- Figure 4.X: Attention patterns across all layers for representative binary event
+- Figure 4.Y: Classification evolution comparison (distinct vs. challenging binary)
+- Figure 4.Z: Embedding space PCA showing class clustering
+- Figure 5.X: Failure case analysis (u₀ > 0.3 binary classified as PSPL)
+
+### Troubleshooting
+
+**Visualization crashes or errors:**
+
+```bash
+# Check model checkpoint exists
+ls results/experiment_name_*/best_model.pt
+
+# Verify data compatibility
+python -c "
+import numpy as np
+data = np.load('../data/raw/test.npz')
+print('Keys:', list(data.keys()))
+print('Flux shape:', data['flux'].shape)
+"
+
+# Run on CPU if GPU memory issues
+python visualize_transformer.py \
+    --experiment_name experiment \
+    --data ../data/raw/test.npz \
+    --no_cuda
+```
+
+**Missing visualizations:**
+
+If certain plots are not generated:
+- `--no_attention`: Attention visualizations skipped (intended)
+- `--no_embedding`: Embedding space skipped (intended)
+- Errors during generation: Check console output for warnings
+
+**Performance optimization:**
+
+For faster iteration during analysis:
+```bash
+# Skip attention computation (slowest component)
+--no_attention
+
+# Reduce number of examples
+--n_examples 1
+
+# Focus on specific events
+--event_indices 42
+```
+
+---
+
 ## Troubleshooting
 
 ### Training Diagnostics

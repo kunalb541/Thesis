@@ -3,15 +3,15 @@
 Microlensing Transformer
 
 FIXES addressing all critical issues from v0.1:
-1. ✓ Correct causal mask (diff >= 0, not diff > 0)
-2. ✓ FlashAttention removed (was broken, reimplement properly later)
-3. ✓ Proper input validation restored
-4. ✓ Streaming API fully restored
-5. ✓ Nonlinear classifier restored
-6. ✓ Reasonable model size (~500k params, not 52k)
-7. ✓ Efficient forward pass (only compute final when needed)
-8. ✓ Better temporal encoding
-9. ✓ Comprehensive tests
+1. FIXED: Correct causal mask (diff >= 0, not diff > 0)
+2. FIXED: FlashAttention removed (was broken, reimplement properly later)
+3. FIXED: Proper input validation restored
+4. FIXED: Streaming API fully restored
+5. FIXED: Nonlinear classifier restored
+6. FIXED: Reasonable model size (~500k params, not 52k)
+7. FIXED: Efficient forward pass (only compute final when needed)
+8. FIXED: Better temporal encoding
+9. FIXED: Comprehensive tests
 
 Author: Kunal Bhatia
 Version: 1.0
@@ -575,8 +575,8 @@ class MicrolensingTransformer(nn.Module):
         
         # Log actual parameter count
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logger.info(f"✓ Actual parameters: {n_params:,}")
-        logger.info(f"✓ Training mode: {'Final timestep only' if self.train_final_only else 'All timesteps'}")
+        logger.info(f"FIXED: Actual parameters: {n_params:,}")
+        logger.info(f"FIXED: Training mode: {'Final timestep only' if self.train_final_only else 'All timesteps'}")
     
     def set_temperature(self, temperature: float):
         """Set temperature for calibration."""
@@ -1029,7 +1029,7 @@ if __name__ == '__main__':
     
     model = MicrolensingTransformer(config)
     n_params = count_parameters(model)
-    print(f"✓ Model created with {n_params:,} parameters\n")
+    print(f"FIXED: Model created with {n_params:,} parameters\n")
     
     # Test 1: Input validation
     print("="*80)
@@ -1044,7 +1044,7 @@ if __name__ == '__main__':
         model._validate_inputs(bad_flux, bad_delta)
         print("✗ FAIL: Did not catch NaN flux")
     except ValueError as e:
-        print(f"✓ PASS: Caught NaN flux - {str(e)[:60]}")
+        print(f"FIXED: PASS: Caught NaN flux - {str(e)[:60]}")
     
     try:
         # Should fail: Negative delta
@@ -1054,7 +1054,7 @@ if __name__ == '__main__':
         model._validate_inputs(good_flux, bad_delta)
         print("✗ FAIL: Did not catch negative delta")
     except ValueError as e:
-        print(f"✓ PASS: Caught negative delta - {str(e)[:60]}")
+        print(f"FIXED: PASS: Caught negative delta - {str(e)[:60]}")
     
     try:
         # Should fail: Shape mismatch
@@ -1063,7 +1063,7 @@ if __name__ == '__main__':
         model._validate_inputs(flux, delta)
         print("✗ FAIL: Did not catch shape mismatch")
     except ValueError as e:
-        print(f"✓ PASS: Caught shape mismatch - {str(e)[:60]}")
+        print(f"FIXED: PASS: Caught shape mismatch - {str(e)[:60]}")
     
     print()
     
@@ -1081,11 +1081,11 @@ if __name__ == '__main__':
     
     # Check diagonal (should be True - can attend to self)
     diag_correct = mask[0, 5] == True  # Query 0 (pos 5 in full seq) attends to key 5
-    print(f"\n✓ PASS: Diagonal is True (can attend to self): {diag_correct}")
+    print(f"\nFIXED: PASS: Diagonal is True (can attend to self): {diag_correct}")
     
     # Check window
     window_correct = mask[4, 9] == True and mask[4, 5] == True and mask[4, 4] == False
-    print(f"✓ PASS: Window is correct: {window_correct}")
+    print(f"FIXED: PASS: Window is correct: {window_correct}")
     print()
     
     # Test 3: Forward pass
@@ -1109,7 +1109,7 @@ if __name__ == '__main__':
     
     assert outputs['logits'].shape == (4, 3), "Wrong logits shape!"
     assert outputs['confidence'].shape == (4,), "Wrong confidence shape!"
-    print("✓ PASS: Returns only final predictions\n")
+    print("FIXED: PASS: Returns only final predictions\n")
     
     # Test 4: Forward pass with all timesteps
     print("="*80)
@@ -1125,7 +1125,7 @@ if __name__ == '__main__':
     
     assert outputs_all['logits'].shape == (4, 50, 3), "Wrong logits shape!"
     assert outputs_all['confidence'].shape == (4, 50), "Wrong confidence shape!"
-    print("✓ PASS: Can return all timesteps when requested\n")
+    print("FIXED: PASS: Can return all timesteps when requested\n")
     
     # Test 5: Streaming inference (RESTORED)
     print("="*80)
@@ -1150,8 +1150,8 @@ if __name__ == '__main__':
         print(f"  Chunk {i//10 + 1}: prediction = {outputs_stream['predictions'].item()}, "
               f"confidence = {outputs_stream['confidence'].item():.3f}")
     
-    print("\n✓ PASS: Streaming inference works with KV caching")
-    print(f"✓ Predictions evolved: {final_preds}\n")
+    print("\nFIXED: PASS: Streaming inference works with KV caching")
+    print(f"FIXED: Predictions evolved: {final_preds}\n")
     
     # Test 6: Temporal encoding
     print("="*80)
@@ -1177,7 +1177,7 @@ if __name__ == '__main__':
         with torch.no_grad():
             _ = model(test_flux, ood_deltas)
         if len(w) > 0:
-            print(f"✓ PASS: OOD warning triggered")
+            print(f"FIXED: PASS: OOD warning triggered")
         else:
             print("  (No warning - deltas within acceptable range)")
     
@@ -1201,7 +1201,7 @@ if __name__ == '__main__':
     loss_all = compute_loss(outputs_all, labels, train_final_only=False)
     print(f"Loss (all timesteps): {loss_all.item():.4f}")
     
-    print("✓ PASS: Loss computation works for both modes\n")
+    print("FIXED: PASS: Loss computation works for both modes\n")
     
     # Test 8: Cache consistency
     print("="*80)
@@ -1234,7 +1234,7 @@ if __name__ == '__main__':
     print(f"Max logit difference: {diff:.6f}")
     
     if diff < 1e-4:
-        print("✓ PASS: Streaming and non-streaming produce same results")
+        print("FIXED: PASS: Streaming and non-streaming produce same results")
     else:
         print(f"✗ FAIL: Difference too large ({diff:.6f})")
     
@@ -1266,7 +1266,7 @@ if __name__ == '__main__':
     print(f"Max gradient magnitude: {max_grad:.6f}")
     
     if n_params_with_grad > 0 and max_grad > 0:
-        print("✓ PASS: Gradients flow correctly")
+        print("FIXED: PASS: Gradients flow correctly")
     else:
         print("✗ FAIL: No gradients!")
     
@@ -1300,9 +1300,8 @@ if __name__ == '__main__':
     print(f"Difference: {abs(total_expected - total_actual):,}")
     
     if total_expected == total_actual:
-        print("✓ PASS: Parameter count is correct")
+        print("FIXED: PASS: Parameter count is correct")
     else:
         print(f"✗ FAIL: Mismatch of {abs(total_expected - total_actual)} parameters")
     
     print()
-    
