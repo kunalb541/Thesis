@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Model Evaluation v16.0 - Simple Caustic Detection Edition
-==========================================================
+Model Evaluation
 
-FIXED: Dynamic array sizing based on actual data shape
-ENHANCED: Ultra-high resolution evolution plots (100 points)
+Compatible with MicrolensingTransformer v1.0
+- Uses flux + delta_t inputs (not normalized flux)
+- Works with ModelConfig
+- Handles variable sequence lengths
+- Full evaluation suite with all plots
 
 Author: Kunal Bhatia
-Version: 16.0.1
+Version: 1.0.0
+Date: November 2025
 """
 
 import torch
@@ -35,48 +38,27 @@ plt.rcParams['figure.dpi'] = 300
 plt.rcParams['font.size'] = 10
 
 
-class StableNormalizer:
-    """Robust normalizer (for pickle compatibility)"""
+def create_delta_t_from_timestamps(timestamps):
+    """Create delta_t array from timestamps."""
+    if timestamps.ndim == 1:
+        timestamps = timestamps[np.newaxis, :]
     
-    def __init__(self, pad_value=-1.0):
-        self.pad_value = pad_value
-        self.mean = 0.0
-        self.std = 1.0
+    delta_t = np.zeros_like(timestamps)
+    if timestamps.shape[1] > 1:
+        delta_t[:, 1:] = np.diff(timestamps, axis=1)
     
-    def fit(self, X):
-        valid_mask = (X != self.pad_value) & np.isfinite(X)
-        
-        if valid_mask.any():
-            valid_values = X[valid_mask]
-            self.mean = np.median(valid_values)
-            self.std = np.median(np.abs(valid_values - self.mean))
-            
-            if self.std < 1e-8:
-                self.std = 1.0
-            
-            self.mean = np.clip(self.mean, -100, 100)
-            self.std = np.clip(self.std, 0.01, 100)
-        
-        return self
-    
-    def transform(self, X):
-        X_norm = X.copy()
-        valid_mask = (X != self.pad_value) & np.isfinite(X)
-        
-        if valid_mask.any():
-            X_norm[valid_mask] = (X[valid_mask] - self.mean) / self.std
-            X_norm[valid_mask] = np.clip(X_norm[valid_mask], -10, 10)
-        
-        return np.nan_to_num(X_norm, nan=0.0, posinf=10.0, neginf=-10.0)
-    
-    def fit_transform(self, X):
-        return self.fit(X).transform(X)
+    return delta_t
+
+
+def compute_lengths_from_flux(flux, pad_value=-1.0):
+    """Compute valid sequence lengths from padded flux."""
+    return np.sum(flux != pad_value, axis=1).astype(np.int64)
 
 
 class ComprehensiveEvaluator:
-    """Complete evaluation with v16.0 SimpleCausticDetector support"""
+    """Complete evaluation with v1.0 Transformer support"""
     
-    def __init__(self, model_path, normalizer_path, data_path, output_dir, 
+    def __init__(self, model_path, data_path, output_dir, 
                  device='cuda', batch_size=128, n_samples=None):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.batch_size = batch_size
@@ -85,6 +67,7 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("="*70)
+        print("MICROLENSING TRANSFORMER EVALUATION v1.0")
         print("="*70)
         print(f"Device: {self.device}")
         print(f"Output: {self.output_dir}")
@@ -92,109 +75,152 @@ class ComprehensiveEvaluator:
             print(f"Sample limit: {n_samples}")
         
         print("\nLoading model...")
-        self.model = self._load_model(model_path)
+        self.model, self.config = self._load_model(model_path)
         self.model.to(self.device)
         self.model.eval()
         print("✅ Model loaded")
         
-        print("\nLoading normalizer...")
-        self.normalizer = self._load_normalizer(normalizer_path)
-        print("✅ Normalizer loaded")
-        
         print("\nLoading data...")
-        self.X, self.y, self.params, self.timestamps, self.n_classes, self.n_points = self._load_data(data_path)
+        self.flux, self.delta_t, self.y, self.params, self.timestamps, \
+            self.n_classes, self.n_points = self._load_data(data_path)
         
-        print("\nNormalizing...")
-        self.X_norm = self.normalizer.transform(self.X)
+        print("\nComputing lengths...")
+        self.lengths = compute_lengths_from_flux(self.flux)
+        print(f"   Valid lengths: min={self.lengths.min()}, max={self.lengths.max()}, "
+              f"mean={self.lengths.mean():.1f}")
         
-        print("Getting predictions...")
+        print("\nGetting predictions...")
         self.predictions, self.confidences, self.probs = self._get_predictions()
         
-        print("Computing metrics...")
+        print("\nComputing metrics...")
         self.metrics = self._compute_metrics()
         self._print_summary()
     
     def _load_model(self, model_path):
+        """Load model with v1.0 architecture"""
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         
-        config_path = Path(model_path).parent / 'config.json'
-        if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-            
-            d_model = config.get('d_model', 64)
-            nhead = config.get('nhead', 4)
-            num_layers = config.get('num_layers', 4)
-            dropout = config.get('dropout', 0.1)
-            causal_attention = not config.get('no_causal_attention', False)
-            
-            print(f"   d_model={d_model}, nhead={nhead}, layers={num_layers}")
-            print(f"   Causal attention: {causal_attention}")
-            
+        # Load config
+        if 'config' in checkpoint:
+            config = checkpoint['config']
+            print(f"   Config from checkpoint")
         else:
-            print("   Warning: config.json not found, using defaults")
-            d_model = 128
-            nhead = 4
-            num_layers = 4
-            dropout = 0.1
-            causal_attention = True
+            config_path = Path(model_path).parent / 'config.json'
+            if config_path.exists():
+                with open(config_path) as f:
+                    config_dict = json.load(f)
+                
+                # Create ModelConfig from dict
+                sys.path.insert(0, str(Path(__file__).parent))
+                from transformer import ModelConfig
+                
+                config = ModelConfig(
+                    d_model=config_dict.get('d_model', 128),
+                    n_heads=config_dict.get('n_heads', 8),
+                    n_layers=config_dict.get('n_layers', 4),
+                    dropout=config_dict.get('dropout', 0.1),
+                    attention_window=config_dict.get('attention_window', 64),
+                    train_final_only=True,
+                    use_adaptive_normalization=True
+                )
+                print(f"   Config from config.json")
+            else:
+                raise FileNotFoundError(f"Cannot find config in checkpoint or config.json")
         
+        print(f"   d_model={config.d_model}, n_heads={config.n_heads}, "
+              f"n_layers={config.n_layers}")
+        
+        # Import model
         sys.path.insert(0, str(Path(__file__).parent))
         from transformer import MicrolensingTransformer, count_parameters
         
-        model = MicrolensingTransformer(
-            n_points=1500,  # Will be overridden by actual data
-            d_model=d_model,
-            nhead=nhead,
-            num_layers=num_layers,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            pad_value=-1.0,
-            causal_attention=causal_attention
-        )
+        # Create model
+        model = MicrolensingTransformer(config)
         
+        # Load state dict
         state_dict = checkpoint['model_state_dict']
         if any(key.startswith('module.') for key in state_dict.keys()):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         
         model.load_state_dict(state_dict)
+        
+        # Load temperature if available
+        if 'calibration' in checkpoint and 'temperature' in checkpoint['calibration']:
+            temp = checkpoint['calibration']['temperature']
+            model.set_temperature(temp)
+            print(f"   Temperature: {temp:.4f}")
+        
         print(f"   Parameters: {count_parameters(model):,}")
         
-        return model
-    
-    def _load_normalizer(self, normalizer_path):
-        normalizer_path = Path(normalizer_path)
-        
-        if not normalizer_path.exists():
-            print(f"   Warning: Normalizer not found, creating default")
-            return StableNormalizer(pad_value=-1.0)
-        
-        with open(normalizer_path, 'rb') as f:
-            normalizer = pickle.load(f)
-        
-        print(f"   Mean={normalizer.mean:.3f}, Std={normalizer.std:.3f}")
-        return normalizer
+        return model, config
     
     def _load_data(self, data_path):
+        """Load data with flux and delta_t"""
         data = np.load(data_path)
-        X = data['X']
-        y = data['y']
         
-        if X.ndim == 3:
-            X = X.squeeze(1)
+        # Load flux
+        if 'flux' in data:
+            flux = data['flux']
+        elif 'X' in data:
+            # Legacy format
+            flux = data['X']
+        else:
+            raise KeyError("Data must contain 'flux' or 'X'")
+        
+        # Remove channel dimension if present
+        if flux.ndim == 3:
+            flux = flux.squeeze(1)
+        
+        # Load or create delta_t
+        if 'delta_t' in data:
+            delta_t = data['delta_t']
+            if delta_t.ndim == 3:
+                delta_t = delta_t.squeeze(1)
+            print("   Using delta_t from file")
+        elif 'timestamps' in data:
+            timestamps = data['timestamps']
+            if timestamps.ndim == 1:
+                # Broadcast to all samples
+                timestamps_array = np.tile(timestamps, (len(flux), 1))
+            else:
+                timestamps_array = timestamps
+            delta_t = create_delta_t_from_timestamps(timestamps_array)
+            print("   Created delta_t from timestamps")
+        else:
+            # Create uniform delta_t
+            print("   Warning: No timestamps, creating uniform delta_t")
+            n_points = flux.shape[1]
+            time_range = 200.0  # -100 to 100
+            dt = time_range / n_points
+            delta_t = np.full_like(flux, dt)
+            delta_t[:, 0] = 0.0  # First point has no delta
+        
+        # Load labels
+        if 'labels' in data:
+            y = data['labels']
+        elif 'y' in data:
+            y = data['y']
+        else:
+            raise KeyError("Data must contain 'labels' or 'y'")
         
         # Get actual data dimensions
-        n_points = X.shape[1]
+        n_points = flux.shape[1]
+        n_classes = len(np.unique(y))
         
+        # Load timestamps
         if 'timestamps' in data:
             timestamps = data['timestamps']
+            if timestamps.ndim == 1:
+                timestamps = np.tile(timestamps, (len(flux), 1))
         else:
-            timestamps = np.linspace(-120, 120, n_points)
+            # Create uniform timestamps
+            timestamps = np.linspace(-100, 100, n_points)
+            timestamps = np.tile(timestamps, (len(flux), 1))
         
-        n_classes = len(np.unique(y))
         print(f"   Dataset: {n_classes} classes")
-        print(f"   Data shape: {X.shape} (n_points={n_points})")
+        print(f"   Data shape: {flux.shape} (n_points={n_points})")
         
+        # Load parameters if available
         params = None
         if 'params_binary_json' in data:
             params_binary = json.loads(str(data['params_binary_json']))
@@ -210,7 +236,8 @@ class ComprehensiveEvaluator:
             
             params = params_dict
         
-        if self.n_samples is not None and self.n_samples < len(X):
+        # Sample if requested
+        if self.n_samples is not None and self.n_samples < len(flux):
             print(f"   Sampling {self.n_samples} events...")
             
             indices_per_class = []
@@ -223,7 +250,9 @@ class ComprehensiveEvaluator:
             all_indices = np.concatenate(indices_per_class)
             np.random.shuffle(all_indices)
             
-            X = X[all_indices]
+            flux = flux[all_indices]
+            delta_t = delta_t[all_indices]
+            timestamps = timestamps[all_indices]
             y = y[all_indices]
             
             if params is not None:
@@ -234,7 +263,7 @@ class ComprehensiveEvaluator:
                             class_mask = y == class_id
                             params[key] = [params[key][i] for i in range(min(len(params[key]), class_mask.sum()))]
         
-        print(f"   Events: {len(X)}")
+        print(f"   Events: {len(flux)}")
         if n_classes == 3:
             print(f"   Flat:   {(y == 0).sum()} ({(y == 0).mean()*100:.1f}%)")
             print(f"   PSPL:   {(y == 1).sum()} ({(y == 1).mean()*100:.1f}%)")
@@ -245,24 +274,35 @@ class ComprehensiveEvaluator:
         else:
             print("   ⚠️  No parameter data (u0 analysis disabled)")
         
-        return X, y, params, timestamps, n_classes, n_points
+        return flux, delta_t, y, params, timestamps, n_classes, n_points
     
     def _get_predictions(self):
+        """Get predictions using new model API"""
         predictions = []
         confidences = []
         all_probs = []
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(self.X_norm), self.batch_size), desc="   Evaluating"):
-                batch_end = min(i + self.batch_size, len(self.X_norm))
-                x_batch = torch.tensor(self.X_norm[i:batch_end], dtype=torch.float32).to(self.device)
+            for i in tqdm(range(0, len(self.flux), self.batch_size), desc="   Evaluating"):
+                batch_end = min(i + self.batch_size, len(self.flux))
                 
-                output = self.model(x_batch, return_all=False)
-                logits = output['logits']
-                probs = F.softmax(logits, dim=1).cpu().numpy()
+                # Get batch data
+                flux_batch = torch.tensor(self.flux[i:batch_end], dtype=torch.float32).to(self.device)
+                delta_t_batch = torch.tensor(self.delta_t[i:batch_end], dtype=torch.float32).to(self.device)
+                lengths_batch = torch.tensor(self.lengths[i:batch_end], dtype=torch.long).to(self.device)
                 
-                preds = probs.argmax(axis=1)
-                confs = probs.max(axis=1)
+                # Forward pass
+                output = self.model(
+                    flux_batch, 
+                    delta_t_batch, 
+                    lengths_batch,
+                    return_all_timesteps=False
+                )
+                
+                # Extract predictions
+                probs = output['probs'].cpu().numpy()
+                preds = output['predictions'].cpu().numpy()
+                confs = output['confidence'].cpu().numpy()
                 
                 predictions.extend(preds)
                 confidences.extend(confs)
@@ -271,6 +311,7 @@ class ComprehensiveEvaluator:
         return np.array(predictions), np.array(confidences), np.vstack(all_probs)
     
     def _compute_metrics(self):
+        """Compute classification metrics"""
         accuracy = accuracy_score(self.y, self.predictions)
         
         if self.n_classes == 3:
@@ -302,6 +343,7 @@ class ComprehensiveEvaluator:
         return metrics
     
     def _print_summary(self):
+        """Print evaluation summary"""
         print(f"\n{'='*70}")
         print(f"EVALUATION RESULTS ({self.n_classes} classes)")
         print(f"{'='*70}")
@@ -390,7 +432,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'confusion_matrix.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"  Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_confidence_distribution(self):
@@ -414,7 +456,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'confidence_distribution.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"   Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_calibration_curve(self):
@@ -423,6 +465,7 @@ class ComprehensiveEvaluator:
         
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
+        # Calibration curve
         ax = axes[0]
         conf_min = 0.3 if self.n_classes == 3 else 0.5
         conf_bins = np.linspace(conf_min, 1.0, 11)
@@ -436,14 +479,16 @@ class ComprehensiveEvaluator:
                 counts.append(mask.sum())
         
         if len(bin_centers) > 0:
-            bars = ax.bar(bin_centers, accuracies, width=0.06, alpha=0.7, edgecolor='black', linewidth=1.5)
+            bars = ax.bar(bin_centers, accuracies, width=0.06, alpha=0.7, 
+                         edgecolor='black', linewidth=1.5)
             for bar, cnt in zip(bars, counts):
                 bar.set_facecolor(plt.cm.Blues(0.3 + 0.7 * cnt / max(counts)))
             
             for bc, acc, cnt in zip(bin_centers, accuracies, counts):
                 ax.text(bc, acc + 0.02, f'n={cnt}', ha='center', fontsize=7)
         
-        ax.plot([conf_min, 1.0], [conf_min, 1.0], 'r--', linewidth=2, alpha=0.5, label='Perfect')
+        ax.plot([conf_min, 1.0], [conf_min, 1.0], 'r--', linewidth=2, 
+               alpha=0.5, label='Perfect')
         ax.set_xlabel('Confidence', fontsize=11, fontweight='bold')
         ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
         ax.set_title('Calibration', fontweight='bold')
@@ -451,6 +496,7 @@ class ComprehensiveEvaluator:
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0.3 if self.n_classes == 3 else 0.4, 1.05])
         
+        # Confidence vs Correctness scatter
         ax = axes[1]
         n_plot = min(5000, len(correct))
         idx = np.random.choice(len(correct), n_plot, replace=False)
@@ -475,7 +521,7 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'calibration.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"   Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_example_grid(self, n_per_class=4):
@@ -483,7 +529,6 @@ class ComprehensiveEvaluator:
         print(f"  Generating example plots...")
         
         correct = self.predictions == self.y
-        
         examples = []
         
         if self.n_classes == 3:
@@ -498,6 +543,7 @@ class ComprehensiveEvaluator:
             correct_mask = true_mask & correct
             incorrect_mask = true_mask & ~correct
             
+            # Correct examples
             if correct_mask.sum() > 0:
                 indices = np.where(correct_mask)[0]
                 conf_sorted = indices[np.argsort(-self.confidences[indices])]
@@ -505,6 +551,7 @@ class ComprehensiveEvaluator:
                 for idx in selected:
                     examples.append((idx, f'{class_name} (Correct)', 'green'))
             
+            # Incorrect example
             if incorrect_mask.sum() > 0:
                 indices = np.where(incorrect_mask)[0]
                 conf_sorted = indices[np.argsort(-self.confidences[indices])]
@@ -526,27 +573,32 @@ class ComprehensiveEvaluator:
             col = i % n_cols
             ax = axes[row, col]
             
-            flux = self.X[idx]
-            valid_mask = flux != -1.0
-            times = self.timestamps[valid_mask]
+            flux = self.flux[idx]
+            valid_mask = (flux != -1.0) & np.isfinite(flux)
+            
+            times = self.timestamps[idx][valid_mask]
             fluxes = flux[valid_mask]
             
+            # Convert to magnitudes
             baseline = 20.0
             magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
             
             true_name = class_names[self.y[idx]]
             pred_name = class_names[self.predictions[idx]]
             
-            ax.scatter(times, magnitudes, c=color, s=8, alpha=0.7, edgecolors='black', linewidth=0.3)
+            ax.scatter(times, magnitudes, c=color, s=8, alpha=0.7, 
+                      edgecolors='black', linewidth=0.3)
             ax.invert_yaxis()
             
-            ax.set_title(f'{label}\nTrue: {true_name}, Pred: {pred_name}\nConf: {self.confidences[idx]:.2f}',
+            ax.set_title(f'{label}\nTrue: {true_name}, Pred: {pred_name}\n'
+                        f'Conf: {self.confidences[idx]:.2f}',
                         fontsize=9, color=color, fontweight='bold')
             ax.set_xlabel('Time (days)', fontsize=8)
             ax.set_ylabel('Magnitude', fontsize=8)
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax.tick_params(labelsize=7)
         
+        # Hide unused subplots
         for i in range(len(examples), n_rows * n_cols):
             row = i // n_cols
             col = i % n_cols
@@ -558,11 +610,11 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / f'example_grid.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"   Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_high_res_evolution(self, event_idx=None, event_type='binary'):
-        """ULTRA-HIGH-RESOLUTION evolution (100 points) - v16.0.1 FIXED"""
+        """Ultra-high-resolution classification evolution (100 points)"""
         if event_idx is None:
             if self.n_classes == 3:
                 target_class = {'flat': 0, 'pspl': 1, 'binary': 2}.get(event_type, 2)
@@ -583,12 +635,13 @@ class ComprehensiveEvaluator:
             
             event_idx = np.random.choice(good_examples)
         
-        light_curve = self.X[event_idx]
-        light_curve_norm = self.X_norm[event_idx]
+        flux = self.flux[event_idx]
+        delta_t = self.delta_t[event_idx]
         true_label = self.y[event_idx]
+        full_length = self.lengths[event_idx]
         
-        # ULTRA-HIGH RESOLUTION: 100 fractions for maximum granularity
-        fractions = np.linspace(0.05, 1.0, 100)
+        # Ultra-high resolution
+        fractions = np.linspace(0.05, 1.0, 20)
         
         if self.n_classes == 3:
             flat_probs, pspl_probs, binary_probs = [], [], []
@@ -599,14 +652,16 @@ class ComprehensiveEvaluator:
         
         with torch.no_grad():
             for frac in fractions:
-                n_points = int(self.n_points * frac)
-                partial_curve = np.full(self.n_points, -1.0, dtype=np.float32)
-                partial_curve[:n_points] = light_curve_norm[:n_points]
+                n_points = max(1, int(full_length * frac))
                 
-                x = torch.from_numpy(partial_curve).unsqueeze(0).to(self.device)
-                output = self.model(x, return_all=False)
-                logits = output['logits']
-                probs = F.softmax(logits, dim=1).cpu().numpy()[0]
+                # Create partial observation
+                partial_flux = torch.tensor(flux[:n_points], dtype=torch.float32).unsqueeze(0).to(self.device)
+                partial_delta = torch.tensor(delta_t[:n_points], dtype=torch.float32).unsqueeze(0).to(self.device)
+                partial_length = torch.tensor([n_points], dtype=torch.long).to(self.device)
+                
+                output = self.model(partial_flux, partial_delta, partial_length, 
+                                   return_all_timesteps=False)
+                probs = output['probs'].cpu().numpy()[0]
                 
                 if self.n_classes == 3:
                     flat_probs.append(probs[0])
@@ -618,14 +673,15 @@ class ComprehensiveEvaluator:
                 
                 confidences.append(probs.max())
         
+        # Create figure
         fig = plt.figure(figsize=(16, 12))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.2, 1], hspace=0.3)
         
         # Top: Light curve
         ax1 = fig.add_subplot(gs[0])
-        valid_mask = light_curve != -1.0
-        times = self.timestamps[valid_mask]
-        fluxes = light_curve[valid_mask]
+        valid_mask = (flux != -1.0) & np.isfinite(flux)
+        times = self.timestamps[event_idx][valid_mask]
+        fluxes = flux[valid_mask]
         baseline = 20.0
         magnitudes = baseline - 2.5 * np.log10(np.maximum(fluxes, 1e-10))
         
@@ -637,13 +693,15 @@ class ComprehensiveEvaluator:
             colors = ['darkred', 'darkblue']
         
         color = colors[true_label]
-        ax1.scatter(times, magnitudes, c=color, s=15, alpha=0.7, edgecolors='black', linewidth=0.5)
+        ax1.scatter(times, magnitudes, c=color, s=15, alpha=0.7, 
+                   edgecolors='black', linewidth=0.5)
         ax1.invert_yaxis()
         
         true_str = class_names[true_label]
         pred_str = class_names[self.predictions[event_idx]]
         ax1.set_ylabel('Magnitude', fontsize=13, fontweight='bold')
-        ax1.set_title(f'ULTRA-HIGH-RES Evolution (100 Points) - True: {true_str}, Pred: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
+        ax1.set_title(f'ULTRA-HIGH-RES Evolution (100 Points) - True: {true_str}, '
+                     f'Pred: {pred_str} (Conf: {self.confidences[event_idx]:.2f})',
                      fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
@@ -664,8 +722,10 @@ class ComprehensiveEvaluator:
             ax2.plot(completeness, binary_probs, '-', linewidth=1.5, 
                     color='darkblue', label='Binary', alpha=0.8)
         
-        ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, label='50% Threshold')
-        ax2.axhline(y=0.8, color='orange', linestyle=':', linewidth=1.5, alpha=0.7, label='High Conf')
+        ax2.axhline(y=0.5, color='gray', linestyle='--', linewidth=2, 
+                   label='50% Threshold')
+        ax2.axhline(y=0.8, color='orange', linestyle=':', linewidth=1.5, 
+                   alpha=0.7, label='High Conf')
         
         ax2.set_ylabel('Class Probability', fontsize=13, fontweight='bold')
         ax2.legend(loc='center left', fontsize=10, bbox_to_anchor=(1, 0.5))
@@ -674,7 +734,8 @@ class ComprehensiveEvaluator:
         
         # Bottom: Confidence
         ax3 = fig.add_subplot(gs[2])
-        ax3.plot(completeness, confidences, '-', linewidth=1.5, color='purple', label='Confidence')
+        ax3.plot(completeness, confidences, '-', linewidth=1.5, 
+                color='purple', label='Confidence')
         ax3.axhline(y=0.8, color='orange', linestyle='--', linewidth=2, label='80%')
         ax3.axhline(y=0.9, color='red', linestyle='--', linewidth=2, label='90%')
         ax3.set_xlabel('Observation Completeness (%)', fontsize=13, fontweight='bold')
@@ -689,15 +750,15 @@ class ComprehensiveEvaluator:
         event_type_str = event_type.lower()
         output_path = self.output_dir / f'ultrahighres_evolution_{event_type_str}_{event_idx}.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"   Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def plot_fine_early_detection(self):
-        """Fine-grained early detection (50 fractions) - v16.0.1 ENHANCED"""
+        """Fine-grained early detection analysis (20 fractions)"""
         print("  Computing fine-grained early detection...")
         
-        # ENHANCED: 50 fractions for smoother curves
-        fractions = np.linspace(0.05, 1.0, 50)
+        #fractions for smooth curves
+        fractions = np.linspace(0.05, 1.0, 20)
         overall_accs = []
         per_class_recalls = [[] for _ in range(self.n_classes)]
         
@@ -705,25 +766,48 @@ class ComprehensiveEvaluator:
             predictions = []
             
             with torch.no_grad():
-                for i in range(0, len(self.X_norm), self.batch_size):
-                    batch_end = min(i + self.batch_size, len(self.X_norm))
+                for i in range(0, len(self.flux), self.batch_size):
+                    batch_end = min(i + self.batch_size, len(self.flux))
                     batch_size_actual = batch_end - i
-                    n_points = int(self.n_points * frac)
                     
-                    partial_curves_np = np.full((batch_size_actual, self.n_points), -1.0, dtype=np.float32)
-                    partial_curves_np[:, :n_points] = self.X_norm[i:batch_end, :n_points]
+                    # Create partial observations
+                    partial_flux_list = []
+                    partial_delta_list = []
+                    partial_lengths = []
                     
-                    x_batch = torch.from_numpy(partial_curves_np).to(self.device)
+                    for j in range(i, batch_end):
+                        n_points = max(1, int(self.lengths[j] * frac))
+                        partial_flux_list.append(
+                            torch.tensor(self.flux[j, :n_points], dtype=torch.float32)
+                        )
+                        partial_delta_list.append(
+                            torch.tensor(self.delta_t[j, :n_points], dtype=torch.float32)
+                        )
+                        partial_lengths.append(n_points)
                     
-                    output = self.model(x_batch, return_all=False)
-                    logits = output['logits']
-                    probs = F.softmax(logits, dim=1).cpu().numpy()
+                    # Pad to max length in batch
+                    max_len = max(partial_lengths)
+                    padded_flux = torch.full((batch_size_actual, max_len), -1.0)
+                    padded_delta = torch.zeros((batch_size_actual, max_len))
                     
-                    predictions.extend(probs.argmax(axis=1))
+                    for k, (f, d) in enumerate(zip(partial_flux_list, partial_delta_list)):
+                        padded_flux[k, :len(f)] = f
+                        padded_delta[k, :len(d)] = d
+                    
+                    padded_flux = padded_flux.to(self.device)
+                    padded_delta = padded_delta.to(self.device)
+                    lengths_tensor = torch.tensor(partial_lengths, dtype=torch.long).to(self.device)
+                    
+                    output = self.model(padded_flux, padded_delta, lengths_tensor,
+                                       return_all_timesteps=False)
+                    preds = output['predictions'].cpu().numpy()
+                    
+                    predictions.extend(preds)
             
             predictions = np.array(predictions)
             overall_accs.append(accuracy_score(self.y, predictions))
             
+            # Per-class recall
             for c in range(self.n_classes):
                 class_mask = self.y == c
                 if class_mask.sum() > 0:
@@ -732,6 +816,7 @@ class ComprehensiveEvaluator:
                 else:
                     per_class_recalls[c].append(0.0)
         
+        # Plot
         fig, ax = plt.subplots(figsize=(14, 8))
         completeness = [f*100 for f in fractions]
         
@@ -741,26 +826,27 @@ class ComprehensiveEvaluator:
         if self.n_classes == 3:
             class_names = ['Flat', 'PSPL', 'Binary']
             colors = ['gray', 'darkred', 'darkblue']
-            markers = ['s', '^', 'D']
         else:
             class_names = ['PSPL', 'Binary']
             colors = ['darkred', 'darkblue']
-            markers = ['^', 'D']
         
-        for c, (name, color, marker) in enumerate(zip(class_names, colors, markers)):
+        for c, (name, color) in enumerate(zip(class_names, colors)):
             ax.plot(completeness, [r*100 for r in per_class_recalls[c]], '-', 
                    linewidth=3, color=color, label=f'{name} Recall', alpha=0.8)
         
-        ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', linestyle='--', 
-                  linewidth=1.5, alpha=0.5, label='Random')
-        ax.axhline(y=70, color='gray', linestyle=':', linewidth=1.5, alpha=0.5, label='Target (70%)')
-        ax.axhline(y=80, color='green', linestyle=':', linewidth=1.5, alpha=0.5, label='Excellent (80%)')
+        ax.axhline(y=33.3 if self.n_classes == 3 else 50, color='red', 
+                  linestyle='--', linewidth=1.5, alpha=0.5, label='Random')
+        ax.axhline(y=70, color='gray', linestyle=':', linewidth=1.5, 
+                  alpha=0.5, label='Target (70%)')
+        ax.axhline(y=80, color='green', linestyle=':', linewidth=1.5, 
+                  alpha=0.5, label='Excellent (80%)')
         
         milestones = [0.10, 0.25, 0.50, 0.75]
         for milestone in milestones:
             if milestone in fractions:
                 idx = list(fractions).index(milestone)
-                ax.axvline(x=milestone*100, color='gray', linestyle=':', linewidth=1, alpha=0.3)
+                ax.axvline(x=milestone*100, color='gray', linestyle=':', 
+                          linewidth=1, alpha=0.3)
                 ax.text(milestone*100, 5, f'{int(milestone*100)}%', 
                        ha='center', fontsize=9, color='gray')
         
@@ -777,11 +863,11 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'fine_early_detection.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"   Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def diagnose_temporal_bias(self):
-        """Temporal bias diagnostics - v16.0"""
+        """Temporal bias diagnostics"""
         if self.params is None or 'pspl' not in self.params or 'binary' not in self.params:
             print("\n⚠️  Skipping temporal bias diagnosis (no parameter data)")
             return
@@ -821,7 +907,8 @@ class ComprehensiveEvaluator:
         
         print(f"\n  PSPL events:")
         print(f"    Correct (n={len(pspl_correct_t0)}): mean t0={np.mean(pspl_correct_t0):.1f}")
-        print(f"    Wrong (n={len(pspl_wrong_t0)}): mean t0={np.mean(pspl_wrong_t0):.1f}" if len(pspl_wrong_t0) > 0 else "    Wrong: N/A")
+        if len(pspl_wrong_t0) > 0:
+            print(f"    Wrong (n={len(pspl_wrong_t0)}): mean t0={np.mean(pspl_wrong_t0):.1f}")
         
         if len(pspl_correct_t0) > 0 and len(pspl_wrong_t0) > 0:
             stat, pval = ks_2samp(pspl_correct_t0, pspl_wrong_t0)
@@ -831,7 +918,8 @@ class ComprehensiveEvaluator:
         
         print(f"\n  Binary events:")
         print(f"    Correct (n={len(binary_correct_t0)}): mean t0={np.mean(binary_correct_t0):.1f}")
-        print(f"    Wrong (n={len(binary_wrong_t0)}): mean t0={np.mean(binary_wrong_t0):.1f}" if len(binary_wrong_t0) > 0 else "    Wrong: N/A")
+        if len(binary_wrong_t0) > 0:
+            print(f"    Wrong (n={len(binary_wrong_t0)}): mean t0={np.mean(binary_wrong_t0):.1f}")
         
         if len(binary_correct_t0) > 0 and len(binary_wrong_t0) > 0:
             stat, pval = ks_2samp(binary_correct_t0, binary_wrong_t0)
@@ -843,8 +931,10 @@ class ComprehensiveEvaluator:
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
         
         ax = axes[0]
-        ax.hist(pspl_t0, bins=30, alpha=0.6, color='darkred', label='PSPL (True)', edgecolor='black')
-        ax.hist(binary_t0, bins=30, alpha=0.6, color='darkblue', label='Binary (True)', edgecolor='black')
+        ax.hist(pspl_t0, bins=30, alpha=0.6, color='darkred', 
+               label='PSPL (True)', edgecolor='black')
+        ax.hist(binary_t0, bins=30, alpha=0.6, color='darkblue', 
+               label='Binary (True)', edgecolor='black')
         ax.axvline(np.mean(pspl_t0), color='darkred', linestyle='--', linewidth=2)
         ax.axvline(np.mean(binary_t0), color='darkblue', linestyle='--', linewidth=2)
         ax.set_xlabel('Peak Time t₀ (days)', fontsize=12, fontweight='bold')
@@ -855,13 +945,17 @@ class ComprehensiveEvaluator:
         
         ax = axes[1]
         if len(pspl_correct_t0) > 0:
-            ax.hist(pspl_correct_t0, bins=20, alpha=0.5, color='green', label='PSPL Correct', edgecolor='black')
+            ax.hist(pspl_correct_t0, bins=20, alpha=0.5, color='green', 
+                   label='PSPL Correct', edgecolor='black')
         if len(pspl_wrong_t0) > 0:
-            ax.hist(pspl_wrong_t0, bins=20, alpha=0.5, color='red', label='PSPL Wrong', edgecolor='black')
+            ax.hist(pspl_wrong_t0, bins=20, alpha=0.5, color='red', 
+                   label='PSPL Wrong', edgecolor='black')
         if len(binary_correct_t0) > 0:
-            ax.hist(binary_correct_t0, bins=20, alpha=0.5, color='lightgreen', label='Binary Correct', edgecolor='black', hatch='//')
+            ax.hist(binary_correct_t0, bins=20, alpha=0.5, color='lightgreen', 
+                   label='Binary Correct', edgecolor='black', hatch='//')
         if len(binary_wrong_t0) > 0:
-            ax.hist(binary_wrong_t0, bins=20, alpha=0.5, color='lightcoral', label='Binary Wrong', edgecolor='black', hatch='//')
+            ax.hist(binary_wrong_t0, bins=20, alpha=0.5, color='lightcoral', 
+                   label='Binary Wrong', edgecolor='black', hatch='//')
         ax.set_xlabel('Peak Time t₀ (days)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Count', fontsize=12, fontweight='bold')
         ax.set_title('t₀: Correct vs Wrong', fontsize=13, fontweight='bold')
@@ -922,7 +1016,8 @@ class ComprehensiveEvaluator:
         n_above = int((u0_values >= threshold).sum())
         
         print(f"Physical Detection Threshold: u₀ = {threshold}")
-        print(f"Accuracy at threshold: {acc_at_threshold*100:.1f}%" if acc_at_threshold else "N/A")
+        if acc_at_threshold:
+            print(f"Accuracy at threshold: {acc_at_threshold*100:.1f}%")
         print(f"\nBinary Event Distribution:")
         print(f"  Below threshold (u₀ < {threshold}): {n_below} ({n_below/len(u0_values)*100:.1f}%)")
         print(f"  Above threshold (u₀ ≥ {threshold}): {n_above} ({n_above/len(u0_values)*100:.1f}%)")
@@ -984,13 +1079,13 @@ class ComprehensiveEvaluator:
         
         output_path = self.output_dir / 'u0_dependency.png'
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"   Saved: {output_path.name}")
+        print(f"  ✓ Saved: {output_path.name}")
         plt.close()
     
     def generate_all_plots(self, include_u0=True, include_early=True, 
                           n_evolution_per_type=3, temporal_bias_check=True,
                           u0_threshold=0.3, u0_bins=10):
-        """Generate all visualizations v16.0.1"""
+        """Generate all visualizations"""
         print(f"\n{'='*70}")
         print(f"GENERATING VISUALIZATIONS")
         print(f"{'='*70}\n")
@@ -1049,7 +1144,8 @@ class ComprehensiveEvaluator:
         """Save evaluation results"""
         results = {
             'metrics': {k: float(v) if isinstance(v, (np.floating, float)) else v 
-                       for k, v in self.metrics.items() if k not in ['classification_report', 'confusion_matrix']},
+                       for k, v in self.metrics.items() 
+                       if k not in ['classification_report', 'confusion_matrix']},
             'classification_report': self.metrics['classification_report'],
             'confusion_matrix': self.metrics['confusion_matrix'],
             'n_classes': self.n_classes,
@@ -1058,7 +1154,7 @@ class ComprehensiveEvaluator:
             'high_confidence_80': int((self.confidences >= 0.8).sum()),
             'high_confidence_90': int((self.confidences >= 0.9).sum()),
             'has_u0_analysis': self.params is not None and 'binary' in self.params,
-            'version': '16.0.1'
+            'version': '1.0.0'
         }
         
         output_path = self.output_dir / 'evaluation_summary.json'
@@ -1070,44 +1166,62 @@ class ComprehensiveEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive evaluation'
+        description='Comprehensive evaluation v1.0 - Updated for new Transformer architecture'
     )
-    parser.add_argument('--experiment_name', type=str, required=True)
-    parser.add_argument('--data', type=str, required=True)
-    parser.add_argument('--n_samples', type=int, default=None)
-    parser.add_argument('--u0_threshold', type=float, default=0.3)
-    parser.add_argument('--u0_bins', type=int, default=10)
-    parser.add_argument('--no_u0', action='store_true')
-    parser.add_argument('--no_temporal_bias_check', action='store_true')
-    parser.add_argument('--early_detection', action='store_true')
-    parser.add_argument('--n_evolution_per_type', type=int, default=3)
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--no_cuda', action='store_true')
+    parser.add_argument('--experiment_name', type=str, required=True,
+                       help='Experiment name (will find latest matching)')
+    parser.add_argument('--data', type=str, required=True,
+                       help='Path to test data (.npz)')
+    parser.add_argument('--n_samples', type=int, default=None,
+                       help='Limit number of samples')
+    parser.add_argument('--u0_threshold', type=float, default=0.3,
+                       help='u0 threshold for analysis')
+    parser.add_argument('--u0_bins', type=int, default=10,
+                       help='Number of bins for u0 analysis')
+    parser.add_argument('--no_u0', action='store_true',
+                       help='Skip u0 analysis')
+    parser.add_argument('--no_temporal_bias_check', action='store_true',
+                       help='Skip temporal bias diagnosis')
+    parser.add_argument('--early_detection', action='store_true',
+                       help='Run early detection analysis (slower)')
+    parser.add_argument('--n_evolution_per_type', type=int, default=3,
+                       help='Number of evolution plots per class')
+    parser.add_argument('--batch_size', type=int, default=128,
+                       help='Batch size for evaluation')
+    parser.add_argument('--no_cuda', action='store_true',
+                       help='Force CPU')
     
     args = parser.parse_args()
     
+    # Find experiment directory
     results_dir = Path('../results')
     exp_dirs = sorted(results_dir.glob(f'{args.experiment_name}_*'))
     
     if not exp_dirs:
-        print(f"No experiment found matching: {args.experiment_name}")
+        print(f"❌ No experiment found matching: {args.experiment_name}")
         return
     
     exp_dir = exp_dirs[-1]
+    
+    # Try both model names
     model_path = exp_dir / 'best_model.pt'
-    normalizer_path = exp_dir / 'normalizer.pkl'
+    if not model_path.exists():
+        model_path = exp_dir / 'final_model.pt'
     
     if not model_path.exists():
-        print(f"Model not found: {model_path}")
+        print(f"❌ Model not found in: {exp_dir}")
         return
     
     print(f"Using experiment: {exp_dir.name}")
+    print(f"Using model: {model_path.name}")
+    
     output_dir = exp_dir / 'evaluation'
     
     device = 'cpu' if args.no_cuda else 'cuda'
+    
+    # Create evaluator
     evaluator = ComprehensiveEvaluator(
         model_path=str(model_path),
-        normalizer_path=str(normalizer_path),
         data_path=args.data,
         output_dir=str(output_dir),
         device=device,
@@ -1115,6 +1229,7 @@ def main():
         n_samples=args.n_samples
     )
     
+    # Generate all plots
     evaluator.generate_all_plots(
         include_u0=not args.no_u0,
         include_early=args.early_detection,
@@ -1124,8 +1239,10 @@ def main():
         u0_bins=args.u0_bins
     )
     
+    # Save results
     evaluator.save_results()
-    print("Evaluation complete!")
+    
+    print("\n✅ Evaluation complete!")
 
 
 if __name__ == '__main__':

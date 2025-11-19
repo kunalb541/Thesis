@@ -1,397 +1,769 @@
 # Research Guide: Real-Time Binary Microlensing Classification
 
-## 🎯 Scientific Questions
+## Scientific Objectives
 
-This thesis investigates automated binary microlensing detection for next-generation surveys:
+This thesis investigates automated binary microlensing detection for next-generation astronomical surveys. The primary research questions are:
 
-1. **Baseline Performance**: What classification accuracy can a modern neural network achieve on Roman Space Telescope quality photometry?
+1. **Baseline Performance**: What classification accuracy can a transformer-based neural network achieve on Roman Space Telescope quality photometry (5% missing observations, 0.05 mag photometric precision)?
 
-2. **Binary Morphology**: How does binary lens geometry (mass ratio q, projected separation s) affect detectability? Can we map parameter regions where binary classification is reliable?
+2. **Binary Morphology Dependence**: How does binary lens geometry (mass ratio q, projected separation s) affect detectability? Can we identify parameter space regions where binary classification reliability exceeds 85%?
 
-3. **Physical Detection Limits**: Does the impact parameter u₀ impose a fundamental detectability threshold? At what u₀ do binary events become indistinguishable from single-lens events?
+3. **Physical Detection Limits**: Does the impact parameter u₀ impose a fundamental detectability threshold? At what u₀ do binary events become indistinguishable from single-lens events due to the absence of caustic crossings?
 
-4. **Early Classification**: At what completeness fraction (10%, 25%, 50% of observations) can we achieve reliable classification?
+4. **Early Classification Capability**: At what observation completeness fractions (10%, 25%, 50% of expected observations) can we achieve classification accuracy sufficient to trigger follow-up observations?
 
 ---
 
-## 🛰️ Observational Context
+## Observational Context
 
-### Why Space-Based Photometry?
+### Space-Based vs. Ground-Based Photometry
 
-**Roman Space Telescope** (our baseline):
-- Cadence: ~15 minute sampling
+**Nancy Grace Roman Space Telescope** (baseline configuration):
+- Temporal sampling: ~15 minute cadence
 - Photometric precision: 0.05 mag
-- Coverage: Continuous bulge monitoring
-- **Key advantage**: Resolves short-duration caustic crossings
+- Coverage: Continuous galactic bulge monitoring
+- Key advantage: Temporal resolution sufficient to detect brief caustic crossings (hours to days)
 
-**Ground-Based Surveys** (OGLE, MOA):
-- Cadence: ~1-3 days (weather-dependent)
+**Ground-Based Surveys** (OGLE, MOA, KMTNet):
+- Temporal sampling: ~1-3 days (weather-dependent)
 - Photometric precision: 0.10 mag
-- Coverage: Seasonal gaps
-- **Challenge**: May miss brief caustic features
+- Coverage: Seasonal observing windows with weather gaps
+- Limitation: May undersample or miss brief caustic features characteristic of binary lensing
 
-**Scientific Impact**: Roman's high cadence and precision should dramatically improve binary detection rates, especially for planetary-mass companions (q < 0.01).
+### Scientific Motivation
+
+Roman's improved cadence and photometric precision should significantly enhance binary lens detection rates, particularly for planetary-mass companions (q < 0.01) where caustic crossing durations are brief (<1 day). Quantifying this improvement requires systematic comparison of classification performance across observational parameter space.
 
 ---
 
-## 🧪 Experimental Design
+## Experimental Design
 
-### Dataset Philosophy
+### Data Generation Philosophy
 
-We generate synthetic datasets using VBBinaryLensing (Bozza 2010), sampling physically realistic parameter ranges informed by OGLE/MOA discoveries. Each dataset tests a specific region of binary parameter space:
+We generate synthetic microlensing events using VBBinaryLensing (Bozza 2010), sampling physically realistic parameter ranges informed by OGLE and MOA survey discoveries. Each experimental dataset probes a specific region of binary lens parameter space to test detectability hypotheses.
 
-| Parameter | Symbol | Physical Meaning | Typical Range |
-|-----------|--------|------------------|---------------|
+### Physical Parameters
+
+| Parameter | Symbol | Physical Interpretation | Sampling Range |
+|-----------|--------|------------------------|----------------|
 | Mass ratio | q | m₂/m₁ (companion/primary) | 10⁻⁴ to 1.0 |
-| Separation | s | d/θ_E (caustic geometry) | 0.1 to 3.0 |
+| Projected separation | s | d/θ_E (caustic geometry) | 0.1 to 3.0 |
 | Impact parameter | u₀ | Minimum source-lens separation | 0.001 to 1.0 |
-| Source size | ρ | Finite source effects | 0.001 to 0.1 |
-| Timescale | t_E | Einstein crossing time | 10-40 days |
-| Peak time | t₀ | Event maximum | Randomized |
+| Source size | ρ | θ*/θ_E (finite source effects) | 0.001 to 0.1 |
+| Einstein timescale | t_E | Characteristic event duration | 10-40 days |
+| Peak time | t₀ | Time of maximum magnification | Uniformly randomized |
 
-### Four Core Experiments
+### Core Experimental Series
 
-#### 1. Baseline (1M events)
-**Purpose**: Establish space-based performance benchmark
+#### Experiment 1: Baseline Performance (1M events)
 
-**Configuration**:
-```
-N = 1,000,000 events (333k Flat / 333k PSPL / 334k Binary)
-
-Binary Parameters:
-  s: 0.1 - 3.0      # Full caustic geometry range
-  q: 10⁻⁴ - 1.0     # Planets to equal-mass binaries  
-  u₀: 0.001 - 1.0   # Test full impact parameter space
-  t_E: 10-40 days   # Realistic bulge timescales
-
-Observational:
-  Sampling: 5% random gaps (Roman-like)
-  Photometry: 0.05 mag Gaussian noise
-  Duration: 240 days centered on peak
-```
-
-**Scientific Goal**: Does a well-trained classifier achieve the 80%+ accuracy needed for large-scale surveys? What is the per-class (Flat/PSPL/Binary) recall?
-
-#### 2. Distinct Topology (150k events)
-**Purpose**: Optimal detection regime
+**Objective**: Establish classification benchmark on Roman-quality photometry across full binary parameter space.
 
 **Configuration**:
 ```
-Focus on clear caustics:
-  s: 0.7 - 1.5      # Central caustic + planetary caustic both strong
+N = 1,000,000 events (333k Baseline / 333k PSPL / 334k Binary)
+
+Binary Parameter Ranges:
+  s: 0.1 - 3.0      # Complete caustic geometry range
+  q: 10⁻⁴ - 1.0     # Planetary to equal-mass binaries  
+  u₀: 0.001 - 1.0   # Full impact parameter space
+  t_E: 10-40 days   # Typical bulge timescales
+
+Observational Configuration:
+  Missing fraction: 5% (uniform random gaps)
+  Photometric error: 0.05 mag (Gaussian)
+  Monitoring duration: 240 days (centered on t₀)
+  Temporal sampling: Roman-like cadence
+```
+
+**Success Criteria**:
+- Overall three-class accuracy > 80%
+- PSPL recall > 75%
+- Binary recall > 77% (for events with u₀ < 0.3)
+- Inference latency < 1 ms per event
+
+**Hypothesis**: A well-trained transformer architecture should achieve >80% classification accuracy on Roman-quality data, with the primary confusion occurring between PSPL and high-u₀ binary events (physically similar light curves).
+
+#### Experiment 2: Distinct Topology (150k events)
+
+**Objective**: Measure optimal detection performance when source trajectories cross well-separated caustics.
+
+**Configuration**:
+```
+Focus on favorable caustic configurations:
+  s: 0.7 - 1.5      # Central and planetary caustics well-separated
   q: 0.01 - 0.5     # Moderate mass ratios
-  u₀: 0.001 - 0.15  # Close encounters only
+  u₀: 0.001 - 0.15  # Guaranteed caustic crossings
 
-Expected: Binary recall 87-92%
+Expected Performance:
+  Binary recall: 87-92%
+  Overall accuracy: 85-88%
 ```
 
-**Scientific Goal**: In ideal conditions (source crosses both caustics), how accurately can we classify? This sets an upper performance bound.
+**Scientific Goal**: Establish upper performance bound under ideal geometric conditions. This topology represents the most detectable binary lens configurations where both central and planetary caustics produce distinct light curve features.
 
-#### 3. Planetary Topology (150k events)
-**Purpose**: Exoplanet microlensing focus
+#### Experiment 3: Planetary Topology (150k events)
+
+**Objective**: Assess exoplanet detection capability via microlensing with Roman cadence.
 
 **Configuration**:
 ```
-Small mass ratios:
-  s: 0.5 - 2.0      # Planet in lensing zone
-  q: 10⁻⁴ - 0.01    # Planetary regime
-  u₀: 0.001 - 0.3   # Wider u₀ range
+Planetary mass ratio regime:
+  s: 0.5 - 2.0      # Planet within Einstein ring
+  q: 10⁻⁴ - 0.01    # Earth to super-Jupiter masses
+  u₀: 0.001 - 0.3   # Wider u₀ range (planetary caustics smaller)
 
-Expected: Binary recall 82-87%
+Expected Performance:
+  Binary recall: 82-87%
+  Overall accuracy: 81-84%
 ```
 
-**Scientific Goal**: Can Roman cadence detect Earth-to-Jupiter mass planets via brief caustic perturbations? What q threshold enables reliable detection?
+**Scientific Goal**: Determine minimum detectable mass ratio q for reliable classification. Brief planetary caustic crossings (hours to 1 day) test Roman's temporal resolution advantage over ground-based surveys.
 
-#### 4. Stellar Topology (150k events)
-**Purpose**: Binary star systems
+#### Experiment 4: Stellar Topology (150k events)
+
+**Objective**: Evaluate classification performance for binary star systems with comparable masses.
 
 **Configuration**:
 ```
-Equal-mass systems:
-  s: 0.3 - 3.0      # Wide range of caustic structures
-  q: 0.3 - 1.0      # Comparable masses
-  u₀: 0.001 - 0.3   # Standard range
+Equal-mass binary regime:
+  s: 0.3 - 3.0      # Wide range of caustic separations
+  q: 0.3 - 1.0      # Comparable primary and companion masses
+  u₀: 0.001 - 0.3   # Standard impact parameter range
 
-Expected: Binary recall 78-83%
+Expected Performance:
+  Binary recall: 78-83%
+  Overall accuracy: 78-81%
 ```
 
-**Scientific Goal**: Do symmetric caustic structures (from equal masses) pose classification challenges? How does wide-binary geometry affect detectability?
+**Scientific Goal**: Assess whether symmetric caustic structures (characteristic of equal-mass systems) present increased classification difficulty compared to asymmetric planetary configurations.
 
 ---
 
-## 📊 Analysis Framework
+## Analysis Framework
 
-### Primary Metrics
+### Primary Evaluation Metrics
 
-1. **Three-Class Accuracy** (Flat / PSPL / Binary)
-   - Overall accuracy
-   - Per-class precision and recall
-   - Confusion matrix analysis
+**1. Three-Class Classification Performance**
+- Overall accuracy (macro-averaged)
+- Per-class precision, recall, F1-score
+- Confusion matrix analysis (identify systematic misclassifications)
+- ROC curves and AUC scores (one-vs-rest)
 
-2. **u₀ Dependency** (Binary class only)
-   - Bin accuracy by impact parameter
-   - Identify detectability threshold
-   - Compare to PSPL confusion rate
+**2. Impact Parameter Dependence (u₀ Analysis)**
+- Bin classification accuracy by u₀ (10 bins from 0 to 1.0)
+- Identify u₀ threshold where binary recall drops below 60%
+- Compare PSPL-Binary confusion rate vs. u₀
+- Validate physical vs. algorithmic detection limits
 
-3. **Early Classification**
-   - Accuracy vs. observation completeness (10%, 25%, 50%, 75%, 100%)
-   - When can we trigger follow-up observations?
+**3. Early Classification Analysis**
+- Accuracy as a function of observation completeness (15 fractions: 5%-100%)
+- Determine completeness threshold for 70% accuracy (follow-up trigger criterion)
+- Measure prediction evolution (stability over time)
+- Temporal bias diagnostics (Kolmogorov-Smirnov tests)
 
-4. **Computational Performance**
-   - Inference latency per event
-   - Throughput (events/second)
-   - Survey-scale feasibility
+**4. Computational Performance**
+- Single-event inference latency (milliseconds)
+- Batch throughput (events per second)
+- Memory footprint (GB per GPU)
+- Scaling efficiency (multi-GPU speedup)
 
-### Expected Physical Findings
+### Physical Detection Limit Hypothesis
 
-**u₀ Threshold Hypothesis**: We predict a sharp detection threshold at u₀ ≈ 0.3, below which accuracy drops to ~50% (random between PSPL/Binary). 
+**u₀ Threshold Prediction**: We hypothesize a sharp detectability threshold at u₀ ≈ 0.3, beyond which classification accuracy approaches random guessing (~50% between PSPL and Binary classes).
 
-**Physical Reasoning**: For u₀ > 0.3, the source trajectory doesn't cross caustics. The magnification profile becomes indistinguishable from single-lens (Paczynski) curves, regardless of (s, q). This is a fundamental physical limit, not an algorithm limitation.
+**Physical Basis**: For u₀ > 0.3, source trajectories do not intersect caustic curves. The resulting magnification profiles become morphologically indistinguishable from single-lens (Paczynski) light curves, independent of binary parameters (s, q). This represents a fundamental geometric limit, not a machine learning deficiency.
 
-**Test**: If we observe u₀ ≈ 0.3 threshold across *all* topologies (distinct, planetary, stellar), this confirms geometric origin rather than training artifacts.
-
----
-
-## 🧠 Architecture
-
-### Transformer v16.0 - Simple Caustic Detection Edition
-
-**NEW in v16.0**: SimpleCausticDetector extracts real caustic features from light curve morphology instead of just learning class labels.
-
-**SimpleCausticDetector Features:**
-1. **Peak Strength** - Sharp flux spikes indicate caustic crossings
-2. **Variance** - Spiky curves suggest multiple caustics (binary)
-3. **Peak Count** - Number of significant peaks in light curve
-4. **Asymmetry** - Binary events often show asymmetric patterns
-
-```
-Input [B, 1500]
-    ↓
-Input Embedding (1 → 128-dim)
-    ↓
-Relative Positional Encoding
-  • Observation count (not absolute time)
-  • Relative gaps (not positions)
-    ↓
-Transformer Layers (×4)
-  • Semi-causal attention (no future peeking)
-  • Multi-head (4 heads)
-  • Feed-forward network
-    ↓
-SimpleCausticDetector (NEW v16.0)
-  • Extracts 4 morphology features
-  • Peak strength, variance, count, asymmetry
-  • Compact representation (d_model/4)
-    ↓
-Global Pooling (avg + max)
-    ↓
-Task Heads:
-  ├─ Classification: [B, 3] (Flat/PSPL/Binary)
-  ├─ Caustic Detection: [B, 1] (From morphology features)
-  └─ Confidence: [B, 1] (Prediction certainty)
-    ↓
-```
-
-**Model Stats:**
-- Parameters: ~435,000 (v15.0) → ~443,000 (v16.0)
-- SimpleCausticDetector: Only +8K parameters
-- d_model: 128, heads: 4, layers: 4
-- Inference: <1ms per event
-- Throughput: 10,000+ events/sec
+**Validation Test**: Consistent u₀ ≈ 0.3 threshold across all topology experiments (distinct, planetary, stellar) would confirm geometric caustic-crossing requirement rather than topology-specific training artifacts.
 
 ---
 
+## Neural Network Architecture
 
-## 📈 Results Interpretation
+### Transformer Model (Version 1.0)
 
-### What Constitutes Success?
+The architecture implements a causal transformer encoder with temporal encoding specialized for irregular astronomical time series.
 
-**Baseline (1M events)**:
-- Overall accuracy > 80%
-- PSPL recall > 75% (single-lens events)
-- Binary recall > 77% (for u₀ < 0.3)
-- Inference < 1 ms per event
+```
+Input: Flux [B, N], Time Intervals Δt [B, N]
+  │
+  ├─ Flux Embedding: Linear(1 → d_model=128)
+  │   • Maps normalized flux to latent space
+  │
+  └─ Temporal Encoding: Adaptive log-normalized Δt
+      • Learn distribution during training
+      • Warn on out-of-distribution inputs
+  │
+  ↓ Element-wise sum: flux_emb + temp_emb
+  │
+Transformer Encoder Blocks (×4 layers)
+  │
+  ├─ Multi-Head Self-Attention (8 heads, head_dim=16)
+  │   • Semi-causal mask (sliding window size 64)
+  │   • No future observation access
+  │   • Q, K, V projections with residual connections
+  │
+  ├─ Feed-Forward Network (expansion factor 4×)
+  │   • Linear(128 → 512) + GELU
+  │   • Linear(512 → 128)
+  │   • Residual connection
+  │
+  └─ Layer Normalization (pre-norm configuration)
+  │
+  ↓ Apply to all 4 layers sequentially
+  │
+Global Pooling Layer
+  │
+  ├─ Average pooling (over valid observations)
+  ├─ Max pooling (over valid observations)
+  └─ Concatenate → [B, 2×d_model]
+  │
+  ↓
+Classification Head (2-layer MLP)
+  │
+  ├─ Hidden layer: Linear(256 → 128) + GELU + Dropout(0.1)
+  └─ Output layer: Linear(128 → 3)
+  │
+  ↓
+Output
+  ├─ Logits: [B, 3] (class scores)
+  ├─ Probabilities: [B, 3] (temperature-calibrated softmax)
+  └─ Confidence: [B] (maximum probability)
+```
 
-**Topology Studies**:
-- Distinct: Binary recall > 85% (optimal conditions)
-- Planetary: Binary recall > 80% (exoplanet regime)
-- Stellar: Binary recall > 75% (equal-mass systems)
+**Model Specifications**:
+- Total parameters: ~808,000 (all trainable)
+- Embedding dimension: d_model = 128
+- Attention heads: 8 (head dimension = 16)
+- Encoder layers: 4
+- Feed-forward dimension: 512 (4× expansion)
+- Attention window: 64 observations (causal)
+- Dropout rate: 0.1
+- Maximum sequence length: 1500 observations
 
-**u₀ Analysis**:
-- Clear threshold at u₀ ≈ 0.3 across all topologies
-- Consistent with geometric caustic-crossing requirement
-- Validates physical interpretation over ML artifact
+### Key Design Features
 
-**Early Classification**:
-- 50% completeness: >70% accuracy (trigger follow-up)
-- 25% completeness: >60% accuracy (early alert)
-- 10% completeness: ~40% accuracy (too early, random)
+**Adaptive Temporal Encoding**:
+- Tracks distribution of observation intervals (Δt) during training
+- Applies log-scale normalization with 10% margin for robustness
+- Issues warnings during inference on out-of-distribution time intervals
+- Prevents temporal shortcuts by encoding relative intervals, not absolute timestamps
+
+**Semi-Causal Attention**:
+- Sliding window mechanism (size W=64) limits computational complexity to O(N×W)
+- Masks future observations to enable real-time classification
+- Maintains causality: predictions at time t use only observations ≤ t
+- Supports incremental processing with key-value cache
+
+**Streaming Inference**:
+- Processes observations incrementally as they arrive
+- Maintains internal state (cached keys and values)
+- Updates classification probabilities with each new observation
+- Enables real-time decision making in survey pipelines
+
+**Uncertainty Quantification**:
+- Temperature scaling calibration on validation set
+- Confidence scores derived from softmax probabilities
+- Expected calibration error (ECE) measurement
+- Enables threshold-based follow-up triggers
+
+---
+
+## Expected Results and Interpretation
+
+### Performance Benchmarks
+
+**Baseline Experiment (1M events, Roman-quality)**:
+- Overall accuracy: 80-83%
+- PSPL precision/recall: 88-90% / 87-90%
+- Binary precision/recall: 68-72% / 88-92%
+- Training time: 3-5 hours (32× A100 GPUs)
+- Inference throughput: >10,000 events/sec (single GPU)
+
+**Topology-Dependent Performance**:
+
+| Topology | Binary Recall | Overall Accuracy | Primary Challenge |
+|----------|---------------|------------------|-------------------|
+| Distinct | 87-92% | 85-88% | Minimal (optimal geometry) |
+| Planetary | 82-87% | 81-84% | Brief caustic features |
+| Stellar | 78-83% | 78-81% | Symmetric caustics |
+
+**u₀ Dependency** (expected across all topologies):
+- u₀ < 0.15: Binary recall >85% (clear caustic crossings)
+- u₀ = 0.15-0.3: Binary recall 70-80% (marginal caustic features)
+- u₀ > 0.3: Binary recall <60% (morphologically PSPL-like)
+
+**Early Classification** (typical learning curve):
+- 50% completeness: 75-80% accuracy (sufficient for follow-up trigger)
+- 25% completeness: 60-65% accuracy (early alert capability)
+- 10% completeness: 40-45% accuracy (insufficient data)
 
 ### Astrophysical Implications
 
-If we achieve these targets:
+**Survey Automation**: 
+Classification throughput >10,000 events/sec enables real-time processing during peak galactic bulge observing season. Roman Space Telescope could process ~10⁶ events over 5-year mission with automated binary identification.
 
-1. **Survey Automation**: Roman can automatically classify 10,000+ events/sec during peak bulge season
+**Exoplanet Detection**: 
+Binary recall >82% in planetary regime (q ~ 10⁻⁴ to 10⁻³) demonstrates Roman's capability for systematic planetary companion surveys via microlensing. Detection threshold of q ~ 10⁻⁴ corresponds to Earth-to-Jupiter mass planets.
 
-2. **Exoplanet Detection**: Reliable planetary-mass companion detection down to q ~ 10⁻⁴ with Roman cadence
+**Follow-up Prioritization**: 
+Early classification at 50% completeness (typical at t₀ - 20 days for t_E = 30 days) enables targeted high-resolution spectroscopy (Keck, VLT) before peak magnification. This increases yield of detailed mass measurements.
 
-3. **Follow-up Prioritization**: Early classification at 50% completeness enables targeted high-resolution follow-up (Keck, VLT) 2-3 weeks before peak
-
-4. **Population Statistics**: Large-scale binary/planet occurrence rates from automated classification of 10⁶+ events over mission lifetime
+**Physical Detection Limits**: 
+Consistent u₀ ≈ 0.3 threshold across topologies validates geometric caustic-crossing interpretation. This quantifies the fraction of binary lens events detectable by any method, regardless of algorithm sophistication.
 
 ---
 
-## 🔬 Workflow: Step-by-Step
+## Experimental Workflow
 
-### Phase 1: Quick Validation (30 minutes)
+### Phase 1: Rapid Validation (30 minutes, single GPU)
+
+Purpose: Verify complete pipeline functionality before large-scale experiments.
 
 ```bash
 cd code
 
-# Generate 300 test events
+# Generate minimal test dataset (300 events)
 python simulate.py --preset quick_test
 
-# Train 5 epochs (single GPU)
+# Train for 5 epochs (convergence not expected)
 python train.py \
     --data ../data/raw/quick_test.npz \
-    --experiment_name quick_test \
+    --experiment_name quick_test_validation \
     --epochs 5 \
-    --batch_size 32
+    --batch_size 32 \
+    --lr 1e-3
 
-# Evaluate
+# Run evaluation
 python evaluate.py \
-    --experiment_name quick_test \
-    --data ../data/raw/quick_test.npz
+    --experiment_name quick_test_validation \
+    --data ../data/raw/quick_test.npz \
+    --n_samples 300
 
-# Expected: ~60-70% accuracy (tiny dataset, just checking it runs)
+# Expected: 60-70% accuracy (limited by dataset size)
+# Goal: Verify all scripts execute without errors
 ```
 
 ### Phase 2: Baseline Experiment (5 hours, 32 GPUs)
 
+Purpose: Establish primary performance benchmark on full parameter space.
+
 ```bash
 cd code
 
-# 1. Generate 1M events
+# Step 1: Generate 1M event dataset
 python simulate.py --preset baseline_1M
-# Output: data/raw/baseline_1M.npz (~4 GB)
+# Output: ../data/raw/baseline_1M.npz (~4 GB)
+# Parameters saved: ../data/raw/baseline_1M_params.npz
 
-# 2. Allocate compute
-salloc --partition=gpu_a100_short --nodes=8 --gres=gpu:4 --exclusive --time=05:00:00
+# Step 2: Allocate computational resources
+salloc --partition=gpu_a100_short \
+       --nodes=8 \
+       --gres=gpu:4 \
+       --exclusive \
+       --time=05:00:00
 
-# 3. Set up distributed environment
+# Step 3: Configure distributed training environment
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
 export MASTER_PORT=29500
 export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=1800
 
-# 4. Train with DDP
+# Step 4: Distributed training (DDP)
 srun torchrun \
     --nnodes=8 \
     --nproc_per_node=4 \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    --rdzv_id=baseline_$(date +%s) \
     train.py \
         --data ../data/raw/baseline_1M.npz \
         --experiment_name baseline_1M \
         --epochs 50 \
-        --batch_size 64
+        --batch_size 64 \
+        --lr 1e-3 \
+        --weight_decay 1e-3 \
+        --warmup_epochs 5 \
+        --patience 15
 
-# 5. Comprehensive evaluation
+# Step 5: Comprehensive evaluation
 python evaluate.py \
     --experiment_name baseline_1M \
     --data ../data/raw/baseline_1M.npz \
+    --batch_size 128 \
+    --n_samples 50000 \
     --early_detection \
+    --temporal_bias_check \
     --n_evolution_per_type 10 \
-    --n_samples 50000
+    --u0_threshold 0.3 \
+    --u0_bins 10
 
-# 6. Check results
+# Step 6: Verify outputs
 ls results/baseline_1M_*/evaluation/
-# Should see: ROC curves, confusion matrix, calibration, u0_dependency.png, etc.
+# Expected files:
+#   - confusion_matrix.png
+#   - roc_curves.png
+#   - confidence_distribution.png
+#   - calibration_curve.png
+#   - u0_dependency.png (if parameters available)
+#   - early_detection_analysis.png
+#   - evolution_trajectories.png
+#   - evaluation_summary.json
+#   - u0_report.json
 ```
 
-### Phase 3: Topology Studies (3 hours each)
+### Phase 3: Topology Studies (3 hours each, 32 GPUs)
 
-Run the same workflow for each topology:
+Purpose: Systematic parameter space mapping.
 
 ```bash
-# Distinct topology (optimal conditions)
-python simulate.py --preset distinct \
-    --n_flat 50000 --n_pspl 50000 --n_binary 50000
-
-srun torchrun ... train.py \
-    --data ../data/raw/distinct.npz \
-    --experiment_name distinct \
-    ...
-
-python evaluate.py --experiment_name distinct ...
-
-# Repeat for 'planetary' and 'stellar' presets
+# Execute for each topology: distinct, planetary, stellar
+for topology in distinct planetary stellar; do
+    
+    # Generate topology-specific dataset
+    python simulate.py --preset ${topology} \
+        --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
+        --output ../data/raw/topology_${topology}.npz \
+        --save_params \
+        --seed 42
+    
+    # Distributed training (same configuration as baseline)
+    srun torchrun \
+        --nnodes=8 \
+        --nproc_per_node=4 \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+        --rdzv_id=${topology}_$(date +%s) \
+        train.py \
+            --data ../data/raw/topology_${topology}.npz \
+            --experiment_name topology_${topology} \
+            --epochs 50 \
+            --batch_size 64
+    
+    # Comprehensive evaluation
+    python evaluate.py \
+        --experiment_name topology_${topology} \
+        --data ../data/raw/topology_${topology}.npz \
+        --early_detection \
+        --temporal_bias_check \
+        --n_evolution_per_type 10
+    
+done
 ```
 
-### Phase 4: Analysis & Figures
+### Phase 4: Comparative Analysis
+
+Purpose: Aggregate results and generate thesis figures.
 
 ```bash
 cd results
 
-# Extract summary table
+# Extract performance summary table
 python -c "
 import json
 from pathlib import Path
+import numpy as np
 
-experiments = ['baseline_1M', 'distinct', 'planetary', 'stellar']
+experiments = ['baseline_1M', 'topology_distinct', 'topology_planetary', 'topology_stellar']
 
-print(f'{'Experiment':<15} {'Overall%':<10} {'PSPL%':<8} {'Binary%':<8}')
-print('-' * 50)
+print(f'{'Experiment':<20} {'Overall':<8} {'PSPL':<8} {'Binary':<8} {'Training (h)':<12}')
+print('-' * 70)
 
 for exp in experiments:
     runs = sorted(Path('.').glob(f'{exp}_*'))
     if runs:
-        summary = runs[-1] / 'evaluation/evaluation_summary.json'
-        if summary.exists():
-            data = json.load(open(summary))
-            m = data['metrics']
-            print(f'{exp:<15} {m['accuracy']*100:>8.1f}  {m['pspl_recall']*100:>6.1f}  {m['binary_recall']*100:>6.1f}')
+        latest_run = runs[-1]
+        summary_file = latest_run / 'evaluation' / 'evaluation_summary.json'
+        config_file = latest_run / 'config.json'
+        
+        if summary_file.exists() and config_file.exists():
+            summary = json.load(open(summary_file))
+            config = json.load(open(config_file))
+            
+            metrics = summary['metrics']
+            overall_acc = metrics['accuracy'] * 100
+            pspl_recall = metrics.get('class_1_recall', 0) * 100
+            binary_recall = metrics.get('class_2_recall', 0) * 100
+            
+            # Estimate training time from config (epochs * samples / throughput)
+            epochs = config.get('epochs', 50)
+            training_hours = 'N/A'  # Would need to parse from logs
+            
+            print(f'{exp:<20} {overall_acc:>6.1f}% {pspl_recall:>6.1f}% {binary_recall:>6.1f}% {training_hours:>10}')
 "
 
-# Compare u₀ dependency across topologies
-# (See full plotting script in original guide)
+# Generate u₀ comparison plot across topologies
+python -c "
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+topologies = ['distinct', 'planetary', 'stellar']
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+for idx, topology in enumerate(topologies):
+    runs = sorted(Path('.').glob(f'topology_{topology}_*'))
+    if runs:
+        u0_file = runs[-1] / 'evaluation' / 'u0_report.json'
+        if u0_file.exists():
+            data = json.load(open(u0_file))
+            u0_centers = data['u0_bin_centers']
+            binary_accuracies = data['binary_accuracy_by_u0']
+            
+            axes[idx].plot(u0_centers, binary_accuracies, 'o-', linewidth=2)
+            axes[idx].axvline(x=0.3, color='r', linestyle='--', label='u₀=0.3 threshold')
+            axes[idx].set_xlabel('Impact Parameter u₀')
+            axes[idx].set_ylabel('Binary Classification Accuracy')
+            axes[idx].set_title(f'{topology.capitalize()} Topology')
+            axes[idx].grid(True, alpha=0.3)
+            axes[idx].legend()
+            axes[idx].set_ylim([0, 1])
+
+plt.tight_layout()
+plt.savefig('u0_comparison_across_topologies.png', dpi=300, bbox_inches='tight')
+print('Saved: u0_comparison_across_topologies.png')
+"
 ```
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
-### Training Issues
+### Training Diagnostics
 
-**Out of Memory**:
+**GPU Out-of-Memory Errors**:
 ```bash
---batch_size 32  # Reduce from 64
---gradient_checkpointing  # Enable memory savings
+# Reduce batch size
+--batch_size 32  # Down from default 64
+
+# Enable gradient checkpointing (trades compute for memory)
+--gradient_checkpointing
+
+# Disable mixed precision (rare cases)
+--no_amp
 ```
 
-**NaN Losses** (rare):
-- Already handled in code (skips bad batches)
-- If >10% batches skipped → check data quality
+**Loss Divergence (NaN or Inf)**:
+- Check data normalization (flux should be mean-centered, unit variance)
+- Verify temporal encoding range (Δt should be positive)
+- Reduce learning rate: `--lr 5e-4`
+- Enable gradient clipping (automatic in train.py)
+- Code automatically skips NaN batches; if >10% skipped, investigate data quality
 
-**DDP Hangs**:
+**Distributed Training Hangs**:
 ```bash
-# Verify master node
+# Verify master node is accessible
 echo $MASTER_ADDR
+ping $MASTER_ADDR
 
-# Test connectivity
+# Test SLURM job communication
 srun --nodes=2 hostname
 
-# Increase timeout
+# Increase NCCL timeout for slow interconnects
 export NCCL_TIMEOUT=3600
+
+# Check for firewall issues blocking ports
+# Default MASTER_PORT=29500 should be open
+
+# Verify CUDA devices visible
+srun --nodes=2 --gres=gpu:4 python -c "import torch; print(torch.cuda.device_count())"
 ```
 
-### Evaluation Issues
+**Slow Training Convergence**:
+- Increase learning rate: `--lr 3e-3` (but watch for instability)
+- Extend warmup: `--warmup_epochs 10`
+- Verify class balance in dataset
+- Check if validation accuracy improves (may need more epochs)
 
-**Missing u₀ Analysis**:
+### Evaluation Diagnostics
+
+**Missing u₀ Analysis Plots**:
 ```bash
-# Verify parameters saved
-python -c "import numpy as np; d=np.load('data.npz'); print('params_binary_json' in d.files)"
+# Verify physical parameters were saved during simulation
+python -c "
+import numpy as np
+data = np.load('../data/raw/your_dataset.npz')
+print('Available keys:', data.files)
+print('Has params_binary_json:', 'params_binary_json' in data.files)
+"
 
-# Re-generate data with --save_params flag
+# If missing, regenerate dataset with --save_params flag
+python simulate.py --preset your_preset \
+    --save_params \
+    --output ../data/raw/your_dataset.npz
+```
+
+**Calibration Warnings**:
+- Temperature calibration may fail if validation set too small (<1000 samples)
+- Not critical for classification accuracy, only affects confidence scores
+- Can disable with `--skip_calibration` flag
+
+**Memory Issues During Evaluation**:
+```bash
+# Reduce batch size
+--batch_size 64  # Down from default 128
+
+# Subsample test set for faster iteration
+--n_samples 10000  # Instead of full test set
+
+# Disable memory-intensive analyses
+--no_early_detection
+--no_temporal_bias_check
+```
+
+### Data Quality Checks
+
+**Verify Dataset Integrity**:
+```bash
+python -c "
+import numpy as np
+
+data = np.load('../data/raw/your_dataset.npz')
+flux = data['flux']
+delta_t = data['delta_t']
+labels = data['labels']
+
+print(f'Flux shape: {flux.shape}')
+print(f'Flux range: [{flux.min():.3f}, {flux.max():.3f}]')
+print(f'NaN count: {np.isnan(flux).sum()}')
+print(f'Inf count: {np.isinf(flux).sum()}')
+print()
+print(f'Delta_t range: [{delta_t.min():.3f}, {delta_t.max():.3f}]')
+print(f'Negative delta_t: {(delta_t < 0).sum()}')
+print()
+print(f'Label distribution:')
+for c in range(3):
+    count = (labels == c).sum()
+    print(f'  Class {c}: {count} ({100*count/len(labels):.1f}%)')
+"
 ```
 
 ---
+
+## Additional Experimental Directions
+
+### Cadence Sensitivity Study
+
+Purpose: Quantify classification robustness to observation frequency.
+
+```bash
+# Generate datasets with varying missing fractions
+for cadence in 05 15 30 50; do
+    python simulate.py --preset cadence_${cadence} \
+        --n_flat 30000 --n_pspl 30000 --n_binary 30000 \
+        --output ../data/raw/cadence_${cadence}.npz
+done
+
+# Train and evaluate each
+for cadence in 05 15 30 50; do
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/cadence_${cadence}.npz \
+        --experiment_name cadence_${cadence} \
+        --epochs 50
+    
+    python evaluate.py \
+        --experiment_name cadence_${cadence} \
+        --data ../data/raw/cadence_${cadence}.npz
+done
+```
+
+Expected trend: Accuracy degrades with increased missing fraction
+- 5% missing: 80-83% (Roman baseline)
+- 15% missing: 75-78% (high-cadence ground)
+- 30% missing: 68-72% (typical ground)
+- 50% missing: 55-62% (sparse monitoring)
+
+### Photometric Error Study
+
+Purpose: Determine noise tolerance limits.
+
+```bash
+# Generate datasets with varying photometric precision
+for error in 003 005 010 015 020; do
+    python simulate.py --preset error_${error} \
+        --n_flat 30000 --n_pspl 30000 --n_binary 30000 \
+        --output ../data/raw/error_${error}.npz
+done
+
+# Train and evaluate
+for error in 003 005 010 015 020; do
+    torchrun --nproc_per_node=4 train.py \
+        --data ../data/raw/error_${error}.npz \
+        --experiment_name error_${error} \
+        --epochs 50
+    
+    python evaluate.py \
+        --experiment_name error_${error} \
+        --data ../data/raw/error_${error}.npz
+done
+```
+
+Expected trend: Accuracy degrades with increased noise
+- 0.03 mag: 82-85% (JWST-quality)
+- 0.05 mag: 80-83% (Roman, HST)
+- 0.10 mag: 75-78% (large ground telescopes)
+- 0.15 mag: 68-72% (standard surveys)
+- 0.20 mag: 60-65% (limiting case)
+
+---
+
+## References
+
+### Key Publications
+
+1. **VBBinaryLensing**: Bozza, V. (2010). "VBBinaryLensing: A public available C++ library for microlensing light curve computation." MNRAS, 408, 2188-2196.
+
+2. **Roman Exoplanet Survey**: Johnson, S. A., et al. (2020). "Predictions of the Nancy Grace Roman Space Telescope Galactic Exoplanet Survey. II. Free-floating Planet Detection Rates." AJ, 160, 123.
+
+3. **Binary Lens Theory**: Schneider, P., & Weiss, A. (1986). "The gravitational lens equation near cusps." A&A, 164, 237-259.
+
+4. **OGLE Survey Results**: Udalski, A., et al. (2015). "OGLE-IV: Fourth Phase of the Optical Gravitational Lensing Experiment." Acta Astronomica, 65, 1-38.
+
+### Survey Resources
+
+- **OGLE**: Optical Gravitational Lensing Experiment (http://ogle.astrouw.edu.pl/)
+- **MOA**: Microlensing Observations in Astrophysics (https://www.massey.ac.nz/~iabond/moa/)
+- **KMTNet**: Korea Microlensing Telescope Network (https://kmtnet.kasi.re.kr/)
+- **Roman**: Nancy Grace Roman Space Telescope (https://roman.gsfc.nasa.gov/)
+
+---
+
+## Thesis Integration
+
+### Chapter Organization
+
+**Chapter 3: Methodology**
+- Section 3.1: Dataset generation (VBBinaryLensing simulation protocol)
+- Section 3.2: Neural network architecture (transformer encoder design)
+- Section 3.3: Training procedure (distributed optimization, hyperparameters)
+- Section 3.4: Evaluation framework (metrics, u₀ analysis, early detection)
+
+**Chapter 4: Results**
+- Section 4.1: Baseline performance (1M event benchmark)
+- Section 4.2: Topology dependence (distinct, planetary, stellar comparison)
+- Section 4.3: Physical detection limits (u₀ threshold validation)
+- Section 4.4: Early classification (completeness-accuracy trade-off)
+- Section 4.5: Computational performance (inference latency, throughput)
+
+**Chapter 5: Discussion**
+- Section 5.1: Comparison with literature (previous ML approaches)
+- Section 5.2: Astrophysical implications (survey automation, exoplanet detection)
+- Section 5.3: Limitations (degeneracies, noise sensitivity)
+- Section 5.4: Future work (real data validation, architecture improvements)
+
+### Key Figures for Thesis
+
+1. **Dataset schematic**: Example light curves for each class (Flat, PSPL, Binary) with parameter annotations
+2. **Architecture diagram**: Transformer encoder with attention mask visualization
+3. **Baseline confusion matrix**: Three-class classification results on 1M event test set
+4. **Topology comparison**: Bar chart of binary recall across distinct/planetary/stellar experiments
+5. **u₀ dependency**: Binary classification accuracy vs. impact parameter (all topologies overlaid)
+6. **Early detection**: Accuracy vs. observation completeness with confidence intervals
+7. **Computational scaling**: Inference throughput vs. batch size, training time vs. dataset size
+
+---
+
+**Last Updated**: November 2025  
+**Version**: 1.0  
+**Status**: Active research
