@@ -1,4 +1,4 @@
-# #From Light Curves to Labels: Machine Learning in Microlensing
+## From Light Curves to Labels: Machine Learning in Microlensing
 
 **Transformer-based Real-time Classification of Gravitational Microlensing Events**
 
