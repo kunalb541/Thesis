@@ -6,8 +6,8 @@ Generates realistic microlensing light curves with proper temporal encoding.
 Wide t0 sampling ensures temporal invariance without interpolation artifacts.
 
 Author: Kunal Bhatia
-Version: 1.0
-Date: November 2025
+Version: 1.1 (Temporal Bias Fix)
+Date: December 2025
 """
 
 import numpy as np
@@ -120,8 +120,6 @@ class BinaryPresets:
 class ObservationalPresets:
     """
     Cadence and photometric error presets
-    
-    Enables systematic studies of observational effects on classification.
     """
     
     CADENCE_PRESETS = {
@@ -334,12 +332,15 @@ def add_observational_effects(flux, error_mag, cadence_missing, pad_value):
     """Add photometric noise and missing observations"""
     flux_obs = flux.copy()
     
+    # Add noise (noise applied to flux, not magnitude)
     noise = np.random.normal(0, error_mag, size=len(flux))
     flux_obs = flux_obs * (1 + noise)
     
+    # Apply masking
     mask = np.random.random(len(flux)) < cadence_missing
     flux_obs[mask] = pad_value
     
+    # Floor flux values to prevent log errors if converting to mag later
     flux_obs[flux_obs != pad_value] = np.maximum(flux_obs[flux_obs != pad_value], 0.01)
     
     return flux_obs
@@ -355,6 +356,46 @@ def generate_single_event(args):
     label = {'flat': 0, 'pspl': 1, 'binary': 2}[event_type]
     
     return flux_obs, label, params
+
+# ============================================================================
+# TEMPORAL BIAS FIX: Delta_t Calculation
+# ============================================================================
+
+def calculate_delta_t_per_event(timestamps, flux_obs, pad_value):
+    """
+    Calculates the time elapsed since the LAST *observed* data point for each event.
+    This eliminates the fixed grid signal from the delta_t encoding.
+    """
+    n_events = flux_obs.shape[0]
+    n_points = timestamps.shape[0]
+    delta_t_array = np.zeros_like(flux_obs)
+    
+    for i in range(n_events):
+        dt_event = np.zeros(n_points)
+        
+        # Initialize last observed time to the time of the FIRST point
+        last_obs_time = timestamps[0] 
+        
+        # We process from the second point onwards (index 1)
+        for j in range(1, n_points):
+            
+            # Check if the point at index j is observed (not padded)
+            is_observed = (flux_obs[i, j] != pad_value)
+            
+            if is_observed:
+                # If observed, delta_t is the time difference since the last OBSERVED time
+                dt_event[j] = timestamps[j] - last_obs_time
+                
+                # Update the last observed time to the current time
+                last_obs_time = timestamps[j]
+            else:
+                # If not observed (padded), delta_t remains 0.0
+                dt_event[j] = 0.0
+                # last_obs_time is NOT updated, preserving the time of the previous observation
+                
+        delta_t_array[i] = dt_event
+        
+    return delta_t_array
 
 
 # ============================================================================
@@ -373,26 +414,6 @@ def simulate_dataset(
 ):
     """
     Generate complete microlensing dataset
-    
-    Temporal invariance is achieved through wide t0 sampling (-80 to +80 days),
-    forcing the model to learn magnification morphology rather than absolute timing.
-    
-    Args:
-        n_flat, n_pspl, n_binary: Event counts
-        binary_preset: Topology preset name
-        observational_preset: Cadence/error preset (overrides individual settings)
-        cadence_mask_prob: Override cadence
-        mag_error_std: Override photometric error
-        num_workers: Parallel workers
-        seed: Random seed
-        save_params: Save event parameters
-    
-    Returns:
-        flux: [N, T] Flux observations
-        delta_t: [N, T] Time deltas
-        labels: [N] Class labels
-        timestamps: [T] Time grid
-        params_dict: Event parameters (if save_params=True)
     """
     if seed is not None:
         np.random.seed(seed)
@@ -428,7 +449,7 @@ def simulate_dataset(
     params_flat = generate_flat_params(n_flat, seed=seed)
     params_pspl = generate_pspl_params(n_pspl, seed=seed+1 if seed else None)
     params_binary = generate_binary_params(n_binary, preset=binary_preset, 
-                                          seed=seed+2 if seed else None)
+                                           seed=seed+2 if seed else None)
     
     # Prepare arguments
     args_list = []
@@ -462,13 +483,9 @@ def simulate_dataset(
         'binary': [all_params[i] for i in range(len(all_params)) if labels[i] == 2]
     }
     
-    # Compute delta_t (uniform grid, but handle padding)
-    delta_t = np.zeros_like(timestamps)
-    delta_t[1:] = np.diff(timestamps)
-    delta_t_array = np.tile(delta_t, (len(flux), 1))
-    
-    # Set delta_t to 0 where flux is padded
-    delta_t_array[flux == SimConfig.PAD_VALUE] = 0.0
+    # --- TEMPORAL BIAS FIX APPLIED HERE ---
+    print("\nComputing NON-CHEATING temporal encoding (delta_t)...")
+    delta_t_array = calculate_delta_t_per_event(timestamps, flux, SimConfig.PAD_VALUE)
     
     # Shuffle
     shuffle_idx = np.random.permutation(len(flux))
@@ -478,9 +495,9 @@ def simulate_dataset(
     
     print(f"\nGeneration complete:")
     print(f"Total: {len(flux)}")
-    print(f"  Flat:   {(labels==0).sum()} ({(labels==0).mean()*100:.1f}%)")
-    print(f"  PSPL:   {(labels==1).sum()} ({(labels==1).mean()*100:.1f}%)")
-    print(f"  Binary: {(labels==2).sum()} ({(labels==2).mean()*100:.1f}%)")
+    print(f"  Flat:   {(labels==0).sum()} ({(labels==0).mean()*100:.1f}%)")
+    print(f"  PSPL:   {(labels==1).sum()} ({(labels==1).mean()*100:.1f}%)")
+    print(f"  Binary: {(labels==2).sum()} ({(labels==2).mean()*100:.1f}%)")
     
     return flux, delta_t_array, labels, timestamps, params_dict if save_params else None
 
@@ -500,15 +517,10 @@ Examples:
   
   # Topology studies
   python simulate.py --preset distinct --n_flat 50000 --n_pspl 50000 --n_binary 50000
-  python simulate.py --preset planetary --n_flat 50000 --n_pspl 50000 --n_binary 50000
   
-  # Cadence studies
-  python simulate.py --preset cadence_05 --n_flat 30000 --n_pspl 30000 --n_binary 30000
-  python simulate.py --preset cadence_30 --n_flat 30000 --n_pspl 30000 --n_binary 30000
-  
-  # Custom
+  # Custom with Parameter Save (CRITICAL for temporal diagnosis)
   python simulate.py --n_flat 10000 --n_pspl 10000 --n_binary 10000 \\
-      --binary_preset planetary --cadence_mask_prob 0.10 --mag_error_std 0.08
+      --binary_preset distinct --output ../data/test_params_fixed.npz
         """
     )
     
@@ -524,7 +536,7 @@ Examples:
     ], help='Predefined experiment preset')
     
     parser.add_argument('--binary_preset', type=str, default='baseline',
-                       choices=list(BinaryPresets.PRESETS.keys()))
+                        choices=list(BinaryPresets.PRESETS.keys()))
     
     parser.add_argument('--cadence_mask_prob', type=float, default=None)
     parser.add_argument('--mag_error_std', type=float, default=None)
@@ -535,7 +547,7 @@ Examples:
     parser.add_argument('--no_save_params', action='store_true')
     
     parser.add_argument('--list_presets', action='store_true',
-                       help='List all available presets')
+                        help='List all available presets')
     
     args = parser.parse_args()
     
@@ -543,21 +555,21 @@ Examples:
         print("\nAvailable Presets")
         print("\nBinary Topologies:")
         for name, config in BinaryPresets.PRESETS.items():
-            print(f"  {name:15s}: {config['description']}")
+            print(f"  {name:15s}: {config['description']}")
         
         print("\nCadence Presets:")
         for name, config in ObservationalPresets.CADENCE_PRESETS.items():
-            print(f"  {name:15s}: {config['description']}")
-            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
+            print(f"  {name:15s}: {config['description']}")
+            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
         
         print("\nError Presets:")
         for name, config in ObservationalPresets.ERROR_PRESETS.items():
-            print(f"  {name:15s}: {config['description']}")
-            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
+            print(f"  {name:15s}: {config['description']}")
+            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
         
         print("\nExperiment Presets:")
-        print("  baseline_1M    : 1M events, Roman quality")
-        print("  quick_test     : 300 events for testing")
+        print("  baseline_1M    : 1M events, Roman quality")
+        print("  quick_test     : 300 events for testing")
         print()
         return
     
@@ -628,6 +640,7 @@ Examples:
     }
     
     if params_dict:
+        # Saving parameters as JSON strings to handle variable dict sizes and complex structures in NPZ
         save_dict['params_flat_json'] = json.dumps(params_dict['flat'])
         save_dict['params_pspl_json'] = json.dumps(params_dict['pspl'])
         save_dict['params_binary_json'] = json.dumps(params_dict['binary'])
