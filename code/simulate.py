@@ -73,13 +73,13 @@ class BinaryPresets:
     PRESETS = {
         'distinct': {
             'description': 'Clear caustics - optimal detection',
-            's_range': (0.8, 1.3),
-            'q_range': (0.05, 0.5),
-            'u0_range': (0.001, 0.05),
-            'rho_range': (0.001, 0.005),
-            'alpha_range': (0, math.pi),
+            's_range': (0.85, 1.15),
+            'q_range': (0.05, 1.0),
+            'u0_range': (0.05, 1.0),
+            'rho_range': (1e-4, 5e-3),
+            'alpha_range': (0, 2*math.pi),
             't0_range': (-80.0, 80.0),
-            'tE_range': (10.0, 80.0),
+            'tE_range': (10.0, 50),
         },
         
         'planetary': {
