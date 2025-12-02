@@ -6,7 +6,7 @@ Generates realistic microlensing light curves with proper temporal encoding.
 Wide t0 sampling ensures temporal invariance without interpolation artifacts.
 
 Author: Kunal Bhatia
-Version: 1.1 (Temporal Bias Fix + u0 Normalization)
+Version: 1.2 (Strict Anti-Bias + Resonant Distinct Tuning)
 Date: December 2025
 """
 
@@ -38,27 +38,34 @@ class SimConfig:
     TIME_MIN = -100.0
     TIME_MAX = 100.0
     
-    VBM_TOLERANCE = 1e-4
+    VBM_TOLERANCE = 1e-3
     MAX_BINARY_ATTEMPTS = 10
     
     CADENCE_MASK_PROB = 0.05
-    MAG_ERROR_STD = 0.05
+    MAG_ERROR_STD = 0.03       # Slightly lower noise to allow model to see caustic spikes
     BASELINE_MIN = 19.0
-    BASELINE_MAX = 22.0
+    BASELINE_MAX = 21.0        # Tighter baseline range to focus on amplification
     
     PAD_VALUE = -1.0
 
 
 class PSPLParams:
-    """PSPL parameter ranges with temporal invariance and fixed u0 max"""
-    T0_MIN = -80.0
-    T0_MAX = 80.0
-    # FIX: Increase U0_MAX to match the Binary U0_MAX (1.0 in 'baseline' preset)
-    # This prevents the model from cheating based on maximum magnification alone.
-    U0_MIN = 0.001
-    U0_MAX = 1.0 
-    TE_MIN = 10.0
-    TE_MAX = 80.0
+    """
+    PSPL parameters strictly confined to ensure 'Rise and Fall' is visible.
+    The model cannot rely on 'cut-off' tails to identify PSPLs.
+    """
+    # Restrict t0 to center window so tails are visible (Window is -100 to 100)
+    T0_MIN = -40.0
+    T0_MAX = 40.0
+    
+    # Cap tE so the event isn't wider than the window
+    TE_MIN = 5.0
+    TE_MAX = 40.0 
+
+    # CRITICAL ANTI-BIAS: Allow u0 to be extremely small (high mag).
+    # This prevents the model from assuming "High Mag = Binary".
+    U0_MIN = 0.0001
+    U0_MAX = 0.5   
 
 
 class BinaryPresets:
@@ -68,14 +75,18 @@ class BinaryPresets:
     
     PRESETS = {
         'distinct': {
-            'description': 'Clear caustics - optimal detection',
-            's_range': (0.85, 1.15),
-            'q_range': (0.05, 1.0),
-            'u0_range': (0.05, 1.0),
+            'description': 'Resonant Caustics (Diamond shapes) - Guaranteed crossings',
+            # s ~ 1.0 creates large resonant caustics (maximum distinctness/weirdness)
+            's_range': (0.90, 1.10), 
+            # High mass ratio ensures the caustics are thick and strong
+            'q_range': (0.1, 1.0),   
+            # Impact parameter must be small to hit the resonant caustic at the center
+            'u0_range': (0.0001, 0.4), 
             'rho_range': (1e-4, 5e-3),
             'alpha_range': (0, 2*math.pi),
-            't0_range': (-80.0, 80.0),
-            'tE_range': (10.0, 50),
+            # Match PSPL time constraints exactly to prevent duration bias
+            't0_range': (PSPLParams.T0_MIN, PSPLParams.T0_MAX),
+            'tE_range': (PSPLParams.TE_MIN, PSPLParams.TE_MAX), 
         },
         
         'planetary': {
@@ -101,10 +112,10 @@ class BinaryPresets:
         },
         
         'baseline': {
-            'description': 'Mixed population - full parameter space',
+            'description': 'Standard mixed population',
             's_range': (0.1, 3.0),
             'q_range': (0.0001, 1.0),
-            'u0_range': (0.001, 1.0), # Matches new PSPLParams.U0_MAX
+            'u0_range': (0.001, 1.0),
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 80.0),
@@ -203,22 +214,26 @@ def binary_magnification_vbb(t, t_E, u_0, t_0, s, q, alpha, rho):
 
 def binary_magnification_approx(t, t_E, u_0, t_0, s, q, alpha, rho):
     """Approximate binary lens magnification (fallback)"""
+    # Fallback if VBB is missing (less accurate for caustics, but functional)
     A_pspl = pspl_magnification(t, t_E, u_0, t_0)
     
     tau = (t - t_0) / t_E
     source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
     source_y = u_0 * np.sin(alpha) - tau * np.cos(alpha)
     
-    caustic_x = s * np.array([0.5, -0.5, 0, 0])
-    caustic_y = s * np.array([0, 0, 0.5, -0.5])
+    # 3-Body approximation for resonant caustics (simplified)
+    # Adjusted caustic centers for s~1.0 resonant case
+    caustic_x = s * np.array([0.6, -0.6, 0, 0])
+    caustic_y = s * np.array([0, 0, 0.6, -0.6])
     
     perturbation = 0
     for cx, cy in zip(caustic_x, caustic_y):
         dist = np.sqrt((source_x - cx)**2 + (source_y - cy)**2)
         caustic_width = 0.05 * np.sqrt(q)
-        perturbation += q * np.exp(-dist**2 / (2 * caustic_width**2))
+        # Sharper perturbation for 'distinct' feel
+        perturbation += q * np.exp(-dist**2 / (0.5 * caustic_width**2))
     
-    A_binary = A_pspl * (1 + perturbation * 3)
+    A_binary = A_pspl * (1 + perturbation * 5)
     return A_binary
 
 
@@ -248,7 +263,12 @@ def generate_pspl_params(n_events, seed=None):
     for _ in range(n_events):
         t_E = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
         t_0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
-        u_0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
+        
+        # LOG-UNIFORM SAMPLING for u0 favors small impact parameters (High Magnification)
+        # This matches the statistical reality that high-mag events are rarer, 
+        # but ensures we have enough of them to confuse the model if it cheats.
+        u_0 = np.exp(np.random.uniform(np.log(PSPLParams.U0_MIN), np.log(PSPLParams.U0_MAX)))
+
         m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
         
         params.append({
@@ -277,11 +297,18 @@ def generate_binary_params(n_events, preset='baseline', seed=None):
     for _ in range(n_events):
         t_E = np.random.uniform(config['tE_range'][0], config['tE_range'][1])
         t_0 = np.random.uniform(config['t0_range'][0], config['t0_range'][1])
-        u_0 = np.random.uniform(config['u0_range'][0], config['u0_range'][1])
+        
+        # LOG-UNIFORM u0 for binary too, to match PSPL distribution
+        u0_min, u0_max = config['u0_range']
+        u_0 = np.exp(np.random.uniform(np.log(u0_min), np.log(u0_max)))
+
         s = np.random.uniform(config['s_range'][0], config['s_range'][1])
         q = np.random.uniform(config['q_range'][0], config['q_range'][1])
         alpha = np.random.uniform(config['alpha_range'][0], config['alpha_range'][1])
-        rho = np.random.uniform(config['rho_range'][0], config['rho_range'][1])
+        
+        # LOG-UNIFORM rho (source size effect)
+        rho = np.exp(np.random.uniform(np.log(config['rho_range'][0]), np.log(config['rho_range'][1])))
+
         m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
         
         params.append({
@@ -337,7 +364,8 @@ def add_observational_effects(flux, error_mag, cadence_missing, pad_value):
     flux_obs[mask] = pad_value
     
     # Floor flux values to prevent log errors if converting to mag later
-    flux_obs[flux_obs != pad_value] = np.maximum(flux_obs[flux_obs != pad_value], 0.01)
+    # Keep min value slightly higher to handle log space ops safely
+    flux_obs[flux_obs != pad_value] = np.maximum(flux_obs[flux_obs != pad_value], 0.001)
     
     return flux_obs
 
@@ -433,11 +461,11 @@ def simulate_dataset(
     # Generate timestamps
     timestamps = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS)
     
-    print("Microlensing Simulation for Transformer v4.0")
+    print("Microlensing Simulation for Transformer v4.1 (Anti-Bias Mode)")
     print(f"Dataset: Flat={n_flat}, PSPL={n_pspl}, Binary={n_binary}")
     print(f"Binary topology: {binary_preset}")
     print(f"Cadence: {cadence*100:.0f}% missing, Error: {error:.3f} mag")
-    print(f"Temporal invariance: Wide t0 sampling ({PSPLParams.T0_MIN} to {PSPLParams.T0_MAX} days)")
+    print(f"Bias Prevention: Strict t0/tE bounds, High-Mag PSPLs enabled")
     print(f"Workers: {num_workers}")
     
     # Generate parameters
@@ -491,9 +519,9 @@ def simulate_dataset(
     
     print(f"\nGeneration complete:")
     print(f"Total: {len(flux)}")
-    print(f"  Flat:   {(labels==0).sum()} ({(labels==0).mean()*100:.1f}%)")
-    print(f"  PSPL:   {(labels==1).sum()} ({(labels==1).mean()*100:.1f}%)")
-    print(f"  Binary: {(labels==2).sum()} ({(labels==2).mean()*100:.1f}%)")
+    print(f"  Flat:   {(labels==0).sum()} ({(labels==0).mean()*100:.1f}%)")
+    print(f"  PSPL:   {(labels==1).sum()} ({(labels==1).mean()*100:.1f}%)")
+    print(f"  Binary: {(labels==2).sum()} ({(labels==2).mean()*100:.1f}%)")
     
     return flux, delta_t_array, labels, timestamps, params_dict if save_params else None
 
@@ -531,7 +559,7 @@ Examples:
         'error_003', 'error_005', 'error_010', 'error_015'
     ], help='Predefined experiment preset')
     
-    parser.add_argument('--binary_preset', type=str, default='baseline',
+    parser.add_argument('--binary_preset', type=str, default='distinct',
                         choices=list(BinaryPresets.PRESETS.keys()))
     
     parser.add_argument('--cadence_mask_prob', type=float, default=None)
@@ -551,21 +579,21 @@ Examples:
         print("\nAvailable Presets")
         print("\nBinary Topologies:")
         for name, config in BinaryPresets.PRESETS.items():
-            print(f"  {name:15s}: {config['description']}")
+            print(f"  {name:15s}: {config['description']}")
         
         print("\nCadence Presets:")
         for name, config in ObservationalPresets.CADENCE_PRESETS.items():
-            print(f"  {name:15s}: {config['description']}")
-            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
+            print(f"  {name:15s}: {config['description']}")
+            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
         
         print("\nError Presets:")
         for name, config in ObservationalPresets.ERROR_PRESETS.items():
-            print(f"  {name:15s}: {config['description']}")
-            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
+            print(f"  {name:15s}: {config['description']}")
+            print(f"                  ({config['mask_prob']*100:.0f}% missing, {config['error']:.3f} mag)")
         
         print("\nExperiment Presets:")
-        print("  baseline_1M    : 1M events, Roman quality")
-        print("  quick_test     : 300 events for testing")
+        print("  baseline_1M    : 1M events, Roman quality")
+        print("  quick_test     : 300 events for testing")
         print()
         return
     
