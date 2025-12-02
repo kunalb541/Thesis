@@ -6,7 +6,7 @@ Generates realistic microlensing light curves with proper temporal encoding.
 Wide t0 sampling ensures temporal invariance without interpolation artifacts.
 
 Author: Kunal Bhatia
-Version: 1.1 (Temporal Bias Fix)
+Version: 1.1 (Temporal Bias Fix + u0 Normalization)
 Date: December 2025
 """
 
@@ -50,11 +50,13 @@ class SimConfig:
 
 
 class PSPLParams:
-    """PSPL parameter ranges with temporal invariance"""
+    """PSPL parameter ranges with temporal invariance and fixed u0 max"""
     T0_MIN = -80.0
     T0_MAX = 80.0
+    # FIX: Increase U0_MAX to match the Binary U0_MAX (1.0 in 'baseline' preset)
+    # This prevents the model from cheating based on maximum magnification alone.
     U0_MIN = 0.001
-    U0_MAX = 0.3
+    U0_MAX = 1.0 
     TE_MIN = 10.0
     TE_MAX = 80.0
 
@@ -62,12 +64,6 @@ class PSPLParams:
 class BinaryPresets:
     """
     Binary lens topology presets
-    
-    Each preset targets a specific science case:
-    - distinct: Clear caustic crossings (optimal detection)
-    - planetary: Exoplanet microlensing (small q)
-    - stellar: Binary star lensing (large q)
-    - baseline: Full parameter space (realistic surveys)
     """
     
     PRESETS = {
@@ -108,7 +104,7 @@ class BinaryPresets:
             'description': 'Mixed population - full parameter space',
             's_range': (0.1, 3.0),
             'q_range': (0.0001, 1.0),
-            'u0_range': (0.001, 1.0),
+            'u0_range': (0.001, 1.0), # Matches new PSPLParams.U0_MAX
             'rho_range': (0.001, 0.1),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 80.0),
@@ -358,7 +354,7 @@ def generate_single_event(args):
     return flux_obs, label, params
 
 # ============================================================================
-# TEMPORAL BIAS FIX: Delta_t Calculation
+# TEMPORAL BIAS FIX: Delta_t Calculation (FIXED)
 # ============================================================================
 
 def calculate_delta_t_per_event(timestamps, flux_obs, pad_value):
