@@ -60,7 +60,7 @@ class PSPLParams:
     
     # Cap tE so the event isn't wider than the window
     TE_MIN = 5.0
-    TE_MAX = 40.0 
+    TE_MAX = 70.0 
 
     # CRITICAL ANTI-BIAS: Allow u0 to be extremely small (high mag).
     # This prevents the model from assuming "High Mag = Binary".
@@ -108,7 +108,7 @@ class BinaryPresets:
             'rho_range': (0.001, 0.05),
             'alpha_range': (0, 2 * math.pi),
             't0_range': (-80.0, 80.0),
-            'tE_range': (1.0, 80.0),
+            'tE_range': (10.0, 80.0),
         },
         
         'baseline': {
