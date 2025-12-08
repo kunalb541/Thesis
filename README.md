@@ -1,6 +1,6 @@
-## From Light Curves to Labels: Machine Learning in Microlensing
+# Gravitational Microlensing Event Classification
 
-**Transformer-based Real-time Classification of Gravitational Microlensing Events**
+**Causal Hybrid GRU-Transformer for Real-time Binary Lens Detection**
 
 MSc Thesis Project | University of Heidelberg | Prof. Dr. Joachim Wambsganß
 
@@ -12,7 +12,15 @@ MSc Thesis Project | University of Heidelberg | Prof. Dr. Joachim Wambsganß
 
 ## Overview
 
-This project implements a transformer-based neural network for real-time classification of gravitational microlensing events, capable of distinguishing between single-lens (PSPL) and binary-lens events with sub-millisecond inference latency. The architecture addresses key challenges in time-series astronomical data: variable observation cadences, photometric noise, and the need for causal inference without temporal shortcuts.
+This project implements a strictly causal hybrid architecture combining GRU and Transformer layers for real-time classification of gravitational microlensing events. The model distinguishes between baseline observations (no lensing), single-lens (PSPL) events, and binary-lens events with sub-millisecond inference latency.
+
+### Key Features
+
+- **Strict Causality**: No future observation peeking through explicit masking and incremental state management
+- **Hybrid Architecture**: GRU handles sequential dependencies, Transformer captures long-range patterns
+- **Temporal Encoding**: Continuous sinusoidal encoding based on observation intervals (Δt), not absolute timestamps
+- **Streaming Inference**: Supports real-time predictions with cached key-value states
+- **Anti-Bias Design**: Temporal invariance through relative time encoding and extensive validation checks
 
 ### Classification Task
 
@@ -49,7 +57,7 @@ pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorc
 pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
 ```
 
-**CPU only** (not recommended for production):
+**CPU only**:
 ```bash
 pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cpu
 ```
@@ -61,157 +69,140 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 
 ---
 
-## Quick Test Workflow
+## Quick Start
 
-### Minimal Validation (5 minutes, single GPU)
+### Minimal Test (5 minutes, single GPU)
 
-This workflow validates the complete pipeline on a minimal dataset:
+Validate the complete pipeline on a small dataset:
 
 ```bash
 cd code
 
-# Step 1: Generate test dataset (300 events)
+# 1. Generate test dataset (300 events)
 python simulate.py --preset quick_test
 
-# Step 2: Train model (5 epochs)
+# 2. Train model (5 epochs)
 python train.py \
-    --data ../data/raw/quick_test.npz \
-    --experiment_name quick_test \
+    --data ../data/dataset.npz \
     --epochs 5 \
-    --batch_size 32 \
-    --lr 1e-3
+    --batch_size 32
 
-# Step 3: Evaluate performance
+# 3. Evaluate
 python evaluate.py \
-    --experiment_name quick_test \
-    --data ../data/raw/quick_test.npz \
-    --n_samples 300
+    --experiment_name results_* \
+    --data ../data/dataset.npz
 ```
 
-**Expected output:**
-- Training: ~60 seconds
-- Validation accuracy: 75-85% (limited by small dataset)
-- Generated artifacts: confusion matrix, ROC curves, example classifications
-
-### Small-Scale Test (30 minutes, 4 GPUs)
+### Full Workflow
 
 ```bash
-# Allocate GPU resources (SLURM example)
-salloc --partition=gpu --nodes=1 --gres=gpu:4 --time=01:00:00
-
-# Setup environment
-cd ~/Thesis/code
-conda activate microlens
-export MASTER_ADDR=$(hostname)
-export MASTER_PORT=29500
-
-# Generate 9K event dataset
+# 1. Generate dataset
 python simulate.py \
-    --n_flat 3000 --n_pspl 3000 --n_binary 3000 \
+    --n_flat 10000 \
+    --n_pspl 10000 \
+    --n_binary 10000 \
     --binary_preset distinct \
-    --cadence_mask_prob 0.05 \
-    --output ../data/raw/test_9k.npz \
-    --seed 42
+    --output ../data/dataset.npz
 
-# Distributed training
-torchrun \
-    --nproc_per_node=4 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    train.py \
-        --data ../data/raw/test_9k.npz \
-        --experiment_name test_9k \
-        --epochs 20 \
-        --batch_size 64
+# 2. Train model
+python train.py \
+    --data ../data/dataset.npz \
+    --epochs 50 \
+    --batch_size 64 \
+    --lr 1e-4
 
-# Comprehensive evaluation
+# 3. Evaluate with diagnostics
 python evaluate.py \
-    --experiment_name test_9k \
-    --data ../data/raw/test_9k.npz \
-    --early_detection \
-    --temporal_bias_check \
-    --n_evolution_per_type 10
-```
+    --experiment_name results_* \
+    --data ../data/dataset.npz
 
-**Expected performance (distinct topology):**
-- Overall accuracy: 80-85%
-- Binary precision: 65-75%
-- Binary recall: 85-90%
-- Inference time: <1 ms/event
+# 4. Optional: Visualize model internals
+python visualize.py \
+    --experiment_name results_* \
+    --data ../data/dataset.npz
+```
 
 ---
 
 ## Architecture
 
-### Transformer Model (Version 1.0)
+### Causal Hybrid Model
 
-The architecture implements a causal transformer with specialized components for astronomical time-series:
+The architecture implements a strictly causal design that prevents temporal information leakage:
 
 ```
 Input: [B, N]
-  ├─ Flux: Normalized light curve measurements
-  └─ Δt: Time intervals between observations (days)
+  ├─ Flux: Light curve measurements (normalized)
+  └─ Δt: Time intervals between observations
     ↓
 Embedding Layer
   ├─ Flux embedding: Linear(1 → d_model)
-  └─ Temporal encoding: Adaptive normalization + Linear(1 → d_model)
+  ├─ Layer normalization + Padding mask enforcement
+  └─ Temporal encoding: Continuous sinusoidal (Δt-based)
     ↓
-Transformer Encoder (×4 layers)
-  ├─ Semi-causal attention (window size: 64)
-  │  • No future observation peeking
+GRU Encoder (1-2 layers)
+  ├─ Packed sequences (handles variable lengths)
+  ├─ State caching for incremental inference
+  └─ Layer normalization + Dropout + Padding mask
+    ↓
+Transformer Encoder (2-4 layers)
+  ├─ Strict causal attention (with padding mask caching)
+  │  • Sliding window (size 64)
   │  • Multi-head attention (8 heads)
-  │  • Head dimension: d_model / n_heads
+  │  • No future peeking (col_idx ≤ row_idx)
   ├─ Feed-forward network (4× expansion)
-  └─ Layer normalization + residual connections
-    ↓
-Global Pooling
-  ├─ Average pooling over valid observations
-  └─ Max pooling over valid observations
-  └─ Concatenation: [avg; max] → 2×d_model
+  ├─ Layer normalization + residual connections
+  └─ Padding mask enforcement after each block
     ↓
 Classification Head
-  ├─ Hidden layer: Linear(2×d_model → d_model) + GELU
+  ├─ Extract final valid timestep output
+  ├─ Hidden layer: Linear(d_model → d_model) + GELU
   └─ Output layer: Linear(d_model → 3 classes)
     ↓
 Output
-  ├─ Logits: [B, 3] (class scores)
-  ├─ Probabilities: [B, 3] (softmax)
-  └─ Confidence: [B] (max probability)
+  ├─ Logits: [B, 3] (or [B, SeqLen, 3] if return_all_timesteps=True)
+  ├─ Probabilities: Softmax with temperature scaling
+  └─ Predictions: argmax(probabilities)
 ```
 
-**Model specifications:**
-- Parameters: ~808,000 (trainable)
+**Default specifications:**
 - d_model: 128
 - n_heads: 8
-- n_layers: 4
-- Feed-forward dimension: 512
+- n_gru_layers: 1
+- n_transformer_layers: 2
+- Feed-forward dimension: 512 (4× d_model)
 - Attention window: 64 observations
 - Dropout: 0.1
 
-### Key Design Features
+### Design Principles
 
-**1. Adaptive Temporal Encoding**
-- Learns distribution of observation intervals during training
-- Applies log-scale normalization with 10% margin
-- Warns on out-of-distribution inputs during inference
-- Prevents temporal shortcuts through relative encoding
+**1. Strict Causality**
+- Causal attention mask: `col_idx ≤ row_idx` (keys must exist before queries)
+- Sliding window prevents O(N²) complexity while maintaining locality
+- Padding mask cached in incremental state to prevent "ghost" signals
+- Post-normalization masking eliminates LayerNorm shift artifacts on padding tokens
 
-**2. Semi-Causal Attention**
-- Implements sliding window attention (size 64)
-- Masks future observations to enable real-time classification
-- Maintains O(N×W) complexity instead of O(N²)
-- Supports streaming inference with KV caching
+**2. Temporal Encoding**
+- Continuous sinusoidal encoding based on Δt (observation intervals)
+- Prevents model from using absolute timestamps as shortcuts
+- Handles irregular cadences naturally (no interpolation needed)
+- Log-scale normalization for wide range of timescales
 
-**3. Streaming Inference**
-- Processes observations incrementally
-- Maintains internal state (key-value caches)
-- Updates predictions as new data arrives
-- Enables real-time decision making
+**3. Hybrid Architecture Benefits**
+- GRU: Efficient sequential processing, handles variable-length sequences
+- Transformer: Captures long-range dependencies, parallel training
+- Complementary strengths: Local (GRU) + Global (Transformer) context
 
-**4. Uncertainty Quantification**
-- Temperature scaling for probability calibration
-- Post-hoc calibration on validation set
-- Confidence scores based on maximum softmax probability
+**4. Streaming Inference**
+- Incremental state management with key-value caching
+- GRU hidden state preservation across observations
+- Padding mask history tracking for correct attention computation
+- Enables real-time classification as new observations arrive
+
+**5. Anti-Bias Safeguards**
+- Temperature clamping (0.5-5.0) prevents confidence collapse
+- GRU state freezing for completed sequences in streaming mode
+- Explicit padding mask re-application after every normalization layer
 
 ---
 
@@ -219,87 +210,94 @@ Output
 
 ### Simulation Parameters
 
-The `simulate.py` script generates synthetic microlensing events using VBBinaryLensing:
+Generate synthetic microlensing events using VBBinaryLensing (or fallback approximations):
 
 ```bash
 python simulate.py \
     --n_flat 50000 \
     --n_pspl 50000 \
     --n_binary 50000 \
-    --binary_preset [distinct|planetary|stellar|baseline] \
+    --binary_preset distinct \
     --cadence_mask_prob 0.05 \
     --mag_error_std 0.05 \
-    --output ../data/raw/dataset.npz \
-    --save_params \
+    --output ../data/dataset.npz \
     --seed 42
 ```
 
 **Key arguments:**
 - `--n_flat/pspl/binary`: Number of events per class
-- `--binary_preset`: Binary lens topology configuration
-- `--cadence_mask_prob`: Fraction of missing observations
+- `--binary_preset`: Binary lens topology (see below)
+- `--cadence_mask_prob`: Fraction of missing observations (0.0-1.0)
 - `--mag_error_std`: Photometric uncertainty (magnitudes)
-- `--save_params`: Store physical parameters for analysis
-- `--num_workers`: Parallel simulation workers
+- `--seed`: Random seed for reproducibility
+- `--num_workers`: Parallel processes for generation
 
 ### Binary Lens Topologies
 
 | Preset | Mass Ratio (q) | Separation (s) | Description |
 |--------|----------------|----------------|-------------|
-| `distinct` | 10⁻⁴ - 10⁻¹ | 0.3 - 3.0 | Clear caustic structures |
-| `planetary` | 10⁻⁵ - 10⁻³ | 0.5 - 2.0 | Exoplanet detection regime |
-| `stellar` | 0.1 - 1.0 | 0.5 - 2.5 | Binary star systems |
-| `baseline` | 10⁻⁵ - 1.0 | 0.3 - 5.0 | Full parameter space |
+| `distinct` | 0.1 - 1.0 | 0.90 - 1.10 | Resonant caustics (s≈1), guaranteed crossings |
+| `planetary` | 10⁻⁴ - 10⁻² | 0.5 - 2.0 | Exoplanet detection regime |
+| `stellar` | 0.3 - 1.0 | 0.3 - 3.0 | Binary star systems |
+| `baseline` | 10⁻⁴ - 1.0 | 0.1 - 3.0 | Full parameter space |
 
-### Observational Configurations
+**Anti-Bias Sampling Strategy:**
+- PSPL and Binary share identical t₀ ranges to prevent temporal shortcuts
+- Log-uniform sampling for u₀ (impact parameter) favors high-magnification events
+- Ensures high-mag PSPLs exist to prevent "high mag = binary" bias
 
-**Cadence studies** (observation frequency):
+### Observational Presets
 
-| Preset | Missing % | Typical Δt | Facility |
-|--------|-----------|------------|----------|
-| `cadence_05` | 5% | ~15 min | Roman Space Telescope |
-| `cadence_15` | 15% | ~1 day | High-cadence ground |
-| `cadence_30` | 30% | ~3 days | Typical ground surveys |
-| `cadence_50` | 50% | ~5 days | Sparse monitoring |
+**Cadence studies:**
 
-**Photometric error studies**:
+| Preset | Missing % | Description |
+|--------|-----------|-------------|
+| `cadence_05` | 5% | Space-based high cadence |
+| `cadence_15` | 15% | High-quality ground surveys |
+| `cadence_30` | 30% | Typical ground surveys |
+| `cadence_50` | 50% | Sparse monitoring |
 
-| Preset | σ (mag) | Facility |
-|--------|---------|----------|
-| `error_003` | 0.03 | JWST |
-| `error_005` | 0.05 | Roman, HST |
-| `error_010` | 0.10 | Large ground telescopes |
-| `error_015` | 0.15 | Standard ground surveys |
+**Photometric error studies:**
+
+| Preset | σ (mag) | Description |
+|--------|---------|-------------|
+| `error_003` | 0.03 | JWST-quality |
+| `error_005` | 0.05 | Roman/HST quality |
+| `error_010` | 0.10 | Professional observatories |
+| `error_015` | 0.15 | Wide-field surveys |
+
+**List all presets:**
+```bash
+python simulate.py --list_presets
+```
 
 ---
 
 ## Training
 
-### Single GPU Training
+### Single GPU
 
 ```bash
 python train.py \
-    --data ../data/raw/dataset.npz \
-    --experiment_name experiment_name \
+    --data ../data/dataset.npz \
     --epochs 50 \
     --batch_size 64 \
-    --lr 1e-3 \
-    --weight_decay 1e-3 \
-    --warmup_epochs 5 \
-    --patience 15
+    --lr 1e-4
 ```
 
 ### Distributed Training (Multi-GPU)
 
-**Single node, multiple GPUs:**
+**Single node:**
 ```bash
+export MASTER_ADDR=localhost
+export MASTER_PORT=29500
+
 torchrun --nproc_per_node=4 train.py \
-    --data ../data/raw/dataset.npz \
-    --experiment_name multi_gpu \
+    --data ../data/dataset.npz \
     --batch_size 64
 ```
 
-**Multi-node training (SLURM):**
+**Multi-node (SLURM):**
 ```bash
 salloc --partition=gpu --nodes=8 --gres=gpu:4 --time=05:00:00
 
@@ -312,32 +310,35 @@ srun torchrun \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     train.py \
-        --data ../data/raw/baseline_1M.npz \
-        --experiment_name baseline_1M \
-        --epochs 50 \
-        --batch_size 64
+        --data ../data/dataset.npz \
+        --epochs 50
 ```
 
 ### Training Features
 
 **Optimization:**
 - AdamW optimizer (β₁=0.9, β₂=0.999)
-- Cosine annealing learning rate schedule
-- Linear warmup (default: 5 epochs)
+- Weight decay: 1e-4
+- ReduceLROnPlateau scheduler (factor=0.5, patience=5)
 - Gradient clipping (max norm: 1.0)
-- Mixed precision training (automatic)
-- Class-balanced loss weighting
+- Mixed precision training (AMP)
+- Gradient accumulation (4 steps)
 
 **Regularization:**
-- Weight decay: 1e-3
 - Dropout: 0.1
 - Early stopping (patience: 15 epochs)
+- Class-balanced loss weighting
+- Loss spike detection with automatic learning rate reduction
 
-**Distributed training:**
-- DistributedDataParallel (DDP)
-- Gradient aggregation across GPUs
-- Synchronized batch normalization
-- Temporal encoding distribution tracking
+**Robustness:**
+- NaN gradient detection and skipping
+- Rank-0 only logging (clean DDP output)
+- Graceful distributed cleanup on exit
+
+**Causality Auditing:**
+- Periodic early detection checks (every 5 epochs)
+- Accuracy at 20%, 50%, 100% completeness
+- Validates that predictions stabilize progressively
 
 ---
 
@@ -347,226 +348,70 @@ srun torchrun \
 
 ```bash
 python evaluate.py \
-    --experiment_name experiment_name \
-    --data ../data/raw/test_dataset.npz \
-    --batch_size 128 \
-    --n_samples 50000 \
-    --early_detection \
-    --temporal_bias_check \
-    --n_evolution_per_type 10 \
-    --u0_threshold 0.3 \
-    --u0_bins 10
+    --experiment_name results_* \
+    --data ../data/test.npz \
+    --batch_size 128
 ```
 
 ### Generated Outputs
 
 **Diagnostic plots:**
-1. ROC curves (one-vs-rest, per-class AUC)
-2. Confusion matrix (absolute counts and normalized)
-3. Confidence score distributions
-4. Calibration curves (reliability diagrams)
-5. Example classifications per class
-6. Evolution trajectories (accuracy vs. observation count)
-7. Early detection analysis (accuracy vs. completeness)
-8. Temporal bias diagnostics (position of observations)
+1. **roc_curve.png**: One-vs-rest ROC curves with per-class AUC
+2. **confusion_matrix.png**: Normalized confusion matrix heatmap
+3. **calibration.png**: Reliability diagram + confidence histograms
+4. **fine_early_detection.png**: Accuracy vs observation completeness (50 points)
+5. **evolution_[type]_[idx].png**: Per-event classification trajectory with:
+   - Light curve with observation markers
+   - Class probability evolution over time
+   - Confidence progression
+6. **temporal_bias_check.png**: t₀ distribution comparison (KS-test)
+7. **u0_dependency.png**: Binary accuracy vs impact parameter
 
-**Quantitative metrics:**
+**Quantitative metrics (summary.json):**
 - Overall accuracy, precision, recall, F1-score
-- Per-class metrics
-- Confidence calibration error
-- Expected calibration error (ECE)
-- u₀ dependency (impact parameter analysis, if parameters available)
-
-**Output files:**
-- `evaluation_summary.json`: Complete metrics
-- `u0_report.json`: Impact parameter analysis
-- `config.json`: Experiment configuration
-- `*.png`: All diagnostic plots
+- Per-class metrics (Flat, PSPL, Binary)
+- AUROC (macro and weighted)
+- Model configuration snapshot
 
 ### Early Detection Analysis
 
-Evaluates classification accuracy as a function of observation completeness:
-
-```bash
-python evaluate.py \
-    --experiment_name experiment \
-    --data ../data/raw/test.npz \
-    --early_detection \
-    --n_evolution_per_type 10
-```
-
-Tests 15 completeness fractions: [5%, 10%, 15%, ..., 95%, 100%]
-
-**Typical performance:**
-- 50% completeness: 75-80% accuracy
-- 25% completeness: 55-65% accuracy
-- 10% completeness: ~40% accuracy
+The evaluation automatically computes fine-grained accuracy across 50 observation completeness fractions (5%-100%). This validates:
+- Model doesn't require full light curves for classification
+- Predictions stabilize as more data arrives (causal consistency)
+- No sudden accuracy jumps that would indicate temporal shortcuts
 
 ### Physical Detection Limits
 
-**Impact parameter (u₀) analysis:**
+**Impact parameter (u₀) dependency:**
+Binary lens detectability is fundamentally limited by source-lens separation:
+- **u₀ < 0.15**: Strong caustic signatures, high accuracy achievable
+- **u₀ ~ 0.2-0.3**: Weak caustic features, moderate accuracy
+- **u₀ > 0.3**: Morphologically PSPL-like, low accuracy (physically unavoidable)
 
-The minimum separation between source and lens (u₀) fundamentally limits binary lens detectability:
-
-- **u₀ < 0.15**: High accuracy (85-90%) — source crosses caustics
-- **u₀ ~ 0.2-0.3**: Moderate accuracy (70-80%) — caustic signatures present
-- **u₀ > 0.3**: Low accuracy (55-60%) — morphologically PSPL-like
-
-This threshold reflects astrophysical reality: distant sources do not exhibit binary lens signatures regardless of algorithm sophistication.
+This analysis confirms the model respects astrophysical constraints rather than exploiting data artifacts.
 
 ---
 
 ## Visualization
 
-### Model Internals and Diagnostic Analysis
+### Model Internals
 
-The `visualize_transformer.py` script provides comprehensive visualization of model behavior and internal representations:
+The `visualize.py` script provides detailed visualization of model behavior:
 
 ```bash
-python visualize_transformer.py \
-    --experiment_name experiment_name \
-    --data ../data/raw/test.npz \
-    --output_dir ../results/visualizations \
-    --n_examples 2
-```
-
-**Key arguments:**
-- `--experiment_name`: Trained model experiment directory
-- `--data`: Test dataset for visualization
-- `--output_dir`: Directory for output plots
-- `--event_indices`: Specific events to visualize (optional)
-- `--n_examples`: Number of examples per class (default: 2)
-- `--no_attention`: Skip attention visualization (faster)
-- `--no_embedding`: Skip embedding space visualization
-
-### Generated Visualizations
-
-**Per-event diagnostics:**
-
-1. **Attention patterns** (`attention_patterns_event*.png`)
-   - Attention matrices for each transformer layer
-   - Temporal attention distribution across observations
-   - Visualization of causal masking structure
-   - Average attention received by each time step
-
-2. **Temporal encoding** (`temporal_encoding_event*.png`)
-   - Light curve in magnitude space
-   - Observation interval distribution
-   - Temporal encoding dimensions (first 6 components)
-   - PCA projection of temporal representations
-
-3. **Classification evolution** (`classification_evolution_event*.png`)
-   - Class probabilities vs. observation completeness (100 points)
-   - Confidence progression over time
-   - Light curve with observation markers
-   - High-resolution tracking of prediction dynamics
-
-**Global analyses:**
-
-4. **Binary vs PSPL comparison** (`binary_vs_pspl_comparison.png`)
-   - Evolution of binary class probability for true PSPL events
-   - Evolution of binary class probability for true Binary events
-   - Demonstrates discrimination capability between similar classes
-
-5. **Embedding space** (`embedding_space_pca.png`)
-   - PCA projection of final layer embeddings
-   - Visualization of class clustering in latent space
-   - Explained variance by principal components
-
-6. **Confidence evolution by class** (`confidence_evolution_by_class.png`)
-   - Mean confidence trajectories for each class
-   - Standard deviation bands
-   - Comparison across observation completeness
-
-### Example Usage
-
-**Visualize specific events:**
-```bash
-python visualize_transformer.py \
-    --experiment_name baseline_1M \
-    --data ../data/raw/baseline_1M.npz \
-    --event_indices 42 137 289
-```
-
-**Quick visualization without attention (faster):**
-```bash
-python visualize_transformer.py \
-    --experiment_name test_experiment \
-    --data ../data/raw/test.npz \
-    --no_attention \
+python visualize.py \
+    --experiment_name results_* \
+    --data ../data/test.npz \
     --n_examples 3
 ```
 
-**CPU execution:**
-```bash
-python visualize_transformer.py \
-    --experiment_name experiment \
-    --data ../data/raw/test.npz \
-    --no_cuda
-```
-
-### Interpretation Guidelines
-
-**Attention patterns:**
-- Strong diagonal indicates temporal locality (recent observations most important)
-- Off-diagonal attention suggests long-range dependencies
-- Causal boundary should be clearly visible (no future peeking)
-
-**Temporal encoding:**
-- Smooth encoding dimensions indicate learned temporal structure
-- PCA clustering by time suggests proper temporal ordering
-- Irregular intervals should be handled gracefully
-
-**Classification evolution:**
-- Stable predictions indicate robust classification
-- Early convergence suggests strong signal
-- Late changes may indicate confusion or ambiguous morphology
-
-**Embedding space:**
-- Clear class separation indicates effective feature learning
-- Overlap between PSPL and Binary is expected (physical similarity)
-- Flat events should be well-separated from lensing classes
-
----
-
-## Performance Benchmarks
-
-### Baseline Results (1M events, balanced classes)
-
-**Overall performance:**
-- Accuracy: 80.5%
-- Macro F1-score: 0.78
-- Training time: 3-5 hours (32 GPUs)
-- Inference: <1 ms/event
-
-**Per-class metrics:**
-
-| Class | Precision | Recall | F1-Score |
-|-------|-----------|--------|----------|
-| Flat (0) | 0.92 | 0.95 | 0.93 |
-| PSPL (1) | 0.88 | 0.90 | 0.89 |
-| Binary (2) | 0.70 | 0.90 | 0.79 |
-
-**Topology-dependent accuracy:**
-
-| Topology | Description | Accuracy |
-|----------|-------------|----------|
-| Distinct | Clear caustics | 83-86% |
-| Planetary | q ~ 10⁻⁴ - 10⁻³ | 81-84% |
-| Stellar | q ~ 0.1 - 1.0 | 78-81% |
-| Baseline | Full range | 73-76% |
-
-### Computational Efficiency
-
-**Training:**
-- Throughput: ~10,000 events/sec (32× A100 40GB)
-- Memory: ~8 GB/GPU (batch size 64)
-- Convergence: 30-50 epochs
-
-**Inference:**
-- Single observation processing: <1 ms
-- Batch processing: 10,000+ events/sec (single GPU)
-- Streaming latency: <2 ms (real-time updates)
+**Generated visualizations:**
+1. **attention_patterns_event*.png**: Attention weight matrices per layer
+2. **temporal_encoding_event*.png**: Δt encoding analysis
+3. **classification_evolution_event*.png**: High-resolution prediction trajectories
+4. **binary_vs_pspl_comparison.png**: Class separation over time
+5. **embedding_space_pca.png**: Final layer embeddings in 2D
+6. **confidence_evolution_by_class.png**: Mean confidence trajectories with std bands
 
 ---
 
@@ -575,116 +420,62 @@ python visualize_transformer.py \
 ```
 thesis-microlensing/
 ├── code/
-│   ├── simulate.py          # Dataset generation (VBBinaryLensing)
-│   ├── train.py             # Distributed training pipeline
-│   ├── evaluate.py          # Comprehensive evaluation suite
-│   ├── transformer.py       # Model architecture (v1.0)
-│   └── visualize_transformer.py  # Visualization suite
+│   ├── simulate.py          # Dataset generation
+│   ├── train.py             # Distributed training
+│   ├── evaluate.py          # Comprehensive evaluation
+│   ├── visualize.py         # Model visualization
+│   └── transformer.py       # Causal hybrid architecture
 │
 ├── data/
-│   └── raw/                 # Generated datasets (.npz format)
+│   └── *.npz                # Generated datasets
 │
 ├── results/
-│   └── experiment_*/        # Training outputs
-│       ├── best_model.pt    # Trained model checkpoint
-│       ├── config.json      # Experiment configuration
-│       ├── normalizer.pkl   # Input normalization parameters
-│       ├── results.json     # Training metrics
-│       └── evaluation/      # Diagnostic plots and analysis
+│   └── results_*/           # Training outputs per experiment
+│       ├── best_model.pt    # Best checkpoint (highest val accuracy)
+│       ├── summary.json     # Metrics summary
+│       └── eval_*/          # Evaluation outputs with timestamp
 │
-├── visualizations/          # Model visualization outputs
-│
-├── docs/
-│   └── RESEARCH_GUIDE.md    # Experimental protocols
-│
-├── environment.yml          # Conda environment specification
-├── README.md               # This file
-├── LICENSE                 # MIT License
-└── .gitignore
+├── environment.yml          # Conda environment
+├── README.md
+└── LICENSE
 ```
 
 ---
 
 ## Methodological Notes
 
-### Model Design Considerations
+### Temporal Bias Prevention
 
-**Temporal encoding:**
-- Relative time differences (Δt) instead of absolute timestamps prevent information leakage
-- Adaptive normalization ensures robust handling of variable cadences
-- Log-scale transformation accommodates wide range of observation intervals
+**Problem:** Models can exploit data artifacts (e.g., peak always at t=0) rather than learning physical signatures.
 
-**Causal attention:**
-- Semi-causal mask prevents model from accessing future observations
-- Sliding window (size 64) balances context and efficiency
-- Enables deployment in real-time survey pipelines
+**Solutions implemented:**
+1. **Wide t₀ sampling:** PSPL and Binary events share identical t₀ ranges
+2. **Relative time encoding:** Model receives Δt (intervals), not absolute timestamps
+3. **KS-test validation:** Compares t₀ distributions between classes
+4. **Evolution auditing:** Checks prediction stability over observation phases
 
-**Architecture choices:**
-- Transformer selected for: (1) variable-length sequences, (2) long-range dependencies, (3) parallelizable training
-- Global pooling aggregates information across valid observations only
-- Two-layer classifier provides sufficient capacity without overfitting
+### Causality Enforcement
 
-### Training Strategy
+**Problem:** Transformers can attend to future observations during training if not properly masked.
 
-**Class imbalance:**
-- Inverse frequency weighting in loss function
-- Balanced sampling during evaluation
-- Stratified train-validation-test splits
+**Solutions implemented:**
+1. **Strict causal mask:** `col_idx ≤ row_idx` in attention (keys ≤ queries in time)
+2. **Sliding window:** Limits context to recent 64 observations
+3. **Padding mask caching:** Prevents attention to padding in incremental inference
+4. **Post-normalization masking:** Eliminates "ghost" signals from LayerNorm on padding
+5. **Verification tests:** Online vs batch consistency checks
 
-**Regularization:**
-- Early stopping on validation loss (patience: 15 epochs)
-- Weight decay prevents overfitting to training topology
-- Dropout in attention and feed-forward layers
+### Data Quality Safeguards
 
-**Distributed training:**
-- Synchronous gradient updates across GPUs
-- Learning rate scales with effective batch size
-- Temporal encoding distribution tracked across all workers
+**Simulation:**
+- Numba JIT acceleration for Δt computation (>10× speedup)
+- VBBinaryLensing for accurate binary magnification (fallback approximation if unavailable)
+- Photometric noise applied to flux (not magnitude) for physical realism
 
-### Evaluation Methodology
-
-**Stratified sampling:**
-- Equal representation of all classes in test set
-- Subsampling for fast iteration during development
-- Full dataset evaluation for final benchmarks
-
-**Temporal bias diagnostics:**
-- Kolmogorov-Smirnov test for observation position uniformity
-- Prevents model exploiting t₀ alignment artifacts
-- Validates robustness to different event phases
-
-**Uncertainty quantification:**
-- Temperature scaling on validation set
-- Expected calibration error (ECE) measurement
-- Confidence-accuracy correlation analysis
-
----
-
-## Limitations and Future Work
-
-### Current Limitations
-
-1. **Binary lens degeneracies**: High mass-ratio systems (q → 1) difficult to distinguish from PSPL
-2. **Extreme noise regimes**: Performance degrades beyond σ > 0.20 mag
-3. **Sparse cadences**: Accuracy drops significantly for >50% missing observations
-4. **Training data**: Synthetic simulations may not capture all real-world systematics
-
-### Planned Improvements
-
-1. **Architecture enhancements**:
-   - Caustic-aware feature extraction modules
-   - Explicit u₀ prediction for binary detection confidence
-   - Multi-scale temporal attention mechanisms
-
-2. **Training improvements**:
-   - Curriculum learning (simple → complex topologies)
-   - Data augmentation (noise injection, gap patterns)
-   - Transfer learning from real survey data
-
-3. **Deployment optimization**:
-   - Model quantization for faster inference
-   - ONNX export for production pipelines
-   - Integration with alert systems (e.g., LSST Broker)
+**Preprocessing:**
+- Log1p normalization handles wide dynamic range
+- NaN/Inf sanitization with explicit clamping
+- Sequence length computed from padding mask, not assumed
 
 ---
 
@@ -692,29 +483,21 @@ thesis-microlensing/
 
 ### Topology Study
 
-Systematic evaluation across binary lens parameter space:
+Compare performance across binary lens parameter spaces:
 
 ```bash
-# Generate datasets for each topology
 for topology in distinct planetary stellar baseline; do
     python simulate.py --preset ${topology} \
         --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --output ../data/raw/topology_${topology}.npz
-done
-
-# Train models
-for topology in distinct planetary stellar baseline; do
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/topology_${topology}.npz \
-        --experiment_name topology_${topology} \
+        --output ../data/topology_${topology}.npz
+    
+    python train.py \
+        --data ../data/topology_${topology}.npz \
         --epochs 50
-done
-
-# Comparative evaluation
-for topology in distinct planetary stellar baseline; do
+    
     python evaluate.py \
-        --experiment_name topology_${topology} \
-        --data ../data/raw/topology_${topology}.npz
+        --experiment_name results_* \
+        --data ../data/topology_${topology}.npz
 done
 ```
 
@@ -723,23 +506,18 @@ done
 Assess robustness to observation frequency:
 
 ```bash
-# Generate datasets with varying cadences
 for cadence in 05 15 30 50; do
     python simulate.py --preset cadence_${cadence} \
         --n_flat 30000 --n_pspl 30000 --n_binary 30000 \
-        --output ../data/raw/cadence_${cadence}.npz
-done
-
-# Train and evaluate
-for cadence in 05 15 30 50; do
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/cadence_${cadence}.npz \
-        --experiment_name cadence_${cadence} \
+        --output ../data/cadence_${cadence}.npz
+    
+    python train.py \
+        --data ../data/cadence_${cadence}.npz \
         --epochs 50
     
     python evaluate.py \
-        --experiment_name cadence_${cadence} \
-        --data ../data/raw/cadence_${cadence}.npz
+        --experiment_name results_* \
+        --data ../data/cadence_${cadence}.npz
 done
 ```
 
@@ -748,25 +526,48 @@ done
 Evaluate photometric noise tolerance:
 
 ```bash
-# Generate datasets with varying noise levels
 for error in 003 005 010 015; do
     python simulate.py --preset error_${error} \
         --n_flat 30000 --n_pspl 30000 --n_binary 30000 \
-        --output ../data/raw/error_${error}.npz
-done
-
-# Train and evaluate
-for error in 003 005 010 015; do
-    torchrun --nproc_per_node=4 train.py \
-        --data ../data/raw/error_${error}.npz \
-        --experiment_name error_${error} \
+        --output ../data/error_${error}.npz
+    
+    python train.py \
+        --data ../data/error_${error}.npz \
         --epochs 50
     
     python evaluate.py \
-        --experiment_name error_${error} \
-        --data ../data/raw/error_${error}.npz
+        --experiment_name results_* \
+        --data ../data/error_${error}.npz
 done
 ```
+
+---
+
+## Limitations and Future Work
+
+### Current Limitations
+
+1. **Training data:** Synthetic simulations may not capture all observational systematics
+2. **High mass ratios:** q → 1 binary systems difficult to distinguish from PSPL
+3. **Extreme noise:** Performance degrades beyond σ > 0.20 mag
+4. **Sparse cadences:** Accuracy drops for >50% missing observations
+
+### Planned Improvements
+
+**Architecture:**
+- Caustic-aware feature extraction modules
+- Explicit u₀ regression head for uncertainty quantification
+- Multi-scale temporal attention (short/long timescales)
+
+**Training:**
+- Curriculum learning (simple → complex topologies)
+- Data augmentation (synthetic noise, gap patterns)
+- Semi-supervised learning with unlabeled real survey data
+
+**Deployment:**
+- Model quantization (INT8) for faster inference
+- ONNX export for production pipelines
+- Integration with survey alert systems (LSST, ZTF)
 
 ---
 
@@ -774,12 +575,11 @@ done
 
 ```bibtex
 @mastersthesis{bhatia2025microlensing,
-  title={From Light Curves to Labels: Machine Learning in Microlensing},
+  title={Gravitational Microlensing Event Classification with Causal Transformers},
   author={Bhatia, Kunal},
   year={2025},
   school={University of Heidelberg},
-  type={MSc Thesis},
-  note={Transformer-based real-time classification}
+  type={MSc Thesis}
 }
 ```
 
@@ -802,13 +602,9 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## Technical Support
 
-**Kunal Bhatia**  
-MSc Physics Student  
-University of Heidelberg
-
-**For technical issues:**
+**For issues:**
 - Implementation questions → GitHub Issues
-- Methodology questions → See thesis document
+- Methodology questions → Thesis document
 - Collaboration inquiries → Contact via institutional email
 
 ---
@@ -816,18 +612,18 @@ University of Heidelberg
 ## References
 
 **Key publications:**
-1. Bozza, V. (2010). "VBBinaryLensing: A C++ library for microlensing light curve computation." MNRAS, 408, 2188-2196.
-2. Zhu, W., et al. (2017). "Mass Measurements of Isolated Objects from Space-based Microlensing." ApJ, 849, L31.
-3. Johnson, S. A., et al. (2020). "Predictions of the Nancy Grace Roman Space Telescope Galactic Exoplanet Survey." AJ, 160, 123.
+1. Bozza, V. (2010). "VBBinaryLensing: A C++ library for microlensing." MNRAS, 408, 2188-2196.
+2. Zhu, W., et al. (2017). "Mass Measurements from Space-based Microlensing." ApJ, 849, L31.
+3. Johnson, S. A., et al. (2020). "Nancy Grace Roman Space Telescope Predictions." AJ, 160, 123.
 
 **Survey resources:**
 - OGLE: http://ogle.astrouw.edu.pl/
 - MOA: https://www.massey.ac.nz/~iabond/moa/
-- Nancy Grace Roman Space Telescope: https://roman.gsfc.nasa.gov/
+- Nancy Grace Roman: https://roman.gsfc.nasa.gov/
 - LSST: https://www.lsst.org/
 
 ---
 
-**Version**: 1.0  
-**Last updated**: November 2025  
+**Version**: 2.0  
+**Last updated**: December 2025  
 **Status**: Active development
