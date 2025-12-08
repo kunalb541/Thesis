@@ -421,7 +421,7 @@ def main():
                     else:
                         patience_counter += 1
                 
-                if patience_counter >= 15:
+                if patience_counter >= 30:
                     logger.info("🛑 Early stopping triggered.")
                     break
 
