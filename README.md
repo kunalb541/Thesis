@@ -624,6 +624,6 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ---
 
-**Version**: 2.0  
+**Version**: 1.0  
 **Last updated**: December 2025  
 **Status**: Active development
