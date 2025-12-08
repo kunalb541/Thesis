@@ -1,0 +1,82 @@
+name: microlens
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.10
+
+  # Core scientific computing
+  - numpy=1.26.4
+  - scipy=1.11.4
+  - numba
+
+  # Machine learning
+  - scikit-learn=1.4.0
+
+  # Visualization
+  - matplotlib=3.8.2
+  - seaborn=0.13.1
+
+  # Utilities
+  - tqdm=4.66.1
+  - pandas=2.2.0
+
+  # Development
+  - ipython=8.20.0
+  - jupyter=1.0.0numba
+
+  
+  # Testing
+  - pytest=8.0.0
+  - pytest-cov=4.1.0
+  
+  # Install via pip (not available through conda)
+  - pip
+  - pip:
+      - joblib==1.3.2
+      - VBMicrolensing==3.6.0
+    
+  # =========================================================================
+  # PyTorch - Uncomment ONE of the following sections based on your hardware
+  # =========================================================================
+  
+  # Option 1: NVIDIA GPUs (CUDA 12.1) - Recommended for most NVIDIA GPUs
+  # - pytorch::pytorch=2.2.0
+  # - pytorch::torchvision=0.17.0
+  # - pytorch::pytorch-cuda=12.1
+  
+  # Option 2: NVIDIA GPUs (CUDA 11.8) - For older NVIDIA GPUs
+  # - pytorch::pytorch=2.2.0
+  # - pytorch::torchvision=0.17.0
+  # - pytorch::pytorch-cuda=11.8
+  
+  # Option 3: AMD GPUs (ROCm 6.0)
+  # NOTE: Install PyTorch with pip after creating environment:
+  # pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
+  
+  # Option 4: CPU only
+  # - pytorch::pytorch=2.2.0
+  # - pytorch::torchvision=0.17.0
+  # - pytorch::cpuonly
+
+# =============================================================================
+# Usage Instructions
+# =============================================================================
+# 1. Create environment:
+#    conda env create -f environment.yml
+#
+# 2. Activate environment:
+#    conda activate microlens
+#
+# 3. If using AMD GPUs, install PyTorch manually:
+#    pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
+#
+# 4. Update environment (if needed):
+#    conda env update -f environment.yml --prune
+#
+# 5. Export your working environment:
+#    conda env export > environment_working.yml
+# =============================================================================
