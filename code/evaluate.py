@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
 """
-Model Evaluation for Causal Hybrid Architecture
+Causal Hybrid Model Evaluation and Diagnostic Suite
 
-- Uses --experiment_name to find model in ../results
-- Compatible with CausalHybridModel (Flux + Delta_t)
-- Includes Full Diagnostics: u0, Temporal Bias, Evolution Plots
+Performs inference using a trained CausalHybridModel on test data.
+Computes classification metrics and generates diagnostic visualizations regarding
+temporal evolution and physical parameter dependencies.
+
+Functions:
+- Loads model checkpoints and .npz test data.
+- Executes batched inference with causal masking.
+- Computes Accuracy, AUROC, Precision, Recall, and F1-score.
+- Generates visualizations: ROC curves, Confusion Matrices, Calibration curves.
+- Performs physics-based diagnostics:
+  - Temporal Bias Check (t0 distribution analysis).
+  - Impact Parameter (u0) dependency analysis.
+  - Time-step evolution of class probabilities.
+
+Usage:
+    python evaluate.py --experiment_name "exp_id" --data "../data/test.npz"
 
 Author: Kunal Bhatia
-Version: 1.0 
+Version: 3.5.0
 Date: December 2025
 """
 
@@ -42,7 +55,7 @@ try:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 except ImportError as e:
-    print(f"CRITICAL ERROR: 'causal_hybrid_model.py' not found.")
+    print(f"CRITICAL ERROR: 'transformer.py' not found.")
     print(f"Details: {e}")
     sys.exit(1)
 
