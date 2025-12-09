@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """
-Comprehensive Model Evaluation for Causal Hybrid Architecture
-(Full Feature Set: Temporal Bias, u0 Diagnostics, High-Res Evolution)
+Causal Hybrid Model Visualization and Diagnostics
+
+Executes inference using a trained CausalHybridModel to generate performance metrics
+and physics-based diagnostic visualizations.
+
+Functional Overview:
+- Inference: Runs batched forward passes with causal masking on test data.
+- Metrics: Calculates accuracy, precision, recall, F1-score, and AUROC.
+- Visualization: Generates ROC curves, confusion matrices, and reliability diagrams.
+- Diagnostics:
+  - Event Evolution: Plots flux, class probability trajectories, and confidence over time.
+  - Temporal Bias: Compares peak time (t0) distributions across classes using KS-tests.
+  - Parameter Dependency: Analyzes classification accuracy as a function of impact parameter (u0).
 
 Usage:
-    python evaluate_causal_experiment.py --experiment_name "my_experiment" --data "../data/test.npz"
+    python visualize.py --experiment_name "exp_id" --data "../data/test.npz"
 
 Author: Kunal Bhatia
-Version: 3.5.0 (Full Restoration)
+Version: 1.0
 Date: December 2025
 """
 
