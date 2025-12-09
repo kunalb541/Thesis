@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-Distributed Training Script for Causal Hybrid Architecture
+HPC Distributed Training Script (DDP + AMP) - THESIS EDITION
 
-Executes the training loop for the CausalHybridModel using PyTorch DistributedDataParallel (DDP).
-Handles data loading, FP32 optimization, and artifact management.
-
-Operational Logic:
-- Distributed Computing: Rank-0 logging and DDP process group initialization.
-- Optimization: AdamW optimizer (Standard FP32).
-- Gradient Management: Standard backward pass and clipping (norm=1.0) before stepping.
-- Validation: Periodically evaluates model on validation set; calculates causality leakage metrics.
-- Error Handling: Detects loss spikes (>2.5x moving average) and triggers LR reduction.
-- Output: Saves checkpoints (best/final) and configuration to '../results/<experiment_name>_<timestamp>'.
+Features:
+- DDP (Distributed Data Parallel) on 40+ GPUs.
+- AMP (Automatic Mixed Precision) for 2x speedup.
+- RESUME capability (checkpoints).
+- Advanced Metrics (F1, Precision, Recall) via distributed reduction.
+- Robust Data Normalization (Median/IQR) & NaN handling.
 
 Usage:
-    python train_causal_experiment.py --experiment_name "exp01" --data "../data/train.npz"
+    # Fresh Run
+    torchrun --nproc_per_node=4 train.py --experiment_name "exp_final" --data "data.npz"
 
-Author: Kunal Bhatia
-Version: 1.1 (No-AMP)
+    # Resume after crash
+    torchrun --nproc_per_node=4 train.py --experiment_name "exp_final" --data "data.npz" --resume "results/exp_final_.../last.pt"
+
+Author: Senior PyTorch Engineer
 Date: December 2025
 """
 
 import os
 import sys
-import json
 import argparse
 import logging
 import numpy as np
@@ -31,48 +29,42 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.cuda.amp import autocast, GradScaler
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
-import warnings
+from typing import Tuple, Dict, Optional, List
 
-# --- Import the Hardened Model ---
-# Ensure we look in the current directory for the model file
+# --- Import Refactored Model ---
 try:
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
-    from transformer import CausalHybridModel, CausalConfig
-
-    def count_parameters(model):
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
+    # UPDATED: Importing from the generic 'model.py'
+    from model import CausalHybridModel, CausalConfig
 except ImportError:
-    # Only print error on rank 0 to avoid spam in DDP
     if int(os.environ.get('RANK', 0)) == 0:
-        print("\nCRITICAL: 'causal_hybrid_model.py' not found in script directory.")
+        print("CRITICAL: 'model.py' not found. Please ensure the model file is present.")
     sys.exit(1)
 
-warnings.filterwarnings("ignore")
-
 # =============================================================================
-# CONFIGURATION & CONSTANTS
+# HPC CONFIGURATION
 # =============================================================================
-CLIP_NORM = 1.0           # Strict clipping prevents Transformer exploding grads
-DEFAULT_LR = 1e-4         # Safe starting LR
-ACCUMULATE_STEPS = 1      # Set >1 for effective batch size multiplier
-SPIKE_THRESHOLD = 2.5     # Factor for loss spike detection
+CLIP_NORM = 1.0
+DEFAULT_LR = 3e-4
+ACCUMULATE_STEPS = 1
+PREFETCH_FACTOR = 4
+NUM_WORKERS = 8
 SEED = 42
 
 # =============================================================================
-# DISTRIBUTED SETUP
+# DISTRIBUTED UTILS
 # =============================================================================
-def setup_distributed():
-    """Robust DDP initialization capable of handling single GPU or Multi-GPU."""
+
+def setup_distributed() -> Tuple[int, int, int, bool]:
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -82,506 +74,319 @@ def setup_distributed():
             torch.cuda.set_device(local_rank)
             dist.init_process_group(backend='nccl', init_method='env://')
             return rank, local_rank, world_size, True
-    
-    # Fallback to single device
     return 0, 0, 1, False
 
 def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-# =============================================================================
-# LOGGING SETUP (CLEAN OUTPUT)
-# =============================================================================
-def setup_logging(rank, output_dir, debug_mode):
-    """Configures logging to file and console, restricting verbosity on non-master ranks."""
-    logger = logging.getLogger(__name__)
+def is_main_process(rank: int) -> bool:
+    return rank == 0
+
+def get_logger(rank: int, output_dir: Path) -> logging.Logger:
+    logger = logging.getLogger("hpc_trainer")
+    logger.setLevel(logging.INFO if rank == 0 else logging.WARNING)
+    if logger.hasHandlers(): logger.handlers.clear()
     
-    # Master rank gets INFO/DEBUG, others get WARNING
+    formatter = logging.Formatter('%(asctime)s | %(levelname)s | Rank %(process)d | %(message)s')
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    
     if rank == 0:
-        level = logging.DEBUG if debug_mode else logging.INFO
-    else:
-        level = logging.WARNING
-
-    handlers = [logging.StreamHandler(sys.stdout)]
-    if rank == 0:
-        # Add file handler only for master
-        log_file = Path(output_dir) / "training.log"
-        handlers.append(logging.FileHandler(log_file))
-
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s | %(levelname)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=handlers,
-        force=True
-    )
+        fh = logging.FileHandler(output_dir / "training.log")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
     return logger
 
 # =============================================================================
-# DATASET UTILITIES
+# ROBUST DATASET & PROCESSING
 # =============================================================================
-def create_delta_t_from_timestamps(timestamps):
-    """Create delta_t array from timestamps safely."""
-    if timestamps.ndim == 1:
-        timestamps = timestamps[np.newaxis, :]
-    delta_t = np.zeros_like(timestamps)
-    if timestamps.shape[1] > 1:
-        delta_t[:, 1:] = np.diff(timestamps, axis=1)
-    return np.maximum(delta_t, 0.0)
 
 class MicrolensingDataset(Dataset):
-    """
-    Robust Dataset class handling padded arrays efficiently.
-    """
-    def __init__(self, flux, delta_t, labels, pad_value=-1.0):
-        self.flux = flux
-        self.delta_t = delta_t
-        self.labels = labels
-        self.pad_value = pad_value
+    def __init__(self, flux: np.ndarray, delta_t: np.ndarray, labels: np.ndarray, 
+                 stats: Dict[str, float] = None):
+        # 1. NaN Handling: Replace NaNs with 0 (assuming pre-padding)
+        flux = np.nan_to_num(flux, nan=0.0)
+        delta_t = np.nan_to_num(delta_t, nan=0.0)
+
+        # 2. Normalization (Robust Scaler logic)
+        # (X - Median) / IQR
+        if stats is not None:
+            median = stats['median']
+            iqr = stats['iqr']
+            if iqr < 1e-6: iqr = 1.0 
+            flux = (flux - median) / iqr
+
+        self.flux = torch.from_numpy(np.ascontiguousarray(flux)).float()
+        self.delta_t = torch.from_numpy(np.ascontiguousarray(delta_t)).float()
+        self.labels = torch.from_numpy(np.ascontiguousarray(labels)).long()
         
-        # Calculate valid lengths
-        # Assuming flux is padded with pad_value
-        is_data = (flux != pad_value)
-        self.lengths = np.sum(is_data, axis=1).astype(np.int64)
-        # Clamp to minimum 1 to avoid indexing errors in model
-        self.lengths = np.maximum(self.lengths, 1) 
+        # Calculate valid lengths (assuming 0 is padding)
+        self.lengths = (self.flux != 0.0).sum(dim=1).long().clamp(min=1)
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        return (self.flux[idx], self.delta_t[idx], 
-                self.lengths[idx], self.labels[idx])
+        return self.flux[idx], self.delta_t[idx], self.lengths[idx], self.labels[idx]
 
-def collate_fn(batch):
-    """Custom collate to stack numpy arrays into tensors."""
-    flux, delta_t, lengths, labels = zip(*batch)
-    return (torch.from_numpy(np.stack(flux)).float(),
-            torch.from_numpy(np.stack(delta_t)).float(),
-            torch.from_numpy(np.array(lengths)).long(),
-            torch.from_numpy(np.array(labels)).long())
-
-def compute_class_weights(labels, n_classes):
-    """Compute inverse frequency weights for imbalanced datasets."""
-    counts = np.bincount(labels, minlength=n_classes)
-    weights = 1.0 / (counts + 1e-6)
-    weights = weights / weights.sum() * n_classes
-    return torch.FloatTensor(weights)
-
-def detect_loss_spike(current_loss, loss_history, threshold=SPIKE_THRESHOLD):
-    """Heuristic to detect if loss has exploded relative to recent history."""
-    min_history = 10  # increased from 5
-    if len(loss_history) < min_history:
-        return False
-    recent_avg = np.mean(loss_history[-min_history:])
-    # Guard against divide by zero if loss is extremely small
-    if recent_avg < 1e-6:
-        return False
-    return current_loss > (threshold * recent_avg)
-
-# =============================================================================
-# TRAINING ENGINE (Standard FP32 with Gradient Clipping)
-# =============================================================================
-def train_epoch(model, loader, optimizer, class_weights, device, rank, epoch, logger):
-    model.train()
-    
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    accum_loss = 0.0
-    nan_count = 0
-    
-    optimizer.zero_grad(set_to_none=True)
-    
-    # Verbose Progress Bar (Only on Rank 0)
-    if rank == 0:
-        pbar = tqdm(loader, desc=f"Epoch {epoch}", unit="batch", leave=False)
-    else:
-        pbar = loader
-
-    for step, (flux, delta_t, lengths, labels) in enumerate(pbar):
-        flux = flux.to(device, non_blocking=True)
-        delta_t = delta_t.to(device, non_blocking=True)
-        lengths = lengths.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        # --- Forward (Standard FP32) ---
-        # We assume model returns a dict with 'probs' or 'logits'
-        # return_all_timesteps=True gives [B, T, Classes]
-        out = model(flux, delta_t, lengths=lengths, return_all_timesteps=True)
-        
-        # Extract last valid timestep for classification training
-        batch_idx = torch.arange(flux.size(0), device=device)
-        last_idx = (lengths - 1).clamp(min=0)
-        
-        # Use LogSoftmax for stability with NLLLoss or CrossEntropy
-        # The model output 'probs' is Softmaxed. 
-        final_probs = out['probs'][batch_idx, last_idx]
-        final_logits = torch.log(final_probs + 1e-9) 
-        
-        # Loss calculation
-        loss = F.nll_loss(final_logits, labels, weight=class_weights, reduction='mean')
-        norm_loss = loss / ACCUMULATE_STEPS
-
-        # --- Backward (Standard) ---
-        norm_loss.backward()
-        accum_loss += loss.item()
-
-        # --- Optimizer Step (With Clipping) ---
-        if (step + 1) % ACCUMULATE_STEPS == 0:
-            # 1. Clip Gradients
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
-
-            # 2. Step if finite
-            if torch.isfinite(grad_norm):
-                optimizer.step()
-            else:
-                nan_count += 1
-                if rank == 0 and logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logger.debug(f"⚠️ NaN Gradient detected (norm={grad_norm.item()}). Skipping step.")
-
-            optimizer.zero_grad(set_to_none=True)
-            total_loss += accum_loss
-            accum_loss = 0.0
-            
-            # Update TQDM
-            if rank == 0:
-                pbar.set_postfix({
-                    'loss': f"{total_loss / (step+1):.4f}", 
-                    'gnorm': f"{grad_norm.item():.2f}",
-                    'nan': nan_count
-                })
-
-        # --- Metrics ---
-        with torch.no_grad():
-            preds = final_logits.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-    # DDP Synchronization of Metrics
-    if dist.is_initialized():
-        metrics = torch.tensor([total_loss, correct, total, nan_count], device=device)
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-        # Average loss over ranks, sum correct/total
-        # Note: total_loss above was summed over batches in local loop, 
-        # but for true average we need careful handling. 
-        # Simplified: Summing losses and dividing by world_size * steps approx
-        total_loss, correct, total, nan_count = metrics.cpu().numpy()
-        total_loss /= dist.get_world_size()
-
-    avg_loss = total_loss / len(loader)
-    avg_acc = correct / max(total, 1)
-
-    return avg_loss, avg_acc, int(nan_count)
-
-# =============================================================================
-# EVALUATION & MISCHIEF-PROOF AUDIT
-# =============================================================================
-@torch.no_grad()
-def evaluate(model, loader, class_weights, device, rank, check_early_detection=False):
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    
-    # Audit Metrics (Accuracy at 20%, 50%, 100% of light curve)
-    milestones = [0.2, 0.5, 1.0]
-    early_correct = {m: 0 for m in milestones}
-    early_total = {m: 0 for m in milestones}
-
-    if rank == 0:
-        desc = "Evaluating (Audit)" if check_early_detection else "Evaluating"
-        iter_loader = tqdm(loader, desc=desc, leave=False)
-    else:
-        iter_loader = loader
-
-    for flux, delta_t, lengths, labels in iter_loader:
-        flux = flux.to(device)
-        delta_t = delta_t.to(device)
-        lengths = lengths.to(device)
-        labels = labels.to(device)
-
-        # Get full sequence probabilities
-        out = model(flux, delta_t, lengths=lengths, return_all_timesteps=True)
-        probs_seq = out['probs'] # [B, T, C]
-
-        # 1. Standard Metric (Last Timestep)
-        batch_idx = torch.arange(flux.size(0), device=device)
-        last_idx = (lengths - 1).clamp(min=0)
-        final_logits = torch.log(probs_seq[batch_idx, last_idx] + 1e-9)
-        
-        loss = F.nll_loss(final_logits, labels, weight=class_weights, reduction='sum')
-        total_loss += loss.item()
-        
-        preds = final_logits.argmax(dim=1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-        # 2. Causality Audit
-        if check_early_detection:
-            all_preds = probs_seq.argmax(dim=2) # [B, T]
-            
-            for b in range(flux.size(0)):
-                seq_len = lengths[b].item()
-                true_lbl = labels[b].item()
-                
-                for m in milestones:
-                    # Calculate index for percentage of light curve
-                    target_idx = min(int(seq_len * m), seq_len - 1)
-                    target_idx = max(0, target_idx)
-                    
-                    if all_preds[b, target_idx].item() == true_lbl:
-                        early_correct[m] += 1
-                        early_total[m] += 1
-
-    # DDP Sync
-    if dist.is_initialized():
-        metrics = torch.tensor([total_loss, correct, total], device=device)
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-        total_loss, correct, total = metrics.cpu().numpy()
-        
-        if check_early_detection:
-            for m in milestones:
-                e_metrics = torch.tensor([early_correct[m], early_total[m]], device=device)
-                dist.all_reduce(e_metrics, op=dist.ReduceOp.SUM)
-                ec, et = e_metrics.cpu().numpy()
-                early_correct[m], early_total[m] = ec, et
-
-    results = {
-        'loss': total_loss / max(total, 1), # Approx average
-        'accuracy': correct / max(total, 1)
-    }
-    
-    if check_early_detection:
-        results['early_stats'] = {m: early_correct[m]/max(early_total[m], 1) for m in milestones}
-
-    return results
-
-# =============================================================================
-# DATA LOADING (NPZ)
-# =============================================================================
-def load_npz_data(path, rank, logger):
+def load_and_preprocess_data(path: str, rank: int, logger: logging.Logger):
+    """Loads NPZ, calculates stats on TRAIN split only to avoid leakage."""
     if rank == 0: logger.info(f"Loading raw data from {path}...")
     try:
         data = np.load(path, allow_pickle=True)
+        flux = data['flux'] if 'flux' in data else data['X']
+        labels = data['labels'] if 'labels' in data else data['y']
+        dt = data['delta_t'] if 'delta_t' in data else np.zeros_like(flux)
+        
+        # Split first
+        flux_tr, flux_val, dt_tr, dt_val, y_tr, y_val = train_test_split(
+            flux, dt, labels, test_size=0.1, stratify=labels, random_state=SEED
+        )
+        
+        # Calculate Stats on Train ONLY (Data Safety)
+        flat_flux = flux_tr.flatten()
+        valid_mask = flat_flux != 0
+        valid_flux = flat_flux[valid_mask]
+        
+        median = np.median(valid_flux)
+        q75, q25 = np.percentile(valid_flux, [75 ,25])
+        iqr = q75 - q25
+        
+        stats = {'median': median, 'iqr': iqr}
+        
+        if rank == 0:
+            logger.info(f"Data Stats (Train): Median={median:.4f}, IQR={iqr:.4f}")
+            
+        return (flux_tr, dt_tr, y_tr), (flux_val, dt_val, y_val), stats
+
     except Exception as e:
-        if rank == 0: logger.error(f"Failed to load data: {e}")
+        if rank == 0: logger.error(f"Data load failed: {e}")
         sys.exit(1)
 
-    flux = data.get('flux', data.get('X'))
-    if flux is None: raise KeyError("Missing 'flux' or 'X'")
-    if flux.ndim == 3: flux = flux.squeeze(1)
+# =============================================================================
+# METRICS & CHECKPOINTING
+# =============================================================================
 
-    labels = data.get('labels', data.get('y'))
-    if labels is None: raise KeyError("Missing 'labels' or 'y'")
+class MetricTracker:
+    """Calculates F1/Precision/Recall in a DDP-safe way."""
+    def __init__(self, n_classes, device):
+        self.n_classes = n_classes
+        self.device = device
+        self.reset()
+
+    def reset(self):
+        self.tp = torch.zeros(self.n_classes, device=self.device)
+        self.fp = torch.zeros(self.n_classes, device=self.device)
+        self.fn = torch.zeros(self.n_classes, device=self.device)
+
+    def update(self, preds, targets):
+        for c in range(self.n_classes):
+            self.tp[c] += ((preds == c) & (targets == c)).sum()
+            self.fp[c] += ((preds == c) & (targets != c)).sum()
+            self.fn[c] += ((preds != c) & (targets == c)).sum()
+
+    def compute(self):
+        # DDP Reduction: Sum counts across all GPUs
+        if dist.is_initialized():
+            dist.all_reduce(self.tp, op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.fp, op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.fn, op=dist.ReduceOp.SUM)
+
+        # Calculate per-class metrics
+        precision = self.tp / (self.tp + self.fp + 1e-8)
+        recall = self.tp / (self.tp + self.fn + 1e-8)
+        f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+        
+        return {
+            "accuracy": self.tp.sum() / (self.tp.sum() + self.fp.sum() + 1e-8),
+            "macro_f1": f1.mean(),
+            "macro_prec": precision.mean(),
+            "macro_rec": recall.mean()
+        }
+
+def save_checkpoint(state, is_best, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    torch.save(state, output_dir / "last.pt")
+    if is_best:
+        torch.save(state, output_dir / "best.pt")
+
+# =============================================================================
+# TRAINING ENGINE
+# =============================================================================
+
+def train_epoch(model, loader, optimizer, scaler, device, rank, epoch, logger):
+    model.train()
+    total_loss = torch.tensor(0.0, device=device)
     
-    # Delta T Handling
-    if 'delta_t' in data:
-        delta_t = data['delta_t']
-        if delta_t.ndim == 3: delta_t = delta_t.squeeze(1)
-    elif 'timestamps' in data:
-        ts = data['timestamps']
-        if ts.ndim == 1: ts = np.tile(ts, (len(flux), 1))
-        delta_t = create_delta_t_from_timestamps(ts)
-    else:
-        if rank == 0: logger.warning("No time data found. Using dummy dt=1.0.")
-        delta_t = np.ones_like(flux)
-        delta_t[:, 0] = 0.0
+    iterator = tqdm(loader, desc=f"Train Ep {epoch}", disable=not is_main_process(rank))
+    optimizer.zero_grad(set_to_none=True)
 
-    return flux, delta_t, labels
+    for step, (flux, dt, lengths, labels) in enumerate(iterator):
+        flux, dt = flux.to(device, non_blocking=True), dt.to(device, non_blocking=True)
+        lengths, labels = lengths.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        
+        with autocast():
+            out = model(flux, dt, lengths=lengths, return_all_timesteps=True)
+            
+            B = flux.size(0)
+            last_idx = (lengths - 1).clamp(min=0).view(B, 1, 1).expand(B, 1, out['logits'].size(2))
+            final_logits = out['logits'].gather(1, last_idx).squeeze(1)
+            
+            loss = F.cross_entropy(final_logits, labels) / ACCUMULATE_STEPS
+
+        scaler.scale(loss).backward()
+        
+        if (step + 1) % ACCUMULATE_STEPS == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+        
+        total_loss += loss.item() * ACCUMULATE_STEPS
+            
+    if dist.is_initialized():
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        
+    avg_loss = total_loss / dist.get_world_size() / len(loader)
+    return avg_loss.item()
+
+@torch.no_grad()
+def evaluate(model, loader, device, n_classes):
+    model.eval()
+    tracker = MetricTracker(n_classes, device)
+    
+    for flux, dt, lengths, labels in loader:
+        flux, dt = flux.to(device, non_blocking=True), dt.to(device, non_blocking=True)
+        lengths, labels = lengths.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        
+        with autocast():
+            out = model(flux, dt, lengths=lengths, return_all_timesteps=False)
+            preds = out['probs'].argmax(dim=1)
+            
+        tracker.update(preds, labels)
+        
+    return tracker.compute()
 
 # =============================================================================
-# MAIN EXECUTION
+# MAIN
 # =============================================================================
+
 def main():
-    parser = argparse.ArgumentParser(description="Hardened Causal Hybrid Trainer")
-    parser.add_argument('--experiment_name', type=str, required=True, help="ID for folder creation")
-    parser.add_argument('--data', required=True, help="Path to .npz file")
-    parser.add_argument('--val_data', default=None, help="Optional validation .npz")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--experiment_name', type=str, required=True)
+    parser.add_argument('--data', type=str, required=True)
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=DEFAULT_LR)
-    parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--debug', action='store_true', help="Enable debug logging")
-    
-    # Model Hyperparams
-    parser.add_argument('--d_model', type=int, default=16)
-    parser.add_argument('--n_heads', type=int, default=4)
-    parser.add_argument('--n_layers', type=int, default=1)
-    
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--d_model', type=int, default=512)
+    parser.add_argument('--layers', type=int, default=6)
+    parser.add_argument('--resume', type=str, default=None, help="Path to checkpoint (last.pt)")
     args = parser.parse_args()
     
-    # 1. Setup Distributed Environment
+    # 1. Setup DDP
     rank, local_rank, world_size, is_ddp = setup_distributed()
-    device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{local_rank}')
     
-    # 2. Setup Directories (Parent/Results/Exp_Name_Timestamp)
-    # Locates script directory, goes up to parent, then into results
+    # 2. Logging & Output
     current_script_dir = Path(__file__).resolve().parent
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_folder = f"{args.experiment_name}_{timestamp}"
+    output_dir = current_script_dir.parent / 'results' / args.experiment_name
     
-    # Logic: ../results/<exp_name>
-    output_dir = current_script_dir.parent / 'results' / experiment_folder
+    if is_main_process(rank):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+    if is_ddp: dist.barrier()
+    logger = get_logger(rank, output_dir)
     
     if rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Wait for master to create dir
-    if is_ddp: dist.barrier()
-
-    # 3. Setup Logging
-    logger = setup_logging(rank, output_dir, args.debug)
-    
-    try:
-        if rank == 0:
-            logger.info(f"🚀 Starting Training | DDP: {is_ddp} | World: {world_size} | Device: {device}")
-            logger.info(f"📁 Output Directory: {output_dir}")
-            logger.info(f"⚙️  Params: d_model={args.d_model}, layers={args.n_layers}, clip={CLIP_NORM}")
-
-        # 4. Load Data
-        flux, dt, labels = load_npz_data(args.data, rank, logger)
-        n_classes = len(np.unique(labels))
-
-        # Split Data (Stratified)
-        if args.val_data:
-            flux_val, dt_val, labels_val = load_npz_data(args.val_data, rank, logger)
-            flux_train, dt_train, labels_train = flux, dt, labels
-        else:
-            if rank == 0: logger.info("Splitting data 80/20...")
-            flux_train, flux_val, dt_train, dt_val, labels_train, labels_val = train_test_split(
-                flux, dt, labels, test_size=0.2, stratify=labels, random_state=SEED
-            )
-
-        # Datasets & Samplers
-        train_ds = MicrolensingDataset(flux_train, dt_train, labels_train)
-        val_ds = MicrolensingDataset(flux_val, dt_val, labels_val)
-
-        train_sampler = DistributedSampler(train_ds) if is_ddp else None
+        logger.info(f"🚀 Starting DDP Training | GPUs: {world_size} | AMP: True")
         
-        train_loader = DataLoader(
-            train_ds, batch_size=args.batch_size, sampler=train_sampler,
-            shuffle=(train_sampler is None), collate_fn=collate_fn, 
-            pin_memory=True, num_workers=4 if torch.cuda.is_available() else 0
-        )
-        val_loader = DataLoader(
-            val_ds, batch_size=args.batch_size, collate_fn=collate_fn, 
-            pin_memory=True, num_workers=4 if torch.cuda.is_available() else 0
-        )
+    # 3. Data Loading
+    (tr_data, val_data, stats) = load_and_preprocess_data(args.data, rank, logger)
+    train_ds = MicrolensingDataset(*tr_data, stats=stats)
+    val_ds = MicrolensingDataset(*val_data, stats=stats)
+    
+    train_sampler = DistributedSampler(train_ds) if is_ddp else None
+    
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, sampler=train_sampler,
+        shuffle=(train_sampler is None), num_workers=NUM_WORKERS,
+        pin_memory=True, prefetch_factor=PREFETCH_FACTOR, persistent_workers=True
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=NUM_WORKERS,
+        pin_memory=True, persistent_workers=True
+    )
 
-        # 5. Initialize Model
-        config = CausalConfig(
-            d_model=args.d_model, n_heads=args.n_heads, 
-            n_transformer_layers=args.n_layers, n_classes=n_classes,
-            dropout=args.dropout
-        )
-        model = CausalHybridModel(config).to(device)
+    # 4. Model Setup
+    n_classes = len(torch.unique(train_ds.labels))
+    config = CausalConfig(
+        d_model=args.d_model, 
+        n_transformer_layers=args.layers,
+        n_conv_layers=4,
+        n_classes=n_classes
+    )
+    model = CausalHybridModel(config).to(device)
+    
+    if is_ddp:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
         
-        if rank == 0:
-            logger.info(f"🧠 Model Parameters: {count_parameters(model):,}")
-            # Save Config
-            with open(output_dir / 'config.json', 'w') as f:
-                json.dump(config.__dict__, f, indent=4)
-
-        if is_ddp:
-            model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-
-        # 6. Optimization Setup
-        class_weights = compute_class_weights(labels_train, n_classes).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-        # Scaler removed for FP32 training
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=5, verbose=(rank==0)
-        )
-
-        # Loop Vars
-        best_acc = 0.0
-        patience_counter = 0
-        loss_history = []
-        history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
-
-        # --- MAIN TRAINING LOOP ---
-        for epoch in range(1, args.epochs + 1):
-            if train_sampler: train_sampler.set_epoch(epoch)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=DEFAULT_LR, weight_decay=1e-4)
+    scaler = GradScaler()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+    
+    # 5. Resume Logic
+    start_epoch = 1
+    best_f1 = 0.0
+    
+    if args.resume and os.path.exists(args.resume):
+        if rank == 0: logger.info(f"🔄 Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        
+        state_dict = checkpoint['model_state_dict']
+        if is_ddp and not list(state_dict.keys())[0].startswith('module.'):
+            state_dict = {f'module.{k}': v for k, v in state_dict.items()}
             
-            # TRAIN
-            t_loss, t_acc, nans = train_epoch(
-                model, train_loader, optimizer, class_weights, device, rank, epoch, logger
+        model.load_state_dict(state_dict)
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_f1 = checkpoint.get('best_f1', 0.0)
+        
+        if rank == 0: logger.info(f"✅ Loaded. Starting at Epoch {start_epoch}")
+
+    # 6. Training Loop
+    for epoch in range(start_epoch, args.epochs + 1):
+        if is_ddp: train_sampler.set_epoch(epoch)
+        
+        t_loss = train_epoch(model, train_loader, optimizer, scaler, device, rank, epoch, logger)
+        metrics = evaluate(model, val_loader, device, n_classes)
+        
+        scheduler.step(metrics['macro_f1'])
+        
+        if is_main_process(rank):
+            logger.info(
+                f"Ep {epoch}/{args.epochs} | "
+                f"Loss: {t_loss:.4f} | "
+                f"F1: {metrics['macro_f1']:.4f} | "
+                f"Acc: {metrics['accuracy']:.4f} | "
+                f"LR: {optimizer.param_groups[0]['lr']:.2e}"
             )
-
-            # EVAL (Full Audit every 5 epochs)
-            is_audit_epoch = (epoch % 5 == 0) or (epoch == args.epochs)
-            val_res = evaluate(
-                model, val_loader, class_weights, device, rank, check_early_detection=is_audit_epoch
-            )
             
-            # Loss Spike Recovery
-            loss_history.append(val_res['loss'])
-            if detect_loss_spike(val_res['loss'], loss_history):
-                if rank == 0: logger.warning("⚠️  Loss Spike Detected! Cutting LR by half to stabilize.")
-                for pg in optimizer.param_groups: pg['lr'] *= 0.5
+            is_best = metrics['macro_f1'] > best_f1
+            if is_best: best_f1 = metrics['macro_f1']
             
-            # Step Scheduler based on Accuracy
-            scheduler.step(val_res['accuracy'])
+            save_checkpoint({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'best_f1': best_f1,
+                'config': config
+            }, is_best, output_dir)
 
-            # Record History
-            if rank == 0:
-                history['train_loss'].append(t_loss)
-                history['val_loss'].append(val_res['loss'])
-                history['val_acc'].append(val_res['accuracy'])
-                
-                log_msg = (f"Ep {epoch:02d} | T.Loss: {t_loss:.4f} | T.Acc: {t_acc:.4f} "
-                           f"| V.Loss: {val_res['loss']:.4f} | V.Acc: {val_res['accuracy']:.4f} | NaNs: {nans}")
-                logger.info(log_msg)
-
-                if is_audit_epoch:
-                    stats = val_res['early_stats']
-                    logger.info(f"   [Audit] Acc @ 20%: {stats[0.2]:.2f} | 50%: {stats[0.5]:.2f} | 100%: {stats[1.0]:.2f}")
-
-                # Save Checkpoints
-                save_model = model.module if is_ddp else model
-                
-                # Save Best
-                if val_res['accuracy'] > best_acc:
-                    best_acc = val_res['accuracy']
-                    patience_counter = 0
-                    torch.save({
-                        'model_state_dict': save_model.state_dict(),
-                        'config': config.__dict__,
-                        'history': history
-                    }, output_dir / "best_model.pt")
-                    logger.info("   💾 New Best Model Saved.")
-                else:
-                    patience_counter += 1
-            
-            # Sync Patience across ranks (simple barrier logic or explicit broadcast recommended for strictness)
-            # Here allowing slight desync in logging, but stops should happen roughly together via max epochs usually.
-            
-            if patience_counter >= 25:
-                if rank == 0: logger.info("🛑 Early stopping triggered (No improvement for 25 epochs).")
-                break
-
-        # Save Final
-        if rank == 0:
-            save_model = model.module if is_ddp else model
-            torch.save({
-                'model_state_dict': save_model.state_dict(),
-                'config': config.__dict__,
-                'history': history
-            }, output_dir / "final_model.pt")
-            
-            # Save History JSON
-            with open(output_dir / 'history.json', 'w') as f:
-                json.dump(history, f, indent=4)
-            
-            logger.info("Training Complete.")
-
-    finally:
-        # Graceful Exit
-        cleanup_distributed()
-        if rank == 0:
-            logger.info("👋 Process Terminated.")
+    cleanup_distributed()
 
 if __name__ == '__main__':
     main()
