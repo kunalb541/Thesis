@@ -20,7 +20,7 @@ Usage:
     python evaluate.py --experiment_name "exp_id" --data "../data/test.npz"
 
 Author: Kunal Bhatia
-Version: 3.5.0
+Version: 1.0
 Date: December 2025
 """
 
