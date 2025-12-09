@@ -16,7 +16,8 @@ Usage:
     # Resume after crash
     torchrun --nproc_per_node=4 train.py --experiment_name "exp_final" --data "data.npz" --resume "results/exp_final_.../last.pt"
 
-Author: Senior PyTorch Engineer
+Author: Kunal Bhatia
+Version: 1.0
 Date: December 2025
 """
 
