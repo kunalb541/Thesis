@@ -70,7 +70,7 @@ class ContinuousSinusoidalEncoding(nn.Module):
         delta_t = torch.clamp(delta_t, min=0.0)
         time_val = torch.nan_to_num(delta_t, nan=eps, posinf=self.max_timescale, neginf=eps)
         time_val = torch.clamp(time_val, min=eps, max=self.max_timescale)
-        
+        time_val = torch.log1p(delta_t + 1e-6)
         time_val = time_val.unsqueeze(-1)
         scaled_time = time_val * self.div_term
         pe_sin = torch.sin(scaled_time)
@@ -258,7 +258,7 @@ class CausalHybridModel(nn.Module):
         )
         
         # FIXED: Initialize to 1.0, but clamp logic applied in forward
-        self.temperature = nn.Parameter(torch.ones(1))
+        self.log_temperature = nn.Parameter(torch.zeros(1))
 
     def create_padding_mask_from_lengths(self, lengths: torch.Tensor, 
                                      max_len: int) -> torch.Tensor:
@@ -349,8 +349,8 @@ class CausalHybridModel(nn.Module):
             logits = self.classifier(final_hidden)
             
         # --- FIXED: Clamp temperature to prevent numerical cheating ---
-        clamped_temp = torch.clamp(self.temperature, min=0.5, max=5.0)
-        scaled_logits = logits / clamped_temp
+        temperature = torch.exp(self.log_temperature).clamp(min=0.5, max=2.0)
+        scaled_logits = logits / temperature
         
         if return_all_timesteps:
             probs = F.softmax(scaled_logits, dim=2)
