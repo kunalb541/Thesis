@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-"""
-Microlensing Light Curve Simulation
-
-Generates synthetic photometric time-series data for gravitational microlensing events.
-Produces labeled datasets containing Single Lens (PSPL), Binary Lens, and Flat (noise-only) classes.
-
-Simulation Parameters:
-- Physical Models: Point Source Point Lens (Paczynski) and Binary Lens equations.
-- Sampling: random t0 injection, irregular cadence simulation.
-- Noise Model: Gaussian photometric noise added to flux.
-- Parameters: Samples impact parameter (u0), crossing time (tE), mass ratio (q), and separation (s).
-
-Output:
-- Saves compressed .npz files containing Flux, Delta_t, Labels, and Parameter Metadata.
-
-Author: Kunal Bhatia
-Version: 1.0
-Date: December 2025
-"""
-
 import numpy as np
 import argparse
 from tqdm import tqdm
@@ -70,7 +49,7 @@ class SimConfig:
     BASELINE_MIN = 19.0
     BASELINE_MAX = 21.0        # Tighter baseline range to focus on amplification
     
-    PAD_VALUE = -1.0
+    PAD_VALUE = 0
 
 
 class PSPLParams:
