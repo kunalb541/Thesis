@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HPC Distributed Training Script (DDP + AMP) - THESIS EDITION
+HPC Distributed Training Script (
 
 Features:
 - DDP (Distributed Data Parallel) on 40+ GPUs.
@@ -8,13 +8,6 @@ Features:
 - RESUME capability (checkpoints).
 - Advanced Metrics (F1, Precision, Recall) via distributed reduction.
 - Robust Data Normalization (Median/IQR) & NaN handling.
-
-Usage:
-    # Fresh Run
-    torchrun --nproc_per_node=4 train.py --experiment_name "exp_final" --data "data.npz"
-
-    # Resume after crash
-    torchrun --nproc_per_node=4 train.py --experiment_name "exp_final" --data "data.npz" --resume "results/exp_final_.../last.pt"
 
 Author: Kunal Bhatia
 Version: 1.0
