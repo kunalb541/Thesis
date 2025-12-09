@@ -139,7 +139,7 @@ class StrictCausalAttention(nn.Module):
         n_k = k.size(2)
         causal_mask = self._create_strict_causal_mask(N, n_k, x.device, query_offset)
         
-        scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), -1e9)
+        scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), -1e4)
         
         # --- FIXED: Logic for Padding Mask in Incremental Mode ---
         if padding_mask is not None:
@@ -173,7 +173,7 @@ class StrictCausalAttention(nn.Module):
 
             # Apply mask
             key_mask = full_padding_mask.unsqueeze(1).unsqueeze(2)
-            scores = scores.masked_fill(~key_mask, -1e9)
+            scores = scores.masked_fill(~key_mask, float('-inf'))
         
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
