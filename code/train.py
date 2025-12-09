@@ -477,7 +477,7 @@ def main():
         config = CausalConfig(
             d_model=args.d_model, n_heads=args.n_heads, 
             n_transformer_layers=args.n_layers, n_classes=n_classes,
-            max_len=flux_train.shape[1], dropout=args.dropout
+            dropout=args.dropout
         )
         model = CausalHybridModel(config).to(device)
         
