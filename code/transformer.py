@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Strictly Causal Hybrid GRU-Transformer for LIVE Detection
+Hybrid GRU-Transformer Architecture
 
-CHANGES:
-1. GHOST ARTIFACTS: Added post-LayerNorm masking to ensure padding remains strict zero.
-2. CACHE INTEGRITY: Incremental state now caches padding masks, not just KV pairs.
-3. TEMP CLAMP: Constrained temperature to prevent confidence collapse.
-4. GRU GUARD: Explicit logic to stop hidden state updates on padding during incremental steps.
+Defines a PyTorch module combining a Gated Recurrent Unit (GRU) for local 
+temporal processing and a Transformer Decoder for long-range dependency modeling.
+Enforces strict causality via attention masking.
+
+Key Implementation Details:
+- Input Embedding: Projects flux and delta_t into d_model dimensions.
+- Recurrent Layer: GRU processes sequential inputs to form a hidden state.
+- Attention Mechanism: Causal Transformer Decoder with look-ahead masking.
+- Padding Logic: Post-LayerNorm masking ensures zero-contribution from padded indices.
+- Inference Caching: Supports incremental state updates (KV-caching) for step-by-step inference.
+- Stabilization: Temperature scaling applied to final logits.
 
 Author: Kunal Bhatia
-Version: 1.0 
+Version: 1.0
 Date: December 2025
 """
 
