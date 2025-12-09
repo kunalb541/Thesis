@@ -49,7 +49,7 @@ class SimConfig:
     BASELINE_MIN = 19.0
     BASELINE_MAX = 21.0        # Tighter baseline range to focus on amplification
     
-    PAD_VALUE = 0
+    PAD_VALUE = 0.0
 
 
 class PSPLParams:
