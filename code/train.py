@@ -3,12 +3,12 @@
 Distributed Training Script for Causal Hybrid Architecture
 
 Executes the training loop for the CausalHybridModel using PyTorch DistributedDataParallel (DDP).
-Handles data loading, mixed-precision optimization, and artifact management.
+Handles data loading, FP32 optimization, and artifact management.
 
 Operational Logic:
 - Distributed Computing: Rank-0 logging and DDP process group initialization.
-- Optimization: AdamW optimizer with Automatic Mixed Precision (AMP) scaling.
-- Gradient Management: Unscales gradients and applies clipping (norm=1.0) before stepping.
+- Optimization: AdamW optimizer (Standard FP32).
+- Gradient Management: Standard backward pass and clipping (norm=1.0) before stepping.
 - Validation: Periodically evaluates model on validation set; calculates causality leakage metrics.
 - Error Handling: Detects loss spikes (>2.5x moving average) and triggers LR reduction.
 - Output: Saves checkpoints (best/final) and configuration to '../results/<experiment_name>_<timestamp>'.
@@ -17,7 +17,7 @@ Usage:
     python train_causal_experiment.py --experiment_name "exp01" --data "../data/train.npz"
 
 Author: Kunal Bhatia
-Version: 1.0
+Version: 1.1 (No-AMP)
 Date: December 2025
 """
 
@@ -35,7 +35,6 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.cuda.amp import GradScaler, autocast
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from tqdm import tqdm
@@ -179,9 +178,9 @@ def detect_loss_spike(current_loss, loss_history, threshold=SPIKE_THRESHOLD):
     return current_loss > (threshold * recent_avg)
 
 # =============================================================================
-# TRAINING ENGINE (With AMP & Gradient Clipping)
+# TRAINING ENGINE (Standard FP32 with Gradient Clipping)
 # =============================================================================
-def train_epoch(model, loader, optimizer, scaler, class_weights, device, rank, epoch, logger):
+def train_epoch(model, loader, optimizer, class_weights, device, rank, epoch, logger):
     model.train()
     
     total_loss = 0.0
@@ -204,41 +203,36 @@ def train_epoch(model, loader, optimizer, scaler, class_weights, device, rank, e
         lengths = lengths.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # --- Forward (Autocast) ---
-        with autocast(enabled=True):
-            # We assume model returns a dict with 'probs' or 'logits'
-            # return_all_timesteps=True gives [B, T, Classes]
-            out = model(flux, delta_t, lengths=lengths, return_all_timesteps=True)
-            
-            # Extract last valid timestep for classification training
-            batch_idx = torch.arange(flux.size(0), device=device)
-            last_idx = (lengths - 1).clamp(min=0)
-            
-            # Use LogSoftmax for stability with NLLLoss or CrossEntropy
-            # The model output 'probs' is Softmaxed. 
-            final_probs = out['probs'][batch_idx, last_idx]
-            final_logits = torch.log(final_probs + 1e-9) 
-            
-            # Loss calculation
-            loss = F.nll_loss(final_logits, labels, weight=class_weights, reduction='mean')
-            norm_loss = loss / ACCUMULATE_STEPS
+        # --- Forward (Standard FP32) ---
+        # We assume model returns a dict with 'probs' or 'logits'
+        # return_all_timesteps=True gives [B, T, Classes]
+        out = model(flux, delta_t, lengths=lengths, return_all_timesteps=True)
+        
+        # Extract last valid timestep for classification training
+        batch_idx = torch.arange(flux.size(0), device=device)
+        last_idx = (lengths - 1).clamp(min=0)
+        
+        # Use LogSoftmax for stability with NLLLoss or CrossEntropy
+        # The model output 'probs' is Softmaxed. 
+        final_probs = out['probs'][batch_idx, last_idx]
+        final_logits = torch.log(final_probs + 1e-9) 
+        
+        # Loss calculation
+        loss = F.nll_loss(final_logits, labels, weight=class_weights, reduction='mean')
+        norm_loss = loss / ACCUMULATE_STEPS
 
-        # --- Backward (Scaler) ---
-        scaler.scale(norm_loss).backward()
+        # --- Backward (Standard) ---
+        norm_loss.backward()
         accum_loss += loss.item()
 
         # --- Optimizer Step (With Clipping) ---
         if (step + 1) % ACCUMULATE_STEPS == 0:
-            # 1. Unscale gradients to allow clipping
-            scaler.unscale_(optimizer)
-            
-            # 2. Clip Gradients
+            # 1. Clip Gradients
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
 
-            # 3. Step if finite
+            # 2. Step if finite
             if torch.isfinite(grad_norm):
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
             else:
                 nan_count += 1
                 if rank == 0 and logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -336,7 +330,7 @@ def evaluate(model, loader, class_weights, device, rank, check_early_detection=F
                     
                     if all_preds[b, target_idx].item() == true_lbl:
                         early_correct[m] += 1
-                    early_total[m] += 1
+                        early_total[m] += 1
 
     # DDP Sync
     if dist.is_initialized():
@@ -493,7 +487,7 @@ def main():
         # 6. Optimization Setup
         class_weights = compute_class_weights(labels_train, n_classes).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-        scaler = GradScaler()
+        # Scaler removed for FP32 training
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.5, patience=5, verbose=(rank==0)
         )
@@ -510,7 +504,7 @@ def main():
             
             # TRAIN
             t_loss, t_acc, nans = train_epoch(
-                model, train_loader, optimizer, scaler, class_weights, device, rank, epoch, logger
+                model, train_loader, optimizer, class_weights, device, rank, epoch, logger
             )
 
             # EVAL (Full Audit every 5 epochs)
