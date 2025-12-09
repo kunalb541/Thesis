@@ -3,9 +3,9 @@
 HPC Distributed Training Script (
 
 Features:
-- DDP (Distributed Data Parallel) on 40+ GPUs.
-- AMP (Automatic Mixed Precision) for 2x speedup.
-- RESUME capability (checkpoints).
+- DDP (Distributed Data Parallel) 
+- AMP (Automatic Mixed Precision) 
+- RESUME capability (checkpoints)
 - Advanced Metrics (F1, Precision, Recall) via distributed reduction.
 - Robust Data Normalization (Median/IQR) & NaN handling.
 
