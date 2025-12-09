@@ -171,10 +171,13 @@ def compute_class_weights(labels, n_classes):
 
 def detect_loss_spike(current_loss, loss_history, threshold=SPIKE_THRESHOLD):
     """Heuristic to detect if loss has exploded relative to recent history."""
-    if len(loss_history) < 5: return False
-    recent_avg = np.mean(loss_history[-5:])
+    min_history = 10  # increased from 5
+    if len(loss_history) < min_history:
+        return False
+    recent_avg = np.mean(loss_history[-min_history:])
     # Guard against divide by zero if loss is extremely small
-    if recent_avg < 1e-6: return False
+    if recent_avg < 1e-6:
+        return False
     return current_loss > (threshold * recent_avg)
 
 # =============================================================================
