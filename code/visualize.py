@@ -48,7 +48,7 @@ warnings.filterwarnings("ignore")
 try:
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
-    from causal_hybrid_model import CausalHybridModel, CausalConfig
+    from transformer import CausalHybridModel, CausalConfig
     
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
