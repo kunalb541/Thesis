@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Microlensing Event Simulation for Transformer
+Microlensing Light Curve Simulation
 
-Generates realistic microlensing light curves with proper temporal encoding.
-Wide t0 sampling ensures temporal invariance without interpolation artifacts.
+Generates synthetic photometric time-series data for gravitational microlensing events.
+Produces labeled datasets containing Single Lens (PSPL), Binary Lens, and Flat (noise-only) classes.
 
-Optimized for High Performance Computing (HPC).
+Simulation Parameters:
+- Physical Models: Point Source Point Lens (Paczynski) and Binary Lens equations.
+- Sampling: random t0 injection, irregular cadence simulation.
+- Noise Model: Gaussian photometric noise added to flux.
+- Parameters: Samples impact parameter (u0), crossing time (tE), mass ratio (q), and separation (s).
+
+Output:
+- Saves compressed .npz files containing Flux, Delta_t, Labels, and Parameter Metadata.
 
 Author: Kunal Bhatia
 Version: 1.0
