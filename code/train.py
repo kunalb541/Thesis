@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Rugged Causal Hybrid Training Script 
-ARCHITECTURE: Hybrid GRU-Transformer (Strictly Causal)
-FEATURES:
-- Rank-0 Only Logging (Cleaner Output)
-- Correct AMP Logic (Unscale -> Clip -> Step)
-- "Mischief-Proof" Causality Auditing
-- Auto-Recovery on Loss Spikes
-- Graceful DDP Shutdown
-- Parent Directory Result Storage
+Distributed Training Script for Causal Hybrid Architecture
+
+Executes the training loop for the CausalHybridModel using PyTorch DistributedDataParallel (DDP).
+Handles data loading, mixed-precision optimization, and artifact management.
+
+Operational Logic:
+- Distributed Computing: Rank-0 logging and DDP process group initialization.
+- Optimization: AdamW optimizer with Automatic Mixed Precision (AMP) scaling.
+- Gradient Management: Unscales gradients and applies clipping (norm=1.0) before stepping.
+- Validation: Periodically evaluates model on validation set; calculates causality leakage metrics.
+- Error Handling: Detects loss spikes (>2.5x moving average) and triggers LR reduction.
+- Output: Saves checkpoints (best/final) and configuration to '../results/<experiment_name>_<timestamp>'.
+
+Usage:
+    python train_causal_experiment.py --experiment_name "exp01" --data "../data/train.npz"
 
 Author: Kunal Bhatia
 Version: 1.0
