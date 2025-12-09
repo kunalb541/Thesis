@@ -33,12 +33,12 @@ logger = logging.getLogger("kunal_bhatia_v2_hardened")
 
 @dataclass
 class CausalConfig:
-    d_model: int = 128
-    n_heads: int = 8
-    n_transformer_layers: int = 2
+    d_model: int = 16
+    n_heads: int = 4
+    n_transformer_layers: int = 1
     n_gru_layers: int = 1
-    dropout: float = 0.1
-    attention_window: int = 64
+    dropout: float = 0.2
+    attention_window: int = 5
     n_classes: int = 3
     
     use_incremental_state: bool = True

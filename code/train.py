@@ -406,9 +406,9 @@ def main():
     parser.add_argument('--debug', action='store_true', help="Enable debug logging")
     
     # Model Hyperparams
-    parser.add_argument('--d_model', type=int, default=128)
-    parser.add_argument('--n_heads', type=int, default=8)
-    parser.add_argument('--n_layers', type=int, default=2)
+    parser.add_argument('--d_model', type=int, default=16)
+    parser.add_argument('--n_heads', type=int, default=4)
+    parser.add_argument('--n_layers', type=int, default=1)
     
     args = parser.parse_args()
     
