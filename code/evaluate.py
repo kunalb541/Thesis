@@ -15,7 +15,7 @@ Functional Overview:
   - Parameter Dependency: Analyzes classification accuracy as a function of impact parameter (u0).
 
 Usage:
-    python visualize.py --experiment_name "exp_id" --data "../data/test.npz"
+    python evaluate.py --experiment_name "exp_id" --data "../data/test.npz"
 
 Author: Kunal Bhatia
 Version: 1.0
