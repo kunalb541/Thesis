@@ -59,6 +59,12 @@ class CausalConv1d(nn.Module):
             nn.init.constant_(self.conv.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, C, T) tensor
+        Returns:
+            (B, C, T) tensor
+        """
         if self.padding > 0:
             x = F.pad(x, (self.padding, 0))
         out = self.conv(x)
@@ -66,7 +72,9 @@ class CausalConv1d(nn.Module):
 
 class ResidualCausalBlock(nn.Module):
     """
-    Residual block with two causal convolutions, layer norms, and GELU activation.
+    Residual block with two causal convolutions and layer normalization.
+    Operates entirely in (B, C, T) format to minimize transpose operations.
+    Uses LayerNorm instead of BatchNorm for DDP stability with small per-GPU batches.
     """
     def __init__(self, d_model: int, kernel_size: int, dilation: int, dropout: float):
         super().__init__()
@@ -77,16 +85,24 @@ class ResidualCausalBlock(nn.Module):
         self.conv2 = CausalConv1d(d_model, d_model, kernel_size, dilation, dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, C, T) tensor
+        Returns:
+            (B, C, T) tensor
+        """
         residual = x
-        z = self.norm1(x)
-        z = z.transpose(1, 2)
+        # LayerNorm expects (B, T, C), so transpose before and after
+        z = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
+        z = self.norm1(z)
+        z = z.transpose(1, 2)  # (B, T, C) -> (B, C, T)
         z = self.conv1(z)
-        z = z.transpose(1, 2)
         z = self.act(z)
+        
+        z = z.transpose(1, 2)  # (B, C, T) -> (B, T, C)
         z = self.norm2(z)
-        z = z.transpose(1, 2)
+        z = z.transpose(1, 2)  # (B, T, C) -> (B, C, T)
         z = self.conv2(z)
-        z = z.transpose(1, 2)
         return residual + z
 
 # =============================================================================
@@ -106,6 +122,12 @@ class ContinuousSinusoidalEncoding(nn.Module):
         self.register_buffer('div_term', div_term)
 
     def forward(self, delta_t: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            delta_t: (B, T) tensor of time intervals
+        Returns:
+            (B, T, d_model) positional encoding tensor
+        """
         dt = delta_t.unsqueeze(-1) + 1e-6
         scaled = torch.log1p(dt) * self.div_term
         pe = torch.cat([torch.sin(scaled), torch.cos(scaled)], dim=-1)
@@ -125,9 +147,16 @@ class FlashCausalAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
-        self.dropout_p = dropout if self.training else 0.0
+        self.dropout_p = dropout
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: (B, T, C) input tensor
+            key_padding_mask: (B, T) boolean mask where True indicates padding
+        Returns:
+            (B, T, C) output tensor
+        """
         B, T, C = x.shape
         q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
@@ -147,8 +176,8 @@ class FlashCausalAttention(nn.Module):
             
             # Expand padding mask and merge with causal mask
             pad_mask_expanded = key_padding_mask.view(B, 1, 1, T).expand(B, self.n_heads, T, T)
-            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0).expand(B, self.n_heads, T, T)
-            attn_mask = attn_mask.masked_fill(pad_mask_expanded, float('-inf'))
+            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0).expand(B, self.n_heads, T, T).clone()
+            attn_mask.masked_fill_(pad_mask_expanded, float('-inf'))
 
             out = F.scaled_dot_product_attention(
                 q, k, v, 
@@ -172,6 +201,15 @@ class CausalHybridModel(nn.Module):
     
     Maintains strict causality: output at time t depends only on inputs <= t.
     Designed for real-time streaming inference on Roman Space Telescope data.
+    
+    NaN Handling Policy:
+        Input NaNs are replaced with 0.0 via torch.nan_to_num. This treats
+        missing observations as zero flux. Time encodings for padded positions
+        are also zeroed to ensure complete neutralization of padding information.
+    
+    DDP Considerations:
+        Uses LayerNorm instead of BatchNorm for stability with small per-GPU batches
+        in multi-GPU training scenarios (e.g., 40 GPUs with global batch size 64-128).
     """
     def __init__(self, config: CausalConfig):
         super().__init__()
@@ -194,7 +232,6 @@ class CausalHybridModel(nn.Module):
         
         # Calculate total receptive field for streaming inference
         self.receptive_field = self._calculate_receptive_field()
-        logger.info(f"Model receptive field: {self.receptive_field} timesteps")
             
         # Causal transformer layers
         self.transformer_layers = nn.ModuleList([
@@ -225,11 +262,16 @@ class CausalHybridModel(nn.Module):
         self.log_temperature = nn.Parameter(torch.tensor([0.0]))
     
     def _calculate_receptive_field(self) -> int:
-        """Calculate total receptive field of causal CNN layers."""
+        """
+        Calculate total receptive field of causal CNN layers.
+        For each residual block with two convolutions:
+        RF_new = RF_old + 2 * (kernel_size - 1) * dilation
+        """
         rf = 1
         dilation = 1
         for _ in range(self.config.n_conv_layers):
-            rf += (self.config.kernel_size - 1) * dilation * 2  # Two convs per block
+            # Each residual block has 2 causal convolutions
+            rf += 2 * (self.config.kernel_size - 1) * dilation
             dilation *= self.config.dilation_growth
         return rf
 
@@ -241,28 +283,36 @@ class CausalHybridModel(nn.Module):
         
         Args:
             flux: (B, T) flux measurements
-            delta_t: (B, T) time intervals
+            delta_t: (B, T) time intervals in days
             lengths: (B,) actual sequence lengths for variable-length inputs
             return_all_timesteps: If False, return only final timestep predictions
             
         Returns:
-            Dictionary containing 'logits' and 'probs' tensors
+            Dictionary containing:
+                'logits': (B, n_classes) or (B, T, n_classes) logits
+                'probs': (B, n_classes) or (B, T, n_classes) probabilities
         """
+        assert flux.ndim == 2, f"flux must be 2D (B, T), got shape {flux.shape}"
+        assert delta_t.ndim == 2, f"delta_t must be 2D (B, T), got shape {delta_t.shape}"
+        
         B, T = flux.shape
         device = flux.device
         
         # Create padding mask if lengths provided
         key_padding_mask = None
-        mask_float = torch.ones(B, T, 1, device=device)
+        mask_float = torch.ones(B, T, 1, device=device, dtype=flux.dtype)
         
         if lengths is not None:
             range_tensor = torch.arange(T, device=device).unsqueeze(0)
             key_padding_mask = range_tensor >= lengths.unsqueeze(1)
             mask_float = (~key_padding_mask).float().unsqueeze(-1)
             
-            # Zero out padded positions in input
+            # Zero out padded positions in input (NaN handling policy)
             flux = torch.nan_to_num(flux, 0.0)
             flux = flux * mask_float.squeeze(-1)
+            
+            # Zero out time encoding for padded positions
+            delta_t = delta_t * mask_float.squeeze(-1)
         
         # Embed flux and add time encoding
         flux_embedded = self.flux_proj(flux.unsqueeze(-1))
@@ -275,11 +325,19 @@ class CausalHybridModel(nn.Module):
         if lengths is not None:
             x = x * mask_float
         
-        # Causal CNN feature extraction
+        # Causal CNN feature extraction - single transpose in/out
+        x = x.transpose(1, 2)  # (B, T, C) -> (B, C, T)
+        
+        if lengths is not None:
+            # Prepare mask for CNN: (B, T, 1) -> (B, 1, T) -> broadcast to (B, C, T)
+            mask_cnn = mask_float.transpose(1, 2)  # (B, T, 1) -> (B, 1, T)
+        
         for block in self.feature_extractor:
             x = block(x)
             if lengths is not None:
-                x = x * mask_float
+                x = x * mask_cnn  # Broadcasts (B, 1, T) to (B, C, T)
+        
+        x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
         
         # Causal transformer layers
         for layer in self.transformer_layers:
@@ -299,8 +357,8 @@ class CausalHybridModel(nn.Module):
         logits = self.classifier(x)
         
         # Apply learnable temperature scaling
-        temp = torch.exp(self.log_temperature).clamp(min=0.1, max=5.0)
-        scaled_logits = logits / temp
+        temp = torch.exp(self.log_temperature)
+        scaled_logits = logits / (temp + 1e-8)
         
         # Return only final timestep if requested
         if not return_all_timesteps and lengths is not None:
@@ -320,3 +378,12 @@ class CausalHybridModel(nn.Module):
     def get_receptive_field(self) -> int:
         """Return the receptive field size for streaming inference buffer management."""
         return self.receptive_field
+    
+    def get_module_state_dict(self) -> Dict[str, torch.Tensor]:
+        """
+        Return state dict suitable for saving in DDP training.
+        If wrapped in DDP, strips the 'module.' prefix.
+        """
+        if hasattr(self, 'module'):
+            return self.module.state_dict()
+        return self.state_dict()
