@@ -73,11 +73,11 @@ class GRUConfig:
     hierarchical: bool = True
     use_residual: bool = True
     use_layer_norm: bool = True
-    feature_extraction: Literal["conv", "mlp"] = "conv"
+    feature_extraction: Literal["conv", "mlp"] = "mlp"
     use_attention_pooling: bool = True
     
     use_amp: bool = True
-    use_gradient_checkpointing: bool = False 
+    use_gradient_checkpointing: bool = True 
     compile_model: bool = True
     
     def __post_init__(self):
