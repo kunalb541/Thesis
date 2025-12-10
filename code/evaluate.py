@@ -768,6 +768,11 @@ def main():
                        help='Batch size for inference')
     parser.add_argument('--no_cuda', action='store_true',
                        help='Force CPU usage')
+
+    parser.add_argument('--early_detection', action='store_true',
+                       help='Run early detection analysis (accuracy at partial lengths)')
+    parser.add_argument('--n_evolution_per_type', type=int, default=0,
+                       help='Number of evolution plots to generate per class')
     
     args = parser.parse_args()
     
