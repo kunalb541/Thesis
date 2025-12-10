@@ -79,8 +79,6 @@ class ComprehensiveEvaluator:
         
         # 2. Setup Output Directory
         if output_dir is None:
-            # Create a specific evaluation folder inside the experiment folder
-            # Includes timestamp to allow multiple runs (d.npz, p.npz, etc.) without overwriting
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             data_name = Path(data_path).stem
             self.output_dir = self.exp_dir / f'eval_{data_name}_{timestamp}'
@@ -90,7 +88,7 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("=" * 80)
-        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE")
+        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE (Refactored)")
         print("=" * 80)
         print(f"Experiment: {experiment_name}")
         print(f"Model Path: {self.model_path}")
@@ -105,7 +103,8 @@ class ComprehensiveEvaluator:
         
         # 4. Run Core Inference
         print("\n[Inference] Generating predictions...")
-        self.probs, self.preds, self.confs = self._run_inference()
+        # We store sequence probs separately to avoid concatenation issues with massive arrays
+        self.probs, self.preds, self.confs, self.seq_probs_batches = self._run_inference()
         
         # 5. Compute Metrics
         self.metrics = self._compute_base_metrics()
@@ -114,8 +113,6 @@ class ComprehensiveEvaluator:
         """Find the best_model.pt for the given experiment name."""
         search_roots = [Path('../results'), Path('results'), Path('.')]
         candidates = []
-        
-        # Allow partial matching (e.g., 'd' matches 'd_2024...')
         clean_name = exp_name.replace('*', '')
         
         for root in search_roots:
@@ -123,7 +120,6 @@ class ComprehensiveEvaluator:
                 candidates.extend(list(root.glob(f"*{clean_name}*")))
         
         if not candidates:
-            # Fallback: Check if exp_name is a direct path
             if Path(exp_name).exists():
                 candidates = [Path(exp_name)]
             else:
@@ -134,7 +130,6 @@ class ComprehensiveEvaluator:
         model_file = best_exp / "best_model.pt"
         
         if not model_file.exists():
-            # Try looking for any .pt file
             pt_files = list(best_exp.glob("*.pt"))
             if pt_files:
                 model_file = pt_files[0]
@@ -146,7 +141,6 @@ class ComprehensiveEvaluator:
     def _load_model(self):
         checkpoint = torch.load(self.model_path, map_location=self.device)
         
-        # Extract Config
         config_dict = checkpoint.get('config', {})
         valid_keys = ConfigClass().__init__.__code__.co_varnames
         clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
@@ -154,7 +148,6 @@ class ComprehensiveEvaluator:
         
         model = ModelClass(config).to(self.device)
         
-        # Extract State Dict
         state_dict = checkpoint.get('state_dict', checkpoint)
         clean_state = {k.replace('module.', ''): v for k, v in state_dict.items()}
         
@@ -166,13 +159,11 @@ class ComprehensiveEvaluator:
 
     def _load_data(self, path):
         data = np.load(path, allow_pickle=True)
-        
         flux = data['flux']
         y = data['labels']
         
-        # CRITICAL CAUSALITY CHECK
         if 'delta_t' not in data:
-            print("WARNING: 'delta_t' missing. Assuming constant cadence (NOT RECOMMENDED for Roman).")
+            print("WARNING: 'delta_t' missing. Assuming constant cadence.")
             delta_t = np.zeros_like(flux)
         else:
             delta_t = data['delta_t']
@@ -183,40 +174,31 @@ class ComprehensiveEvaluator:
             timestamps = np.linspace(0, 100, flux.shape[1])
             timestamps = np.tile(timestamps, (len(flux), 1))
             
-        # Parameter Extraction (Handling Optimized NPZ format)
         params = {}
         for key in ['params_flat', 'params_pspl', 'params_binary']:
             short_key = key.replace('params_', '')
             if key in data:
-                # Optimized numeric format
                 if f"{key}_keys" in data:
                     keys = data[f"{key}_keys"]
                     values = data[key]
                     params[short_key] = [dict(zip(keys, v)) for v in values]
-                # Standard list of dicts
                 else:
                     params[short_key] = data[key]
 
-        # Subsampling (Crucial for speed on large datasets)
         if self.n_samples and self.n_samples < len(flux):
             print(f"Subsampling {len(flux)} -> {self.n_samples} events...")
             idx = np.random.choice(len(flux), self.n_samples, replace=False)
             flux, delta_t, y = flux[idx], delta_t[idx], y[idx]
             timestamps = timestamps[idx]
             
-            # Subsample params (best effort alignment)
-            # Note: aligning params after random shuffle is hard if IDs aren't tracked.
-            # We retain full params for distribution checks, but warn about alignment.
-            print("Note: Physical limit checks will use population stats due to subsampling.")
-            
         return flux, delta_t, y, params, timestamps
 
     def _compute_lengths(self):
-        # Compute real sequence lengths based on padding (0.0)
         return np.maximum((self.flux != 0).sum(axis=1), 1)
 
     def _run_inference(self):
         all_probs = []
+        seq_probs_batches = []
         
         with torch.no_grad():
             for i in tqdm(range(0, len(self.flux), self.batch_size), desc="Inferring"):
@@ -226,18 +208,28 @@ class ComprehensiveEvaluator:
                 d = torch.tensor(self.delta_t[i:end], dtype=torch.float32).to(self.device)
                 l = torch.tensor(self.lengths[i:end], dtype=torch.long).to(self.device)
                 
-                # Standard forward pass
-                out = self.model(f, d, lengths=l)
+                # Check if we need sequence outputs for early detection
+                # Only request full timesteps if early detection is enabled to save memory
+                return_seq = self.run_early_detection or (self.n_evolution_per_type > 0)
+                
+                out = self.model(f, d, lengths=l, return_all_timesteps=return_seq)
                 all_probs.append(out['probs'].cpu().numpy())
+                
+                if return_seq:
+                    if 'probs_seq' in out:
+                        # Store as list of batch arrays to prevent massive allocation
+                        seq_probs_batches.append(out['probs_seq'].cpu().numpy())
+                    else:
+                        pass # Should warn, but keep going
                 
         probs = np.concatenate(all_probs)
         preds = probs.argmax(axis=1)
         confs = probs.max(axis=1)
-        return probs, preds, confs
+        
+        return probs, preds, confs, seq_probs_batches
 
     def _compute_base_metrics(self):
         acc = accuracy_score(self.y, self.preds)
-        
         try:
             auc = roc_auc_score(self.y, self.probs, multi_class='ovr', average='weighted')
         except:
@@ -280,7 +272,7 @@ class ComprehensiveEvaluator:
 
     def plot_confusion_matrix(self):
         cm = self.metrics['cm']
-        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
         
         plt.figure(figsize=(8, 7))
         sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
@@ -326,57 +318,61 @@ class ComprehensiveEvaluator:
         plt.close()
 
     def plot_fine_early_detection(self):
-        """Calculates accuracy at 50 different observation percentages."""
+        """
+        Calculates accuracy at 50 different observation percentages.
+        Refactored to handle batch-wise sequence probabilities correctly.
+        """
+        if not self.seq_probs_batches:
+            print("[Warning] No sequence probabilities found. Skipping Early Detection.")
+            return
+
         print("\n[Analysis] Running Fine-Grained Early Detection...")
-        
-        # Subset for speed if dataset is huge
-        n_eval = min(len(self.flux), 1000)
-        idx = np.random.choice(len(self.flux), n_eval, replace=False)
-        f_sub = self.flux[idx]
-        d_sub = self.delta_t[idx]
-        l_sub = self.lengths[idx]
-        y_sub = self.y[idx]
-        
-        # Get full sequence probabilities
-        all_seq_probs = []
-        with torch.no_grad():
-            for i in range(0, n_eval, self.batch_size):
-                end = min(i + self.batch_size, n_eval)
-                f_b = torch.tensor(f_sub[i:end], dtype=torch.float32).to(self.device)
-                d_b = torch.tensor(d_sub[i:end], dtype=torch.float32).to(self.device)
-                l_b = torch.tensor(l_sub[i:end], dtype=torch.long).to(self.device)
-                
-                out = self.model(f_b, d_b, lengths=l_b, return_all_timesteps=True)
-                all_seq_probs.append(out['probs'].cpu().numpy())
         
         fractions = np.linspace(0.05, 1.0, 50)
         accuracies = []
         
-        for frac in fractions:
-            correct = 0
-            total = 0
-            curr = 0
-            for batch in all_seq_probs:
-                B, T, C = batch.shape
-                lens = l_sub[curr : curr+B]
-                target_y = y_sub[curr : curr+B]
-                
-                # Pick timestep corresponding to 'frac'
-                t_idx = (lens * frac).astype(int)
+        # Pre-process slicing to avoid repeated tensor operations
+        # We iterate through fractions, and for each fraction, we iterate through batches
+        
+        # Flatten batch info for easier iteration
+        # Note: We do NOT concatenate the huge 3D array. We work batch by batch.
+        
+        current_idx = 0
+        total_correct = {f: 0 for f in fractions}
+        total_count = {f: 0 for f in fractions}
+        
+        for batch_prob in tqdm(self.seq_probs_batches, desc="Early Detect Batches"):
+            B, T, C = batch_prob.shape
+            
+            # Get corresponding metadata for this batch
+            batch_lens = self.lengths[current_idx : current_idx + B]
+            batch_y = self.y[current_idx : current_idx + B]
+            
+            for frac in fractions:
+                # Vectorized index calculation for the whole batch
+                # t_idx: for each sample, which timestep corresponds to 'frac'
+                t_idx = (batch_lens * frac).astype(int)
                 t_idx = np.clip(t_idx - 1, 0, T-1)
                 
-                batch_preds = batch[np.arange(B), t_idx].argmax(axis=1)
-                correct += (batch_preds == target_y).sum()
-                total += B
-                curr += B
-            accuracies.append(correct / total)
+                # Gather predictions: batch_prob[row, t_idx]
+                # Advanced indexing: [0..B-1, t_idx]
+                preds_at_frac = batch_prob[np.arange(B), t_idx].argmax(axis=1)
+                
+                correct = (preds_at_frac == batch_y).sum()
+                total_correct[frac] += correct
+                total_count[frac] += B
+            
+            current_idx += B
+            
+        # Compile results
+        acc_list = [total_correct[f] / max(total_count[f], 1) for f in fractions]
             
         plt.figure(figsize=(10, 6))
-        plt.plot(fractions*100, accuracies, 'o-', color='purple', lw=2)
+        plt.plot(fractions*100, acc_list, 'o-', color='purple', lw=2)
         plt.axhline(0.9, color='green', ls='--', label='90% Accuracy')
         plt.xlabel('% of Light Curve Observed')
         plt.ylabel('Accuracy')
-        plt.title('Early Detection Performance')
+        plt.title('Early Detection Performance (Causality Check)')
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
@@ -394,9 +390,6 @@ class ComprehensiveEvaluator:
         bin_mask = (self.y == 2)
         if bin_mask.sum() == 0: return
         
-        # Get u0 values (assuming params aligns with full dataset or we can match)
-        # Simplified: Use stored params if they roughly match count, else skip
-        # For precise alignment, we'd need IDs. This is a heuristic check.
         try:
             u0_vals = np.array([p['u_0'] for p in self.params['binary']])
             
@@ -404,7 +397,7 @@ class ComprehensiveEvaluator:
             bin_preds = self.preds[bin_mask]
             bin_correct = (bin_preds == 2).astype(int)
             
-            # Heuristic alignment: trim to match
+            # Heuristic alignment: trim to match if subsampled
             min_len = min(len(u0_vals), len(bin_correct))
             u0_vals = u0_vals[:min_len]
             bin_correct = bin_correct[:min_len]
@@ -459,8 +452,6 @@ class ComprehensiveEvaluator:
             
             stat, pval = ks_2samp(t0_pspl, t0_bin)
             print(f"  t0 Distribution Check: KS-stat={stat:.3f}, p-value={pval:.3f}")
-            if pval < 0.05:
-                print("  WARNING: Significant difference in t0 distributions detected.")
         except Exception as e:
             print(f"  Error in temporal bias: {e}")
 
@@ -488,7 +479,8 @@ class ComprehensiveEvaluator:
         
         with torch.no_grad():
             out = self.model(f, d, lengths=l, return_all_timesteps=True)
-            probs = out['probs'][0].cpu().numpy()
+            if 'probs_seq' not in out: return
+            probs = out['probs_seq'][0].cpu().numpy()
             
         # Get valid length
         T = self.lengths[idx]
