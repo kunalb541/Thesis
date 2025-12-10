@@ -159,6 +159,7 @@ class ComprehensiveEvaluator:
 
     def _load_data(self, path):
         data = np.load(path, allow_pickle=True)
+        
         flux = data['flux']
         y = data['labels']
         
@@ -168,11 +169,12 @@ class ComprehensiveEvaluator:
         else:
             delta_t = data['delta_t']
             
+        # Handle Timestamps safely (1D vs 2D)
         if 'timestamps' in data:
-            timestamps = data['timestamps']
+            raw_ts = data['timestamps']
         else:
-            timestamps = np.linspace(0, 100, flux.shape[1])
-            timestamps = np.tile(timestamps, (len(flux), 1))
+            # Fallback creation
+            raw_ts = np.linspace(0, 100, flux.shape[1])
             
         params = {}
         for key in ['params_flat', 'params_pspl', 'params_binary']:
@@ -185,11 +187,27 @@ class ComprehensiveEvaluator:
                 else:
                     params[short_key] = data[key]
 
+        # Subsampling Logic
         if self.n_samples and self.n_samples < len(flux):
             print(f"Subsampling {len(flux)} -> {self.n_samples} events...")
             idx = np.random.choice(len(flux), self.n_samples, replace=False)
             flux, delta_t, y = flux[idx], delta_t[idx], y[idx]
-            timestamps = timestamps[idx]
+            
+            # Smart Timestamp Slicing
+            if raw_ts.ndim == 1:
+                # If shared 1D, just repeat it for the new subset size
+                timestamps = np.tile(raw_ts, (len(flux), 1))
+            else:
+                # If 2D (per event), slice it
+                timestamps = raw_ts[idx]
+                
+            print("Note: Physical limit checks will use population stats due to subsampling.")
+        else:
+            # No subsampling
+            if raw_ts.ndim == 1:
+                timestamps = np.tile(raw_ts, (len(flux), 1))
+            else:
+                timestamps = raw_ts
             
         return flux, delta_t, y, params, timestamps
 
@@ -208,8 +226,7 @@ class ComprehensiveEvaluator:
                 d = torch.tensor(self.delta_t[i:end], dtype=torch.float32).to(self.device)
                 l = torch.tensor(self.lengths[i:end], dtype=torch.long).to(self.device)
                 
-                # Check if we need sequence outputs for early detection
-                # Only request full timesteps if early detection is enabled to save memory
+                # CRITICAL: Only return sequences if we actually need them
                 return_seq = self.run_early_detection or (self.n_evolution_per_type > 0)
                 
                 out = self.model(f, d, lengths=l, return_all_timesteps=return_seq)
@@ -220,7 +237,7 @@ class ComprehensiveEvaluator:
                         # Store as list of batch arrays to prevent massive allocation
                         seq_probs_batches.append(out['probs_seq'].cpu().numpy())
                     else:
-                        pass # Should warn, but keep going
+                        pass 
                 
         probs = np.concatenate(all_probs)
         preds = probs.argmax(axis=1)
@@ -329,17 +346,12 @@ class ComprehensiveEvaluator:
         print("\n[Analysis] Running Fine-Grained Early Detection...")
         
         fractions = np.linspace(0.05, 1.0, 50)
-        accuracies = []
         
-        # Pre-process slicing to avoid repeated tensor operations
-        # We iterate through fractions, and for each fraction, we iterate through batches
-        
-        # Flatten batch info for easier iteration
-        # Note: We do NOT concatenate the huge 3D array. We work batch by batch.
-        
-        current_idx = 0
+        # We accumulate correct/total counts per fraction
         total_correct = {f: 0 for f in fractions}
         total_count = {f: 0 for f in fractions}
+        
+        current_idx = 0
         
         for batch_prob in tqdm(self.seq_probs_batches, desc="Early Detect Batches"):
             B, T, C = batch_prob.shape
@@ -349,13 +361,11 @@ class ComprehensiveEvaluator:
             batch_y = self.y[current_idx : current_idx + B]
             
             for frac in fractions:
-                # Vectorized index calculation for the whole batch
-                # t_idx: for each sample, which timestep corresponds to 'frac'
+                # Vectorized index calculation
                 t_idx = (batch_lens * frac).astype(int)
                 t_idx = np.clip(t_idx - 1, 0, T-1)
                 
                 # Gather predictions: batch_prob[row, t_idx]
-                # Advanced indexing: [0..B-1, t_idx]
                 preds_at_frac = batch_prob[np.arange(B), t_idx].argmax(axis=1)
                 
                 correct = (preds_at_frac == batch_y).sum()
@@ -372,7 +382,7 @@ class ComprehensiveEvaluator:
         plt.axhline(0.9, color='green', ls='--', label='90% Accuracy')
         plt.xlabel('% of Light Curve Observed')
         plt.ylabel('Accuracy')
-        plt.title('Early Detection Performance (Causality Check)')
+        plt.title('Early Detection Performance')
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
@@ -386,23 +396,19 @@ class ComprehensiveEvaluator:
             print("  Skipping: No binary parameters found.")
             return
 
-        # Extract Binary Events
         bin_mask = (self.y == 2)
         if bin_mask.sum() == 0: return
         
         try:
             u0_vals = np.array([p['u_0'] for p in self.params['binary']])
             
-            # Filter to predictions of binary events
             bin_preds = self.preds[bin_mask]
             bin_correct = (bin_preds == 2).astype(int)
             
-            # Heuristic alignment: trim to match if subsampled
             min_len = min(len(u0_vals), len(bin_correct))
             u0_vals = u0_vals[:min_len]
             bin_correct = bin_correct[:min_len]
             
-            # Binning
             bins = np.logspace(np.log10(1e-4), np.log10(1.0), 15)
             digitized = np.digitize(u0_vals, bins)
             
@@ -418,8 +424,6 @@ class ComprehensiveEvaluator:
             plt.xlabel('Impact Parameter ($u_0$)')
             plt.ylabel('Binary Classification Accuracy')
             plt.title('Physical Detection Limits')
-            
-            # Physical Regions
             plt.axvspan(1e-4, 0.15, color='green', alpha=0.1, label='Strong Caustics')
             plt.axvspan(0.3, 1.0, color='red', alpha=0.1, label='Weak/PSPL-like')
             plt.legend()
@@ -432,7 +436,7 @@ class ComprehensiveEvaluator:
             print(f"  Error in physical limits: {e}")
 
     def diagnose_temporal_bias(self):
-        """Checks if model is cheating using t0 (Time of peak)."""
+        """Checks if model is cheating using t0."""
         print("\n[Analysis] Checking Temporal Bias (t0 distribution)...")
         if 'pspl' not in self.params or 'binary' not in self.params: return
         
@@ -462,11 +466,9 @@ class ComprehensiveEvaluator:
         classes = ['Flat', 'PSPL', 'Binary']
         
         for i, cls in enumerate(classes):
-            # Find correct predictions
             candidates = np.where((self.y == i) & (self.preds == i))[0]
             if len(candidates) == 0: continue
             
-            # Select random examples
             selection = np.random.choice(candidates, min(len(candidates), self.n_evolution_per_type), replace=False)
             
             for idx in selection:
@@ -482,7 +484,6 @@ class ComprehensiveEvaluator:
             if 'probs_seq' not in out: return
             probs = out['probs_seq'][0].cpu().numpy()
             
-        # Get valid length
         T = self.lengths[idx]
         times = self.timestamps[idx][:T]
         flux = self.flux[idx][:T]
@@ -491,7 +492,6 @@ class ComprehensiveEvaluator:
         fig = plt.figure(figsize=(12, 10))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.5, 1], hspace=0.1)
         
-        # 1. Flux
         ax0 = fig.add_subplot(gs[0])
         ax0.scatter(times, flux, c='k', s=10, alpha=0.6, label='Flux')
         ax0.set_ylabel('Flux')
@@ -499,7 +499,6 @@ class ComprehensiveEvaluator:
         ax0.legend()
         ax0.grid(True, alpha=0.3)
         
-        # 2. Probability
         ax1 = fig.add_subplot(gs[1], sharex=ax0)
         for i, cls in enumerate(['Flat', 'PSPL', 'Binary']):
             ax1.plot(times, probs[:, i], color=COLORS[i], lw=2, label=cls)
@@ -507,7 +506,6 @@ class ComprehensiveEvaluator:
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
         
-        # 3. Confidence
         ax2 = fig.add_subplot(gs[2], sharex=ax0)
         conf = probs.max(axis=1)
         ax2.plot(times, conf, color='purple', lw=2, label='Confidence')
@@ -534,7 +532,6 @@ class ComprehensiveEvaluator:
         if self.n_evolution_per_type > 0:
             self.plot_evolution_examples()
             
-        # Save Summary
         summary = {
             'metrics': {k: float(v) for k, v in self.metrics.items() if isinstance(v, (int, float))},
             'config': str(self.config),
@@ -545,13 +542,9 @@ class ComprehensiveEvaluator:
             
         print(f"\n[Done] Evaluation complete. Results at: {self.output_dir}")
 
-# =============================================================================
-# CLI
-# =============================================================================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="God Mode Evaluation Suite")
     
-    # Arguments matching your workflow exactly
     parser.add_argument('--experiment_name', required=True, type=str, help="Name of experiment to find model")
     parser.add_argument('--data', required=True, type=str, help="Path to .npz data")
     parser.add_argument('--output_dir', type=str, default=None, help="Optional custom output path")
@@ -559,7 +552,6 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--n_samples', type=int, default=None, help="Subsample test set")
     
-    # Flags matching your workflow
     parser.add_argument('--early_detection', action='store_true', help="Run fine-grained early detection")
     parser.add_argument('--n_evolution_per_type', type=int, default=0, help="Number of evolution plots per class")
     
