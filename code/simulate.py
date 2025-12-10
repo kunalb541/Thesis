@@ -7,9 +7,26 @@ from multiprocessing import Pool
 import math
 import warnings
 import time
+import sys
 
-# Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
+
+# ============================================================================
+# CRITICAL DEPENDENCY CHECK
+# ============================================================================
+try:
+    import VBBinaryLensing
+    HAS_VBB = True
+    print("VBBinaryLensing detected: High-fidelity binary magnification enabled")
+except ImportError:
+    print("\nCRITICAL ERROR: VBBinaryLensing not available")
+    print("This is required for accurate binary microlensing simulation.")
+    print("\nInstallation instructions:")
+    print("  pip install VBBinaryLensing")
+    print("  or")
+    print("  conda install -c conda-forge vbbinarylensing")
+    print("\nExiting now.")
+    sys.exit(1)
 
 # ============================================================================
 # OPTIMIZATION IMPORTS
@@ -17,24 +34,15 @@ warnings.filterwarnings("ignore")
 try:
     from numba import njit, prange
     HAS_NUMBA = True
-    print("Optimization: Numba JIT detected. Acceleration enabled.")
+    print("Numba JIT detected: Temporal encoding acceleration enabled")
 except ImportError:
     HAS_NUMBA = False
-    print("Warning: Numba not found. Using vectorized NumPy fallback (slower than Numba, but faster than loops).")
-    print("Install Numba for maximum speed: conda install numba")
-
-try:
-    import VBBinaryLensing
-    HAS_VBB = True
-except ImportError:
-    HAS_VBB = False
-    print("Warning: VBBinaryLensing not available, using approximation")
-
+    print("Warning: Numba not found - using vectorized NumPy (slower)")
+    print("Install for maximum speed: conda install numba")
 
 # ============================================================================
-# Configuration
+# CONFIGURATION
 # ============================================================================
-
 class SimConfig:
     """Core simulation parameters"""
     N_POINTS = 1000
@@ -45,51 +53,41 @@ class SimConfig:
     MAX_BINARY_ATTEMPTS = 10
     
     CADENCE_MASK_PROB = 0.05
-    MAG_ERROR_STD = 0.03       # Slightly lower noise to allow model to see caustic spikes
+    MAG_ERROR_STD = 0.03
     BASELINE_MIN = 19.0
-    BASELINE_MAX = 21.0        # Tighter baseline range to focus on amplification
+    BASELINE_MAX = 21.0
     
     PAD_VALUE = 0.0
-
 
 class PSPLParams:
     """
     PSPL parameters strictly confined to ensure 'Rise and Fall' is visible.
-    The model cannot rely on 'cut-off' tails to identify PSPLs.
+    Prevents model from using cut-off tails to identify PSPLs.
     """
-    # Restrict t0 to center window so tails are visible (Window is -100 to 100)
     T0_MIN = -40.0
     T0_MAX = 40.0
     
-    # Cap tE so the event isn't wider than the window
     TE_MIN = 5.0
-    TE_MAX = 70.0 
-
-    # CRITICAL ANTI-BIAS: Allow u0 to be extremely small (high mag).
-    # This prevents the model from assuming "High Mag = Binary".
+    TE_MAX = 70.0
+    
+    # CRITICAL ANTI-BIAS: Allow extremely small u0 (high magnification)
+    # Prevents model from assuming "High Mag = Binary"
     U0_MIN = 0.0001
-    U0_MAX = 0.5   
-
+    U0_MAX = 0.5
 
 class BinaryPresets:
-    """
-    Binary lens topology presets
-    """
+    """Binary lens topology presets for Roman Space Telescope readiness"""
     
     PRESETS = {
         'distinct': {
-            'description': 'Resonant Caustics (Diamond shapes) - Guaranteed crossings',
-            # s ~ 1.0 creates large resonant caustics (maximum distinctness/weirdness)
-            's_range': (0.90, 1.10), 
-            # High mass ratio ensures the caustics are thick and strong
-            'q_range': (0.1, 1.0),   
-            # Impact parameter must be small to hit the resonant caustic at the center
-            'u0_range': (0.0001, 0.4), 
+            'description': 'Resonant Caustics - Guaranteed crossings',
+            's_range': (0.90, 1.10),
+            'q_range': (0.1, 1.0),
+            'u0_range': (0.0001, 0.4),
             'rho_range': (1e-4, 5e-3),
             'alpha_range': (0, 2*math.pi),
-            # Match PSPL time constraints exactly to prevent duration bias
-            't0_range': (PSPLParams.T0_MIN, PSPLParams.T0_MAX),
-            'tE_range': (PSPLParams.TE_MIN, PSPLParams.TE_MAX), 
+            't0_range': (-40.0, 40.0),  # Match PSPL constraints
+            'tE_range': (5.0, 70.0),    # Match PSPL constraints
         },
         
         'planetary': {
@@ -126,11 +124,8 @@ class BinaryPresets:
         }
     }
 
-
 class ObservationalPresets:
-    """
-    Cadence and photometric error presets
-    """
+    """Cadence and photometric error presets"""
     
     CADENCE_PRESETS = {
         'cadence_05': {
@@ -186,20 +181,44 @@ class ObservationalPresets:
         }
     }
 
-
 # ============================================================================
-# Magnification Models
+# MAGNIFICATION MODELS
 # ============================================================================
-
-def pspl_magnification(t, t_E, u_0, t_0):
-    """Point Source Point Lens magnification"""
+def pspl_magnification(t: np.ndarray, t_E: float, u_0: float, t_0: float) -> np.ndarray:
+    """
+    Point Source Point Lens magnification.
+    
+    Args:
+        t: Array of observation times
+        t_E: Einstein crossing time
+        u_0: Impact parameter
+        t_0: Time of closest approach
+    
+    Returns:
+        Magnification array
+    """
     u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
     A = (u**2 + 2) / (u * np.sqrt(u**2 + 4))
     return A
 
-
-def binary_magnification_vbb(t, t_E, u_0, t_0, s, q, alpha, rho):
-    """Binary lens magnification using VBBinaryLensing"""
+def binary_magnification_vbb(t: np.ndarray, t_E: float, u_0: float, t_0: float, 
+                             s: float, q: float, alpha: float, rho: float) -> np.ndarray:
+    """
+    Binary lens magnification using VBBinaryLensing (high-fidelity).
+    
+    Args:
+        t: Array of observation times
+        t_E: Einstein crossing time
+        u_0: Impact parameter
+        t_0: Time of closest approach
+        s: Binary separation in Einstein radii
+        q: Mass ratio
+        alpha: Source trajectory angle
+        rho: Normalized source radius
+    
+    Returns:
+        Magnification array with caustic features
+    """
     VBB = VBBinaryLensing.VBBinaryLensing()
     VBB.Tol = SimConfig.VBM_TOLERANCE
     VBB.RelTol = SimConfig.VBM_TOLERANCE
@@ -208,43 +227,16 @@ def binary_magnification_vbb(t, t_E, u_0, t_0, s, q, alpha, rho):
     source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
     source_y = u_0 * np.sin(alpha) - tau * np.cos(alpha)
     
-    mag = np.zeros_like(t)
+    mag = np.zeros_like(t, dtype=np.float64)
     for i, (sx, sy) in enumerate(zip(source_x, source_y)):
         mag[i] = VBB.BinaryMag2(s, q, sx, sy, rho)
     
     return mag
 
-
-def binary_magnification_approx(t, t_E, u_0, t_0, s, q, alpha, rho):
-    """Approximate binary lens magnification (fallback)"""
-    # Fallback if VBB is missing (less accurate for caustics, but functional)
-    A_pspl = pspl_magnification(t, t_E, u_0, t_0)
-    
-    tau = (t - t_0) / t_E
-    source_x = u_0 * np.cos(alpha) + tau * np.sin(alpha)
-    source_y = u_0 * np.sin(alpha) - tau * np.cos(alpha)
-    
-    # 3-Body approximation for resonant caustics (simplified)
-    # Adjusted caustic centers for s~1.0 resonant case
-    caustic_x = s * np.array([0.6, -0.6, 0, 0])
-    caustic_y = s * np.array([0, 0, 0.6, -0.6])
-    
-    perturbation = 0
-    for cx, cy in zip(caustic_x, caustic_y):
-        dist = np.sqrt((source_x - cx)**2 + (source_y - cy)**2)
-        caustic_width = 0.05 * np.sqrt(q)
-        # Sharper perturbation for 'distinct' feel
-        perturbation += q * np.exp(-dist**2 / (0.5 * caustic_width**2))
-    
-    A_binary = A_pspl * (1 + perturbation * 5)
-    return A_binary
-
-
 # ============================================================================
-# Parameter Generation
+# PARAMETER GENERATION
 # ============================================================================
-
-def generate_flat_params(n_events, seed=None):
+def generate_flat_params(n_events: int, seed: int = None) -> list:
     """Generate flat (no event) parameters"""
     if seed is not None:
         np.random.seed(seed)
@@ -256,9 +248,11 @@ def generate_flat_params(n_events, seed=None):
     
     return params
 
-
-def generate_pspl_params(n_events, seed=None):
-    """Generate PSPL parameters with temporal invariance"""
+def generate_pspl_params(n_events: int, seed: int = None) -> list:
+    """
+    Generate PSPL parameters with temporal invariance.
+    Uses log-uniform sampling for u0 to match statistical reality.
+    """
     if seed is not None:
         np.random.seed(seed)
     
@@ -267,11 +261,8 @@ def generate_pspl_params(n_events, seed=None):
         t_E = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
         t_0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
         
-        # LOG-UNIFORM SAMPLING for u0 favors small impact parameters (High Magnification)
-        # This matches the statistical reality that high-mag events are rarer, 
-        # but ensures we have enough of them to confuse the model if it cheats.
+        # Log-uniform sampling favors small impact parameters
         u_0 = np.exp(np.random.uniform(np.log(PSPLParams.U0_MIN), np.log(PSPLParams.U0_MAX)))
-
         m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
         
         params.append({
@@ -284,8 +275,7 @@ def generate_pspl_params(n_events, seed=None):
     
     return params
 
-
-def generate_binary_params(n_events, preset='baseline', seed=None):
+def generate_binary_params(n_events: int, preset: str = 'baseline', seed: int = None) -> list:
     """Generate binary parameters from topology preset"""
     if seed is not None:
         np.random.seed(seed)
@@ -301,17 +291,15 @@ def generate_binary_params(n_events, preset='baseline', seed=None):
         t_E = np.random.uniform(config['tE_range'][0], config['tE_range'][1])
         t_0 = np.random.uniform(config['t0_range'][0], config['t0_range'][1])
         
-        # LOG-UNIFORM u0 for binary too, to match PSPL distribution
+        # Log-uniform for u0 and rho
         u0_min, u0_max = config['u0_range']
         u_0 = np.exp(np.random.uniform(np.log(u0_min), np.log(u0_max)))
-
+        
         s = np.random.uniform(config['s_range'][0], config['s_range'][1])
         q = np.random.uniform(config['q_range'][0], config['q_range'][1])
         alpha = np.random.uniform(config['alpha_range'][0], config['alpha_range'][1])
         
-        # LOG-UNIFORM rho (source size effect)
         rho = np.exp(np.random.uniform(np.log(config['rho_range'][0]), np.log(config['rho_range'][1])))
-
         m_source = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
         
         params.append({
@@ -328,37 +316,40 @@ def generate_binary_params(n_events, preset='baseline', seed=None):
     
     return params
 
-
 # ============================================================================
-# Light Curve Generation
+# LIGHT CURVE GENERATION
 # ============================================================================
-
-def generate_light_curve(params, event_type, timestamps):
+def generate_light_curve(params: dict, event_type: str, timestamps: np.ndarray) -> np.ndarray:
     """Generate clean magnification light curve"""
     if event_type == 'flat':
-        A = np.ones_like(timestamps)
+        A = np.ones_like(timestamps, dtype=np.float64)
     elif event_type == 'pspl':
         A = pspl_magnification(timestamps, params['t_E'], params['u_0'], params['t_0'])
-    else:
-        if HAS_VBB:
-            A = binary_magnification_vbb(
-                timestamps, params['t_E'], params['u_0'], params['t_0'],
-                params['s'], params['q'], params['alpha'], params['rho']
-            )
-        else:
-            A = binary_magnification_approx(
-                timestamps, params['t_E'], params['u_0'], params['t_0'],
-                params['s'], params['q'], params['alpha'], params['rho']
-            )
+    else:  # binary
+        A = binary_magnification_vbb(
+            timestamps, params['t_E'], params['u_0'], params['t_0'],
+            params['s'], params['q'], params['alpha'], params['rho']
+        )
     
     return A
 
-
-def add_observational_effects(flux, error_mag, cadence_missing, pad_value):
-    """Add photometric noise and missing observations"""
+def add_observational_effects(flux: np.ndarray, error_mag: float, 
+                              cadence_missing: float, pad_value: float) -> np.ndarray:
+    """
+    Add photometric noise and missing observations.
+    
+    Args:
+        flux: Clean flux array
+        error_mag: Photometric error standard deviation
+        cadence_missing: Probability of missing observation
+        pad_value: Value to use for missing data
+    
+    Returns:
+        Observed flux with noise and gaps
+    """
     flux_obs = flux.copy()
     
-    # Add noise (noise applied to flux, not magnitude)
+    # Add Gaussian noise
     noise = np.random.normal(0, error_mag, size=len(flux))
     flux_obs = flux_obs * (1 + noise)
     
@@ -366,14 +357,12 @@ def add_observational_effects(flux, error_mag, cadence_missing, pad_value):
     mask = np.random.random(len(flux)) < cadence_missing
     flux_obs[mask] = pad_value
     
-    # Floor flux values to prevent log errors if converting to mag later
-    # Keep min value slightly higher to handle log space ops safely
+    # Floor flux to prevent negative values
     flux_obs[flux_obs != pad_value] = np.maximum(flux_obs[flux_obs != pad_value], 0.001)
     
     return flux_obs
 
-
-def generate_single_event(args):
+def generate_single_event(args: tuple) -> tuple:
     """Worker function for parallel generation"""
     idx, params, event_type, timestamps, cadence, error, pad_value = args
     
@@ -385,84 +374,80 @@ def generate_single_event(args):
     return flux_obs, label, params
 
 # ============================================================================
-# TEMPORAL BIAS FIX: Delta_t Calculation (ACCELERATED)
+# TEMPORAL ENCODING (CAUSALITY-PRESERVING)
 # ============================================================================
-
 if HAS_NUMBA:
-    # --- NUMBA IMPLEMENTATION (FAST) ---
     @njit(parallel=True, fastmath=True)
-    def calculate_delta_t_per_event(timestamps, flux_obs, pad_value):
+    def calculate_delta_t_per_event(timestamps: np.ndarray, flux_obs: np.ndarray, 
+                                    pad_value: float) -> np.ndarray:
         """
-        Calculates delta_t using compiled machine code. 
-        Uses parallel CPU threads to process events simultaneously.
+        Calculate delta_t using Numba JIT compilation.
+        Parallel processing across events for maximum speed.
+        
+        Critical: Only uses past observations - maintains causality.
         """
         n_events = flux_obs.shape[0]
         n_points = timestamps.shape[0]
         delta_t_array = np.zeros_like(flux_obs)
         
-        # Parallel loop over events
         for i in prange(n_events):
-            last_obs_time = timestamps[0] 
+            last_obs_time = timestamps[0]
             
-            # Loop over time points
             for j in range(1, n_points):
                 if flux_obs[i, j] != pad_value:
                     delta_t_array[i, j] = timestamps[j] - last_obs_time
                     last_obs_time = timestamps[j]
                 else:
                     delta_t_array[i, j] = 0.0
-                    
+        
         return delta_t_array
-
 else:
-    # --- NUMPY VECTORIZED IMPLEMENTATION (FALLBACK) ---
-    def calculate_delta_t_per_event(timestamps, flux_obs, pad_value):
+    def calculate_delta_t_per_event(timestamps: np.ndarray, flux_obs: np.ndarray, 
+                                    pad_value: float) -> np.ndarray:
         """
-        Vectorized NumPy implementation for when Numba is not available.
-        Much faster than loops, but uses more memory.
+        Vectorized NumPy fallback for delta_t calculation.
+        Slower than Numba but maintains causality.
         """
         n_events, n_points = flux_obs.shape
         time_grid = np.tile(timestamps, (n_events, 1))
         is_observed = (flux_obs != pad_value)
         
-        # Create grid with NaNs for missing data
         observed_times = time_grid.copy()
         observed_times[~is_observed] = np.nan
         
-        # Forward fill using accumulate
         mask = ~np.isnan(observed_times)
         idx = np.maximum.accumulate(mask * np.arange(n_points), axis=1)
         last_valid_times = np.take_along_axis(observed_times, idx, axis=1)
         
-        # Shift right by 1 to get previous observation time
         previous_last_obs = np.roll(last_valid_times, 1, axis=1)
         previous_last_obs[:, 0] = timestamps[0]
         
         delta_t = time_grid - previous_last_obs
-        
-        # Apply padding and fix first index
         delta_t[~is_observed] = 0.0
         delta_t[:, 0] = 0.0
         
         return delta_t
 
-
 # ============================================================================
-# Main Simulation
+# MAIN SIMULATION
 # ============================================================================
-
 def simulate_dataset(
-    n_flat, n_pspl, n_binary,
-    binary_preset='baseline',
-    observational_preset=None,
-    cadence_mask_prob=None,
-    mag_error_std=None,
-    num_workers=1,
-    seed=None,
-    save_params=True
-):
+    n_flat: int,
+    n_pspl: int,
+    n_binary: int,
+    binary_preset: str = 'baseline',
+    observational_preset: str = None,
+    cadence_mask_prob: float = None,
+    mag_error_std: float = None,
+    num_workers: int = 1,
+    seed: int = None,
+    save_params: bool = True
+) -> tuple:
     """
-    Generate complete microlensing dataset
+    Generate complete microlensing dataset for Roman Space Telescope readiness.
+    
+    Returns:
+        (flux, delta_t, labels, timestamps, params_dict)
     """
     if seed is not None:
         np.random.seed(seed)
@@ -484,15 +469,18 @@ def simulate_dataset(
         error = mag_error_std if mag_error_std is not None else SimConfig.MAG_ERROR_STD
     
     # Generate timestamps
-    timestamps = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS)
+    timestamps = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS, dtype=np.float64)
     
-    print("Microlensing Simulation for Transformer v4.1 (Anti-Bias Mode)")
+    print("=" * 80)
+    print("Roman Space Telescope Microlensing Simulation")
+    print("=" * 80)
     print(f"Dataset: Flat={n_flat}, PSPL={n_pspl}, Binary={n_binary}")
     print(f"Binary topology: {binary_preset}")
-    print(f"Cadence: {cadence*100:.0f}% missing, Error: {error:.3f} mag")
-    print(f"Bias Prevention: Strict t0/tE bounds, High-Mag PSPLs enabled")
+    print(f"Cadence: {cadence*100:.0f}% missing | Error: {error:.3f} mag")
+    print(f"Causality enforcement: Strict t0/tE bounds, high-mag PSPLs enabled")
     print(f"Workers: {num_workers}")
-    print(f"Accelerator: {'Numba' if HAS_NUMBA else 'NumPy Vectorization'}")
+    print(f"Accelerator: {'Numba JIT' if HAS_NUMBA else 'NumPy Vectorization'}")
+    print("=" * 80)
     
     # Generate parameters
     print("\nGenerating parameters...")
@@ -516,77 +504,74 @@ def simulate_dataset(
         with Pool(num_workers) as pool:
             results = list(tqdm(
                 pool.imap(generate_single_event, args_list),
-                total=len(args_list)
+                total=len(args_list),
+                desc="Events"
             ))
     else:
-        results = [generate_single_event(args) for args in tqdm(args_list)]
+        results = [generate_single_event(args) for args in tqdm(args_list, desc="Events")]
     
-    # Unpack
-    flux = np.array([r[0] for r in results])
-    labels = np.array([r[1] for r in results])
+    # Unpack results
+    flux = np.array([r[0] for r in results], dtype=np.float64)
+    labels = np.array([r[1] for r in results], dtype=np.int64)
     all_params = [r[2] for r in results]
     
-    # Organize parameters
+    # Organize parameters by class
     params_dict = {
         'flat': [all_params[i] for i in range(len(all_params)) if labels[i] == 0],
         'pspl': [all_params[i] for i in range(len(all_params)) if labels[i] == 1],
         'binary': [all_params[i] for i in range(len(all_params)) if labels[i] == 2]
     }
     
-    # --- TEMPORAL BIAS FIX APPLIED HERE ---
-    print("\nComputing NON-CHEATING temporal encoding (delta_t)...")
+    # Calculate causal temporal encoding
+    print("\nComputing causal temporal encoding (delta_t)...")
     start_time = time.time()
     
-    # Ensure inputs are correct types for Numba/NumPy
-    timestamps = timestamps.astype(np.float64)
-    flux = flux.astype(np.float64)
-    pad_val = float(SimConfig.PAD_VALUE)
+    delta_t_array = calculate_delta_t_per_event(timestamps, flux, float(SimConfig.PAD_VALUE))
     
-    delta_t_array = calculate_delta_t_per_event(timestamps, flux, pad_val)
+    elapsed = time.time() - start_time
+    print(f"Delta_t calculation completed in {elapsed:.2f} seconds")
     
-    end_time = time.time()
-    print(f"Delta_t calculation finished in {end_time - start_time:.2f} seconds.")
-    
-    # Shuffle
+    # Shuffle dataset
     shuffle_idx = np.random.permutation(len(flux))
     flux = flux[shuffle_idx]
     delta_t_array = delta_t_array[shuffle_idx]
     labels = labels[shuffle_idx]
     
-    print(f"\nGeneration complete:")
-    print(f"Total: {len(flux)}")
-    print(f"  Flat:   {(labels==0).sum()} ({(labels==0).mean()*100:.1f}%)")
-    print(f"  PSPL:   {(labels==1).sum()} ({(labels==1).mean()*100:.1f}%)")
-    print(f"  Binary: {(labels==2).sum()} ({(labels==2).mean()*100:.1f}%)")
+    # Summary statistics
+    print("\n" + "=" * 80)
+    print("Dataset Generation Complete")
+    print("=" * 80)
+    print(f"Total events: {len(flux):,}")
+    print(f"  Flat:   {(labels==0).sum():,} ({(labels==0).mean()*100:.1f}%)")
+    print(f"  PSPL:   {(labels==1).sum():,} ({(labels==1).mean()*100:.1f}%)")
+    print(f"  Binary: {(labels==2).sum():,} ({(labels==2).mean()*100:.1f}%)")
+    print("=" * 80)
     
     return flux, delta_t_array, labels, timestamps, params_dict if save_params else None
-
 
 # ============================================================================
 # CLI
 # ============================================================================
-
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate microlensing dataset for Transformer v4.0',
+        description='Generate microlensing dataset for Roman Space Telescope',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Baseline 1M events
+  # Baseline 1M events (Roman quality)
   python simulate.py --preset baseline_1M
   
-  # Topology studies
+  # Topology study
   python simulate.py --preset distinct --n_flat 50000 --n_pspl 50000 --n_binary 50000
   
-  # Custom with Parameter Save (CRITICAL for temporal diagnosis)
-  python simulate.py --n_flat 10000 --n_pspl 10000 --n_binary 10000 \\
-      --binary_preset distinct --output ../data/test_params_fixed.npz
+  # Quick test
+  python simulate.py --preset quick_test
         """
     )
     
-    parser.add_argument('--n_flat', type=int, default=10000)
-    parser.add_argument('--n_pspl', type=int, default=10000)
-    parser.add_argument('--n_binary', type=int, default=10000)
+    parser.add_argument('--n_flat', type=int, default=10000, help="Number of flat events")
+    parser.add_argument('--n_pspl', type=int, default=10000, help="Number of PSPL events")
+    parser.add_argument('--n_binary', type=int, default=10000, help="Number of binary events")
     
     parser.add_argument('--preset', type=str, choices=[
         'baseline_1M', 'quick_test',
@@ -596,15 +581,22 @@ Examples:
     ], help='Predefined experiment preset')
     
     parser.add_argument('--binary_preset', type=str, default='distinct',
-                        choices=list(BinaryPresets.PRESETS.keys()))
+                        choices=list(BinaryPresets.PRESETS.keys()),
+                        help='Binary topology preset')
     
-    parser.add_argument('--cadence_mask_prob', type=float, default=None)
-    parser.add_argument('--mag_error_std', type=float, default=None)
+    parser.add_argument('--cadence_mask_prob', type=float, default=None,
+                        help='Fraction of observations to mask')
+    parser.add_argument('--mag_error_std', type=float, default=None,
+                        help='Photometric error standard deviation')
     
-    parser.add_argument('--output', type=str, default='../data/dataset.npz')
-    parser.add_argument('--num_workers', type=int, default=1)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--no_save_params', action='store_true')
+    parser.add_argument('--output', type=str, default='../data/dataset.npz',
+                        help='Output file path')
+    parser.add_argument('--num_workers', type=int, default=1,
+                        help='Number of parallel workers')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
+    parser.add_argument('--no_save_params', action='store_true',
+                        help='Skip saving individual event parameters')
     
     parser.add_argument('--list_presets', action='store_true',
                         help='List all available presets')
@@ -612,7 +604,10 @@ Examples:
     args = parser.parse_args()
     
     if args.list_presets:
-        print("\nAvailable Presets")
+        print("\n" + "=" * 80)
+        print("Available Presets")
+        print("=" * 80)
+        
         print("\nBinary Topologies:")
         for name, config in BinaryPresets.PRESETS.items():
             print(f"  {name:15s}: {config['description']}")
@@ -630,7 +625,7 @@ Examples:
         print("\nExperiment Presets:")
         print("  baseline_1M    : 1M events, Roman quality")
         print("  quick_test     : 300 events for testing")
-        print()
+        print("=" * 80)
         return
     
     # Apply preset overrides
@@ -682,7 +677,7 @@ Examples:
         save_params=not args.no_save_params
     )
     
-    # Save
+    # Save dataset
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -696,21 +691,23 @@ Examples:
         'binary_preset': args.binary_preset,
         'cadence_mask_prob': args.cadence_mask_prob or SimConfig.CADENCE_MASK_PROB,
         'mag_error_std': args.mag_error_std or SimConfig.MAG_ERROR_STD,
-        't0_range': (PSPLParams.T0_MIN, PSPLParams.T0_MAX)
+        't0_range': (PSPLParams.T0_MIN, PSPLParams.T0_MAX),
+        'tE_range': (PSPLParams.TE_MIN, PSPLParams.TE_MAX),
+        'seed': args.seed
     }
     
     if params_dict:
-        # Saving parameters as JSON strings to handle variable dict sizes and complex structures in NPZ
+        # Save parameters as JSON for variable structure handling
         save_dict['params_flat_json'] = json.dumps(params_dict['flat'])
         save_dict['params_pspl_json'] = json.dumps(params_dict['pspl'])
         save_dict['params_binary_json'] = json.dumps(params_dict['binary'])
     
-    np.savez(output_path, **save_dict)
+    np.savez_compressed(output_path, **save_dict)
     
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"\nDataset saved: {output_path}")
-    print(f"Size: {file_size_mb:.1f} MB")
-
+    print(f"File size: {file_size_mb:.1f} MB")
+    print(f"Compression: npz_compressed")
 
 if __name__ == '__main__':
     main()
