@@ -707,7 +707,7 @@ class ComprehensiveEvaluator:
             print(f"   u0 dependency analysis failed: {e}")
     
     def generate_all_plots(self):
-        """Orchestrate all visualizations."""
+        
         print("\n[Visualizations] Generating diagnostic plots...")
         
         self.plot_roc_curve()
@@ -715,12 +715,14 @@ class ComprehensiveEvaluator:
         self.plot_calibration_curve()
         self.plot_fine_early_detection()
         
-        print("   Generating evolution examples...")
-        if self.n_classes == 3:
-            self.plot_high_res_evolution(event_type='flat')
-        self.plot_high_res_evolution(event_type='pspl')
-        self.plot_high_res_evolution(event_type='binary')
-        
+        print(f"   Generating {n_evolution_per_type} evolution examples per type...")
+        # Loop n times
+        for _ in range(n_evolution_per_type):
+            if self.n_classes == 3:
+                self.plot_high_res_evolution(event_type='flat')
+            self.plot_high_res_evolution(event_type='pspl')
+            self.plot_high_res_evolution(event_type='binary')
+            
         self.diagnose_temporal_bias()
         self.analyze_u0_dependency()
         
