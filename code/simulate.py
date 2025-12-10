@@ -555,30 +555,67 @@ def simulate_dataset(
 def params_to_numpy(params_list):
     """Convert list of dicts to numpy arrays (optimized for speed)"""
     if not params_list:
-        return None, None
+        return None, None, None
     
-    # Get all keys (same for all dicts in the list)
-    keys = list(params_list[0].keys())
+    # Separate numeric and string values
+    all_numeric = []
+    all_strings = []
+    numeric_keys = []
+    string_keys = []
     
-    # Pre-allocate array
+    # Get keys and determine which are numeric
+    first_params = params_list[0]
+    for key in first_params.keys():
+        value = first_params[key]
+        if isinstance(value, (int, float, np.floating, np.integer)):
+            numeric_keys.append(key)
+        else:
+            string_keys.append(key)
+    
+    # Pre-allocate arrays
     n_params = len(params_list)
-    all_values = np.empty((n_params, len(keys)), dtype=np.float32)
+    numeric_values = np.empty((n_params, len(numeric_keys)), dtype=np.float32)
+    string_values = []
     
-    # Fill array (fast column-wise)
-    for i, key in enumerate(keys):
-        for j in range(n_params):
-            all_values[j, i] = float(params_list[j][key])
+    # Fill arrays
+    for j in range(n_params):
+        param_dict = params_list[j]
+        # Fill numeric values
+        for i, key in enumerate(numeric_keys):
+            numeric_values[j, i] = float(param_dict[key])
+        # Collect string values
+        if string_keys:
+            string_row = [str(param_dict[key]) for key in string_keys]
+            string_values.append(string_row)
     
-    return all_values, keys
+    return numeric_values, numeric_keys, (string_values, string_keys) if string_keys else None
 
-def numpy_to_params(values_array, keys_list):
+def numpy_to_params(numeric_values, numeric_keys, string_data):
     """Convert numpy arrays back to list of dicts"""
-    if values_array is None:
+    if numeric_values is None:
         return []
     
     params_list = []
-    for row in values_array:
-        params_list.append(dict(zip(keys_list, row)))
+    n_params = len(numeric_values)
+    
+    if string_data:
+        string_values, string_keys = string_data
+        for j in range(n_params):
+            param_dict = {}
+            # Add numeric values
+            for i, key in enumerate(numeric_keys):
+                param_dict[key] = numeric_values[j, i]
+            # Add string values
+            for i, key in enumerate(string_keys):
+                param_dict[key] = string_values[j][i]
+            params_list.append(param_dict)
+    else:
+        for j in range(n_params):
+            param_dict = {}
+            for i, key in enumerate(numeric_keys):
+                param_dict[key] = numeric_values[j, i]
+            params_list.append(param_dict)
+    
     return params_list
 
 # ============================================================================
@@ -699,7 +736,7 @@ Examples:
         binary_preset=args.binary_preset,
         cadence_mask_prob=args.cadence_mask_prob,
         mag_error_std=args.mag_error_std,
-        num_workers=args.num_workers,
+        num_workers=min(args.num_workers, 20),  # Limit workers to avoid overhead
         seed=args.seed,
         save_params=not args.no_save_params
     )
@@ -737,26 +774,38 @@ Examples:
     }
     
     if params_dict and not args.no_save_params:
-        # 2. Store parameters as numpy arrays (5-10x faster than JSON)
+        # 2. Store parameters as numpy arrays with separate handling for strings
         print("Converting parameters to optimized numpy format...")
         
         # Convert each parameter set to numpy arrays
-        flat_vals, flat_keys = params_to_numpy(params_dict['flat'])
-        pspl_vals, pspl_keys = params_to_numpy(params_dict['pspl'])
-        binary_vals, binary_keys = params_to_numpy(params_dict['binary'])
+        flat_vals, flat_num_keys, flat_str_data = params_to_numpy(params_dict['flat'])
+        pspl_vals, pspl_num_keys, pspl_str_data = params_to_numpy(params_dict['pspl'])
+        binary_vals, binary_num_keys, binary_str_data = params_to_numpy(params_dict['binary'])
         
         # Store in save_dict
         if flat_vals is not None:
-            save_dict['params_flat_values'] = flat_vals
-            save_dict['params_flat_keys'] = np.array(flat_keys, dtype=object)
+            save_dict['params_flat_numeric_values'] = flat_vals
+            save_dict['params_flat_numeric_keys'] = np.array(flat_num_keys, dtype=object)
+            if flat_str_data:
+                str_vals, str_keys = flat_str_data
+                save_dict['params_flat_string_values'] = np.array(str_vals, dtype=object)
+                save_dict['params_flat_string_keys'] = np.array(str_keys, dtype=object)
         
         if pspl_vals is not None:
-            save_dict['params_pspl_values'] = pspl_vals
-            save_dict['params_pspl_keys'] = np.array(pspl_keys, dtype=object)
+            save_dict['params_pspl_numeric_values'] = pspl_vals
+            save_dict['params_pspl_numeric_keys'] = np.array(pspl_num_keys, dtype=object)
+            if pspl_str_data:
+                str_vals, str_keys = pspl_str_data
+                save_dict['params_pspl_string_values'] = np.array(str_vals, dtype=object)
+                save_dict['params_pspl_string_keys'] = np.array(str_keys, dtype=object)
         
         if binary_vals is not None:
-            save_dict['params_binary_values'] = binary_vals
-            save_dict['params_binary_keys'] = np.array(binary_keys, dtype=object)
+            save_dict['params_binary_numeric_values'] = binary_vals
+            save_dict['params_binary_numeric_keys'] = np.array(binary_num_keys, dtype=object)
+            if binary_str_data:
+                str_vals, str_keys = binary_str_data
+                save_dict['params_binary_string_values'] = np.array(str_vals, dtype=object)
+                save_dict['params_binary_string_keys'] = np.array(str_keys, dtype=object)
     
     # 3. Choose compression based on size and speed preference
     print(f"\nSaving to {output_path}...")
@@ -783,8 +832,6 @@ Examples:
     print(f"Size: {file_size_mb:.1f} MB")
     print(f"Compression: {compression_type}")
     print(f"Total events: {len(flux):,}")
-    print(f"Format: Standard .npz (compatible with all numpy versions)")
-    
 
 if __name__ == '__main__':
     main()
