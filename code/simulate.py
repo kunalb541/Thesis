@@ -501,7 +501,7 @@ def simulate_dataset(
     # Generate events
     print("\nGenerating light curves...")
     if num_workers > 1:
-        with Pool(num_workers) as pool:
+        with Pool(min(num_workers, 20)) as pool:  # Limit to 20 workers max
             results = list(tqdm(
                 pool.imap(generate_single_event, args_list),
                 total=len(args_list),
@@ -548,75 +548,6 @@ def simulate_dataset(
     print("=" * 80)
     
     return flux, delta_t_array, labels, timestamps, params_dict if save_params else None
-
-# ============================================================================
-# OPTIMIZED SAVING UTILITIES
-# ============================================================================
-def params_to_numpy(params_list):
-    """Convert list of dicts to numpy arrays (optimized for speed)"""
-    if not params_list:
-        return None, None, None
-    
-    # Separate numeric and string values
-    all_numeric = []
-    all_strings = []
-    numeric_keys = []
-    string_keys = []
-    
-    # Get keys and determine which are numeric
-    first_params = params_list[0]
-    for key in first_params.keys():
-        value = first_params[key]
-        if isinstance(value, (int, float, np.floating, np.integer)):
-            numeric_keys.append(key)
-        else:
-            string_keys.append(key)
-    
-    # Pre-allocate arrays
-    n_params = len(params_list)
-    numeric_values = np.empty((n_params, len(numeric_keys)), dtype=np.float32)
-    string_values = []
-    
-    # Fill arrays
-    for j in range(n_params):
-        param_dict = params_list[j]
-        # Fill numeric values
-        for i, key in enumerate(numeric_keys):
-            numeric_values[j, i] = float(param_dict[key])
-        # Collect string values
-        if string_keys:
-            string_row = [str(param_dict[key]) for key in string_keys]
-            string_values.append(string_row)
-    
-    return numeric_values, numeric_keys, (string_values, string_keys) if string_keys else None
-
-def numpy_to_params(numeric_values, numeric_keys, string_data):
-    """Convert numpy arrays back to list of dicts"""
-    if numeric_values is None:
-        return []
-    
-    params_list = []
-    n_params = len(numeric_values)
-    
-    if string_data:
-        string_values, string_keys = string_data
-        for j in range(n_params):
-            param_dict = {}
-            # Add numeric values
-            for i, key in enumerate(numeric_keys):
-                param_dict[key] = numeric_values[j, i]
-            # Add string values
-            for i, key in enumerate(string_keys):
-                param_dict[key] = string_values[j][i]
-            params_list.append(param_dict)
-    else:
-        for j in range(n_params):
-            param_dict = {}
-            for i, key in enumerate(numeric_keys):
-                param_dict[key] = numeric_values[j, i]
-            params_list.append(param_dict)
-    
-    return params_list
 
 # ============================================================================
 # CLI
@@ -736,28 +667,57 @@ Examples:
         binary_preset=args.binary_preset,
         cadence_mask_prob=args.cadence_mask_prob,
         mag_error_std=args.mag_error_std,
-        num_workers=min(args.num_workers, 20),  # Limit workers to avoid overhead
+        num_workers=args.num_workers,
         seed=args.seed,
         save_params=not args.no_save_params
     )
     
     # ====================================================================
-    # 🚀 OPTIMIZED SAVING SECTION
+    # 🚀 LIGHTNING-FAST SAVING OPTIMIZATION
     # ====================================================================
     print("\n" + "=" * 80)
-    print("Optimized Saving Phase")
+    print("🚀 Lightning-Fast Saving Optimization")
     print("=" * 80)
     
-    # 1. Reduce precision to float32 (50% smaller files, faster I/O)
-    print("Converting to float32 for faster I/O...")
-    flux = flux.astype(np.float32)
-    delta_t = delta_t.astype(np.float32)
-    timestamps = timestamps.astype(np.float32)
-    
-    # Save dataset
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
+    print("Converting arrays to float32 and numeric parameters for fast npz saving...")
+    
+    # 1. Convert all arrays to optimal dtypes
+    flux = flux.astype(np.float32)
+    delta_t = delta_t.astype(np.float32)
+    timestamps = timestamps.astype(np.float32)
+    labels = labels.astype(np.int32)
+    
+    # 2. Convert string parameters to integer codes
+    type_mapping = {'flat': 0, 'pspl': 1, 'binary': 2}
+    
+    def numeric_params(params_list):
+        """Convert list of parameter dicts to numeric numpy array"""
+        if not params_list:
+            return None, None
+        
+        n = len(params_list)
+        # Get all keys except 'type' (will be encoded as integer)
+        keys = [k for k in params_list[0].keys() if k != 'type']
+        arr = np.zeros((n, len(keys) + 1), dtype=np.float32)  # +1 for type code
+        
+        for i, p in enumerate(params_list):
+            # Fill numeric values
+            for j, k in enumerate(keys):
+                arr[i, j] = float(p[k])
+            # Add type code as last column
+            arr[i, -1] = type_mapping.get(p['type'], -1)
+        
+        return arr, keys + ['type_code']
+    
+    # Convert each parameter set
+    flat_arr, flat_keys = numeric_params(params_dict.get('flat', []))
+    pspl_arr, pspl_keys = numeric_params(params_dict.get('pspl', []))
+    binary_arr, binary_keys = numeric_params(params_dict.get('binary', []))
+    
+    # 3. Prepare save dictionary
     save_dict = {
         'flux': flux,
         'delta_t': delta_t,
@@ -773,50 +733,31 @@ Examples:
         'seed': args.seed
     }
     
-    if params_dict and not args.no_save_params:
-        # 2. Store parameters as numpy arrays with separate handling for strings
-        print("Converting parameters to optimized numpy format...")
-        
-        # Convert each parameter set to numpy arrays
-        flat_vals, flat_num_keys, flat_str_data = params_to_numpy(params_dict['flat'])
-        pspl_vals, pspl_num_keys, pspl_str_data = params_to_numpy(params_dict['pspl'])
-        binary_vals, binary_num_keys, binary_str_data = params_to_numpy(params_dict['binary'])
-        
-        # Store in save_dict
-        if flat_vals is not None:
-            save_dict['params_flat_numeric_values'] = flat_vals
-            save_dict['params_flat_numeric_keys'] = np.array(flat_num_keys, dtype=object)
-            if flat_str_data:
-                str_vals, str_keys = flat_str_data
-                save_dict['params_flat_string_values'] = np.array(str_vals, dtype=object)
-                save_dict['params_flat_string_keys'] = np.array(str_keys, dtype=object)
-        
-        if pspl_vals is not None:
-            save_dict['params_pspl_numeric_values'] = pspl_vals
-            save_dict['params_pspl_numeric_keys'] = np.array(pspl_num_keys, dtype=object)
-            if pspl_str_data:
-                str_vals, str_keys = pspl_str_data
-                save_dict['params_pspl_string_values'] = np.array(str_vals, dtype=object)
-                save_dict['params_pspl_string_keys'] = np.array(str_keys, dtype=object)
-        
-        if binary_vals is not None:
-            save_dict['params_binary_numeric_values'] = binary_vals
-            save_dict['params_binary_numeric_keys'] = np.array(binary_num_keys, dtype=object)
-            if binary_str_data:
-                str_vals, str_keys = binary_str_data
-                save_dict['params_binary_string_values'] = np.array(str_vals, dtype=object)
-                save_dict['params_binary_string_keys'] = np.array(str_keys, dtype=object)
+    # Add parameter arrays if they exist
+    if flat_arr is not None:
+        save_dict['params_flat'] = flat_arr
+        save_dict['params_flat_keys'] = np.array(flat_keys, dtype='<U20')  # Fixed-width unicode
     
-    # 3. Choose compression based on size and speed preference
+    if pspl_arr is not None:
+        save_dict['params_pspl'] = pspl_arr
+        save_dict['params_pspl_keys'] = np.array(pspl_keys, dtype='<U20')
+    
+    if binary_arr is not None:
+        save_dict['params_binary'] = binary_arr
+        save_dict['params_binary_keys'] = np.array(binary_keys, dtype='<U20')
+    
+    # 4. Save with optimal settings
     print(f"\nSaving to {output_path}...")
     start_save = time.time()
     
     if args.no_compress:
-        np.savez(output_path, **save_dict)  # Fastest saving
-        compression_type = "Uncompressed (fastest)"
+        # 🚀 Fastest: Uncompressed npz
+        np.savez(output_path, **save_dict)
+        compression_type = "Uncompressed (lightning fast)"
     else:
-        np.savez_compressed(output_path, **save_dict)  # Balanced
-        compression_type = "Compressed (balanced)"
+        # Balanced: Compressed npz
+        np.savez_compressed(output_path, **save_dict)
+        compression_type = "Compressed (smaller files)"
     
     save_time = time.time() - start_save
     
@@ -826,7 +767,7 @@ Examples:
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
     
     print("\n" + "=" * 80)
-    print("Dataset Saved Successfully")
+    print("✅ Dataset Saved Successfully")
     print("=" * 80)
     print(f"File: {output_path}")
     print(f"Size: {file_size_mb:.1f} MB")
