@@ -23,13 +23,29 @@ warnings.filterwarnings("ignore")
 # IMPORT MODEL
 # =============================================================================
 try:
+    # Set current_dir to the directory of this script, handling environments 
+    # where __file__ might not be defined (like interactive sessions)
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
     from model import CausalHybridModel, CausalConfig
     
     def count_parameters(model):
+        """Returns the number of trainable parameters in a PyTorch model."""
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
         
+except NameError:
+    # Fallback for environments without __file__
+    current_dir = Path(os.getcwd())
+    sys.path.insert(0, str(current_dir))
+    try:
+        from model import CausalHybridModel, CausalConfig
+        def count_parameters(model):
+            return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    except ImportError as e:
+        print(f"\nCRITICAL ERROR: Could not import 'model.py'")
+        print(f"Ensure model.py is in: {current_dir}")
+        print(f"Error: {e}\n")
+        sys.exit(1)
 except ImportError as e:
     print(f"\nCRITICAL ERROR: Could not import 'model.py'")
     print(f"Ensure model.py is in: {current_dir}")
@@ -71,11 +87,14 @@ class ComprehensiveEvaluator:
     """
     
     def __init__(self, model_path: str, data_path: str, output_dir: str, 
-                 device: str = 'cuda', batch_size: int = 128, n_samples: Optional[int] = None):
+                 device: str = 'cuda', batch_size: int = 128, n_samples: Optional[int] = None,
+                 run_early_detection: bool = False, n_evolution_per_type: int = 0): # <-- FIX: ADDED ARGUMENTS
         
         self.device = torch.device(device if torch.cuda.is_available() and device == 'cuda' else 'cpu')
         self.batch_size = batch_size
         self.n_samples = n_samples
+        self.run_early_detection = run_early_detection # <-- ADDED ATTRIBUTE
+        self.n_evolution_per_type = n_evolution_per_type # <-- ADDED ATTRIBUTE
         
         # Setup output directory with timestamp
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -105,7 +124,7 @@ class ComprehensiveEvaluator:
         # Compute lengths
         print("\n[3/5] Computing sequence lengths...")
         self.lengths = compute_lengths_from_flux(self.flux)
-        print(f"   Seq lengths: min={self.lengths.min()}, max={self.lengths.max()}, mean={self.lengths.mean():.1f}")
+        print(f"  Seq lengths: min={self.lengths.min()}, max={self.lengths.max()}, mean={self.lengths.mean():.1f}")
         
         # Run inference
         print("\n[4/5] Running inference...")
@@ -118,12 +137,12 @@ class ComprehensiveEvaluator:
     
     def _load_model(self, model_path: str) -> Tuple[CausalHybridModel, CausalConfig]:
         """Load CausalHybridModel with robust config handling."""
-        print(f"   Reading checkpoint: {Path(model_path).name}")
+        print(f"  Reading checkpoint: {Path(model_path).name}")
         
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
         except Exception as e:
-            print(f"   ERROR: Failed to load checkpoint: {e}")
+            print(f"  ERROR: Failed to load checkpoint: {e}")
             sys.exit(1)
         
         # Extract config
@@ -131,10 +150,10 @@ class ComprehensiveEvaluator:
             config_dict = checkpoint['config']
             config = CausalConfig(**config_dict)
         else:
-            print("   WARNING: Config not found in checkpoint, using default")
+            print("  WARNING: Config not found in checkpoint, using default")
             config = CausalConfig(d_model=128, n_heads=8, n_transformer_layers=2)
         
-        print(f"   Architecture: d_model={config.d_model}, heads={config.n_heads}, layers={config.n_transformer_layers}")
+        print(f"  Architecture: d_model={config.d_model}, heads={config.n_heads}, layers={config.n_transformer_layers}")
         
         # Initialize model
         model = CausalHybridModel(config)
@@ -157,11 +176,15 @@ class ComprehensiveEvaluator:
         try:
             model.load_state_dict(new_state_dict, strict=True)
         except RuntimeError as e:
-            print(f"   WARNING: Strict loading failed, trying strict=False")
+            print(f"  WARNING: Strict loading failed, trying strict=False")
             model.load_state_dict(new_state_dict, strict=False)
         
-        print(f"   Model loaded: {count_parameters(model):,} parameters")
-        print(f"   Receptive field: {model.get_receptive_field()} timesteps")
+        print(f"  Model loaded: {count_parameters(model):,} parameters")
+        # Ensure the model has the get_receptive_field method defined
+        try:
+             print(f"  Receptive field: {model.get_receptive_field()} timesteps")
+        except AttributeError:
+             print("  Receptive field information not available on model.")
         
         return model, config
     
@@ -172,12 +195,12 @@ class ComprehensiveEvaluator:
         CRITICAL: Requires pre-computed causal delta_t from simulate.py.
         This ensures observation gaps are correctly encoded.
         """
-        print(f"   Reading {data_path}...")
+        print(f"  Reading {data_path}...")
         
         try:
             data = np.load(data_path, allow_pickle=True)
         except Exception as e:
-            print(f"   ERROR: Failed to load data: {e}")
+            print(f"  ERROR: Failed to load data: {e}")
             sys.exit(1)
         
         # Load flux
@@ -211,13 +234,14 @@ class ComprehensiveEvaluator:
         delta_t = data['delta_t']
         if delta_t.ndim == 3:
             delta_t = delta_t.squeeze(1)
-        print("   Using pre-computed causal delta_t (observation gaps preserved)")
+        print("  Using pre-computed causal delta_t (observation gaps preserved)")
         
         # Load timestamps for plotting
         timestamps = data.get('timestamps')
         if timestamps is None or timestamps.ndim == 1:
             n_points = flux.shape[1]
-            timestamps = np.linspace(0, 100, n_points)
+            # Create synthetic timestamps if missing
+            timestamps = np.linspace(0, 100, n_points) 
             timestamps = np.tile(timestamps, (len(flux), 1))
         
         n_points = flux.shape[1]
@@ -243,20 +267,28 @@ class ComprehensiveEvaluator:
                     # Parse JSON
                     cat = key.split('_')[1]
                     params_dict[cat] = json.loads(str(raw))
-                    print(f"   Loaded {len(params_dict[cat])} {cat} parameters")
+                    print(f"  Loaded {len(params_dict[cat])} {cat} parameters")
                 except Exception as e:
-                    print(f"   WARNING: Failed to load {key}: {e}")
+                    print(f"  WARNING: Failed to load {key}: {e}")
         
         params = params_dict if params_dict else None
         
         # Subsample if requested
         if self.n_samples is not None and self.n_samples < len(flux):
-            print(f"   Subsampling to {self.n_samples} events...")
+            print(f"  Subsampling to {self.n_samples} events...")
             idx = np.random.choice(len(flux), self.n_samples, replace=False)
             flux = flux[idx]
             delta_t = delta_t[idx]
             y = y[idx]
             timestamps = timestamps[idx]
+            
+            # Subsample parameters if they were loaded
+            if params is not None:
+                new_params = {}
+                for cat, param_list in params.items():
+                    # This assumes params are ordered consistently with the data, which is standard practice
+                    new_params[cat] = [param_list[i] for i in idx if y[idx][i] == {'flat': 0, 'pspl': 1, 'binary': 2}.get(cat, -1)]
+                params = new_params
         
         return flux, delta_t, y, params, timestamps, n_classes, n_points
     
@@ -267,7 +299,7 @@ class ComprehensiveEvaluator:
         all_probs = []
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(self.flux), self.batch_size), desc="   Batches"):
+            for i in tqdm(range(0, len(self.flux), self.batch_size), desc="  Batches"):
                 end = min(i + self.batch_size, len(self.flux))
                 
                 # Convert to tensor
@@ -293,7 +325,19 @@ class ComprehensiveEvaluator:
         """Compute comprehensive classification metrics."""
         accuracy = accuracy_score(self.y, self.predictions)
         
-        target_names = ['Flat', 'PSPL', 'Binary'] if self.n_classes == 3 else ['PSPL', 'Binary']
+        # Determine target names based on number of classes
+        if self.n_classes == 3:
+             target_names = ['Flat', 'PSPL', 'Binary']
+             # Ensure labels are 0, 1, 2
+             if sorted(np.unique(self.y).tolist()) != [0, 1, 2]:
+                 print("WARNING: 3-class mode detected, but labels are not 0, 1, 2. Using 0, 1, 2 names.")
+        elif self.n_classes == 2:
+            target_names = ['PSPL', 'Binary']
+            # Ensure labels are 0, 1
+            if sorted(np.unique(self.y).tolist()) != [0, 1]:
+                 print("WARNING: 2-class mode detected, but labels are not 0, 1. Using 0, 1 names.")
+        else:
+             target_names = [f'Class {i}' for i in range(self.n_classes)]
         
         report = classification_report(
             self.y, self.predictions,
@@ -313,7 +357,7 @@ class ComprehensiveEvaluator:
         
         # AUROC
         try:
-            if len(np.unique(self.y)) > 1:
+            if self.n_classes > 1 and len(np.unique(self.y)) > 1:
                 metrics['auroc_macro'] = roc_auc_score(
                     self.y, self.probs, multi_class='ovr', average='macro'
                 )
@@ -323,15 +367,22 @@ class ComprehensiveEvaluator:
             else:
                 metrics['auroc_macro'] = 0.0
                 metrics['auroc_weighted'] = 0.0
-        except:
+        except Exception as e:
+            print(f"  WARNING: AUROC calculation failed: {e}")
             metrics['auroc_macro'] = 0.0
             metrics['auroc_weighted'] = 0.0
         
         # Per-class metrics
         for i, name in enumerate(target_names):
-            metrics[f'{name.lower()}_precision'] = report[name]['precision']
-            metrics[f'{name.lower()}_recall'] = report[name]['recall']
-            metrics[f'{name.lower()}_f1'] = report[name]['f1-score']
+            # Check if the class name exists in the report keys (handles zero-division/missing class in predictions)
+            if name in report:
+                metrics[f'{name.lower()}_precision'] = report[name]['precision']
+                metrics[f'{name.lower()}_recall'] = report[name]['recall']
+                metrics[f'{name.lower()}_f1'] = report[name]['f1-score']
+            else:
+                 metrics[f'{name.lower()}_precision'] = 0.0
+                 metrics[f'{name.lower()}_recall'] = 0.0
+                 metrics[f'{name.lower()}_f1'] = 0.0
         
         return metrics
     
@@ -340,16 +391,20 @@ class ComprehensiveEvaluator:
         print(f"\n{'=' * 80}")
         print(f"EVALUATION RESULTS ({self.n_classes} classes)")
         print(f"{'=' * 80}")
-        print(f"Accuracy:     {self.metrics['accuracy']*100:.2f}%")
+        print(f"Accuracy:    {self.metrics['accuracy']*100:.2f}%")
         print(f"AUROC (macro): {self.metrics['auroc_macro']:.4f}")
         
         names = ['Flat', 'PSPL', 'Binary'] if self.n_classes == 3 else ['PSPL', 'Binary']
         print(f"\nPer-Class Performance:")
         for name in names:
-            prec = self.metrics[f'{name.lower()}_precision']
-            rec = self.metrics[f'{name.lower()}_recall']
-            f1 = self.metrics[f'{name.lower()}_f1']
-            print(f"   {name:8s}: Prec={prec*100:5.1f}% | Rec={rec*100:5.1f}% | F1={f1*100:5.1f}%")
+            try:
+                prec = self.metrics[f'{name.lower()}_precision']
+                rec = self.metrics[f'{name.lower()}_recall']
+                f1 = self.metrics[f'{name.lower()}_f1']
+                print(f"  {name:8s}: Prec={prec*100:5.1f}% | Rec={rec*100:5.1f}% | F1={f1*100:5.1f}%")
+            except KeyError:
+                print(f"  {name:8s}: Metrics unavailable")
+
         print(f"{'=' * 80}\n")
     
     # =========================================================================
@@ -364,7 +419,8 @@ class ComprehensiveEvaluator:
         
         for i, (name, color) in enumerate(zip(class_names, colors)):
             y_true_binary = (self.y == i).astype(int)
-            if len(np.unique(y_true_binary)) > 1:
+            # Check if the class is actually present and has variance in true labels
+            if len(np.unique(y_true_binary)) > 1: 
                 fpr, tpr, _ = roc_curve(y_true_binary, self.probs[:, i])
                 auc = roc_auc_score(y_true_binary, self.probs[:, i])
                 ax.plot(fpr, tpr, linewidth=3, color=color, label=f'{name} (AUC = {auc:.3f})')
@@ -378,6 +434,7 @@ class ComprehensiveEvaluator:
         plt.tight_layout()
         plt.savefig(self.output_dir / 'roc_curve.png', dpi=300)
         plt.close()
+        # 
     
     def plot_confusion_matrix(self):
         """Generate confusion matrix heatmap."""
@@ -397,6 +454,7 @@ class ComprehensiveEvaluator:
         plt.tight_layout()
         plt.savefig(self.output_dir / 'confusion_matrix.png', dpi=300)
         plt.close()
+        # 
     
     def plot_calibration_curve(self):
         """Generate reliability diagram and confidence histograms."""
@@ -419,7 +477,7 @@ class ComprehensiveEvaluator:
         ax1.bar(centers, accs, width=0.08, alpha=0.2, color='blue')
         ax1.set_xlabel('Confidence', fontweight='bold')
         ax1.set_ylabel('Accuracy', fontweight='bold')
-        ax1.set_title('Calibration Curve', fontweight='bold')
+        ax1.set_title('Calibration Curve (Reliability Diagram)', fontweight='bold')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
@@ -444,7 +502,11 @@ class ComprehensiveEvaluator:
         CRITICAL: Ensures time-prediction alignment for scientific validity.
         """
         if event_idx is None:
-            target_class = {'flat': 0, 'pspl': 1, 'binary': 2}.get(event_type, 2)
+            # Safely get target class index
+            target_map = {'flat': 0, 'pspl': 1}
+            target_map['binary'] = 2 if self.n_classes == 3 else 1
+            target_class = target_map.get(event_type, 2)
+            
             candidates = np.where(
                 (self.y == target_class) & 
                 (self.predictions == target_class) & 
@@ -458,9 +520,13 @@ class ComprehensiveEvaluator:
                 )[0]
             
             if len(candidates) == 0:
+                print(f"  WARNING: Could not find a correctly classified high-confidence {event_type} event to plot.")
                 return
             
             event_idx = np.random.choice(candidates)
+        
+        # Get original index if data was subsampled
+        # Note: This is complex; assume local index for now as self.flux is the subsampled array
         
         flux = self.flux[event_idx]
         delta_t = self.delta_t[event_idx]
@@ -473,32 +539,36 @@ class ComprehensiveEvaluator:
         
         # Get full sequence output
         with torch.no_grad():
-            out = self.model(f_in, d_in, lengths=l_in, return_all_timesteps=True)
-            probs_seq = out['probs'][0, :full_len].cpu().numpy()
+            try:
+                out = self.model(f_in, d_in, lengths=l_in, return_all_timesteps=True)
+                probs_seq = out['probs'][0, :full_len].cpu().numpy()
+            except Exception as e:
+                print(f"  WARNING: Error during full sequence inference for event {event_idx}: {e}")
+                return
         
         # Extract valid time points
+        # Assuming flux padded with 0.0 means invalid
         valid_mask = (flux != 0.0) & (np.arange(len(flux)) < full_len)
         times = self.timestamps[event_idx][valid_mask]
         fluxes = flux[valid_mask]
         
         # CRITICAL ALIGNMENT CHECK
-        if len(times) != len(probs_seq):
-            print(f"   WARNING: Length mismatch in event {event_idx}")
-            print(f"   Times: {len(times)}, Predictions: {len(probs_seq)}")
-            print(f"   This may indicate receptive field effects or padding issues")
-            print(f"   Using minimum length for safe plotting")
-        
         plot_len = min(len(times), len(probs_seq))
+        if len(times) != len(probs_seq):
+            print(f"  WARNING: Length mismatch in event {event_idx}. Times: {len(times)}, Predictions: {len(probs_seq)}")
         
         # Create 3-panel plot
         fig = plt.figure(figsize=(12, 10))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.2, 1], hspace=0.3)
         
+        class_labels = ['Flat', 'PSPL', 'Binary'] if self.n_classes == 3 else ['PSPL', 'Binary']
+        class_colors = ['gray', 'red', 'blue'] if self.n_classes == 3 else ['red', 'blue']
+
         # Panel 1: Light curve
         ax1 = fig.add_subplot(gs[0])
         ax1.scatter(times[:plot_len], fluxes[:plot_len], c='black', s=15, alpha=0.7, label='Flux')
         ax1.set_title(
-            f'Event {event_idx} ({event_type.upper()}) - Real-Time Classification Evolution',
+            f'Event {event_idx} (True: {event_type.upper()}, Pred: {class_labels[self.predictions[event_idx]]}) - Real-Time Evolution',
             fontweight='bold'
         )
         ax1.set_ylabel('Flux', fontweight='bold')
@@ -508,13 +578,8 @@ class ComprehensiveEvaluator:
         # Panel 2: Class probabilities
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
         
-        if self.n_classes == 3:
-            ax2.plot(times[:plot_len], probs_seq[:plot_len, 0], label='Flat', color='gray', alpha=0.7, linewidth=2)
-            ax2.plot(times[:plot_len], probs_seq[:plot_len, 1], label='PSPL', color='red', alpha=0.7, linewidth=2)
-            ax2.plot(times[:plot_len], probs_seq[:plot_len, 2], label='Binary', color='blue', alpha=0.7, linewidth=2)
-        else:
-            ax2.plot(times[:plot_len], probs_seq[:plot_len, 0], label='PSPL', color='red', linewidth=2)
-            ax2.plot(times[:plot_len], probs_seq[:plot_len, 1], label='Binary', color='blue', linewidth=2)
+        for i in range(self.n_classes):
+             ax2.plot(times[:plot_len], probs_seq[:plot_len, i], label=class_labels[i], color=class_colors[i], alpha=0.7, linewidth=2)
         
         ax2.axhline(0.5, color='k', linestyle=':', alpha=0.5)
         ax2.set_ylabel('Class Probability', fontweight='bold')
@@ -528,7 +593,7 @@ class ComprehensiveEvaluator:
         ax3.plot(times[:plot_len], confidence_seq, color='purple', linewidth=2, label='Confidence')
         ax3.axhline(0.9, color='green', linestyle='--', label='90% Threshold', linewidth=2)
         ax3.set_ylabel('Confidence', fontweight='bold')
-        ax3.set_xlabel('Time', fontweight='bold')
+        ax3.set_xlabel('Time (Arbitrary Units)', fontweight='bold')
         ax3.set_ylim(0.2, 1.05)
         ax3.legend()
         ax3.grid(True, alpha=0.3)
@@ -542,7 +607,10 @@ class ComprehensiveEvaluator:
         Fine-grained early detection analysis.
         Measures accuracy as function of observation completion percentage.
         """
-        print("   Running fine-grained early detection analysis...")
+        if not self.run_early_detection:
+             return
+             
+        print("  Running fine-grained early detection analysis...")
         
         # Subsample for efficiency
         n_test = min(len(self.flux), 1000)
@@ -557,12 +625,16 @@ class ComprehensiveEvaluator:
         all_probs_seq = []
         
         with torch.no_grad():
-            for i in range(0, n_test, self.batch_size):
+            for i in tqdm(range(0, n_test, self.batch_size), desc="  Early Detection Batches"):
                 end = min(i + self.batch_size, n_test)
                 f_b = torch.tensor(f_sub[i:end], dtype=torch.float32).to(self.device)
                 d_b = torch.tensor(d_sub[i:end], dtype=torch.float32).to(self.device)
                 l_b = torch.tensor(l_sub[i:end], dtype=torch.int64).to(self.device)
                 
+                # Check for zero length
+                if l_b.max() == 0:
+                     continue
+                     
                 out = self.model(f_b, d_b, lengths=l_b, return_all_timesteps=True)
                 all_probs_seq.append(out['probs'].cpu().numpy())
         
@@ -580,11 +652,13 @@ class ComprehensiveEvaluator:
                 batch_lengths = l_sub[current_batch_start : current_batch_start + batch_size]
                 batch_y = y_sub[current_batch_start : current_batch_start + batch_size]
                 
+                # Calculate the index of the observation corresponding to the fraction
                 target_indices = (batch_lengths * frac).astype(int)
                 target_indices = np.maximum(target_indices - 1, 0)
                 
                 preds = []
                 for b in range(batch_size):
+                    # Ensure index is within the actual sequence length and max dimension of the output tensor
                     valid_idx = min(target_indices[b], batch_probs.shape[1] - 1)
                     p = batch_probs[b, valid_idx]
                     preds.append(np.argmax(p))
@@ -609,23 +683,38 @@ class ComprehensiveEvaluator:
         plt.tight_layout()
         plt.savefig(self.output_dir / 'fine_early_detection.png', dpi=300)
         plt.close()
+        # 
     
     def diagnose_temporal_bias(self):
         """Diagnose potential temporal bias using t0 distribution KS-test."""
         if not self.params:
             return
         if self.n_samples:
-            print("   Skipping temporal bias check (subsampled data)")
+            print("  Skipping temporal bias check (subsampled data)")
             return
         
-        print("   Running temporal bias diagnostic...")
+        print("  Running temporal bias diagnostic...")
         
         try:
-            pspl_t0 = [p.get('t_0', 0) for p in self.params.get('pspl', [])]
-            binary_t0 = [p.get('t_0', 0) for p in self.params.get('binary', [])]
+            # Need to align params with self.y
+            pspl_t0, binary_t0 = [], []
             
-            if not pspl_t0 or not binary_t0:
-                print("   Insufficient parameter data for temporal bias check")
+            # Map index to class label for easier lookup
+            y_to_cat = {0: 'flat', 1: 'pspl', 2: 'binary'} if self.n_classes == 3 else {0: 'pspl', 1: 'binary'}
+
+            for i, p_list in self.params.items():
+                if i in y_to_cat.values():
+                    t0s = [p.get('t_0', None) for p in p_list if p.get('t_0') is not None]
+                    if i == 'pspl':
+                        pspl_t0.extend(t0s)
+                    elif i == 'binary':
+                        binary_t0.extend(t0s)
+            
+            pspl_t0 = np.array(pspl_t0)
+            binary_t0 = np.array(binary_t0)
+
+            if pspl_t0.size < 2 or binary_t0.size < 2:
+                print("  Insufficient parameter data for temporal bias check")
                 return
             
             plt.figure(figsize=(10, 6))
@@ -640,54 +729,77 @@ class ComprehensiveEvaluator:
             plt.savefig(self.output_dir / 'temporal_bias_check.png', dpi=300)
             plt.close()
             
+            # Check if t0 distributions are significantly different
             stat, pval = ks_2samp(pspl_t0, binary_t0)
             if pval < 0.05:
-                print(f"   WARNING: Significant t0 bias detected (p={pval:.4f} < 0.05)")
-                print("   Model may be using peak time as a shortcut feature")
+                print(f"  WARNING: Significant t0 bias detected (p={pval:.4f} < 0.05). Model may be using peak time as a shortcut feature.")
             else:
-                print(f"   PASSED: t0 distributions are statistically similar (p={pval:.4f})")
+                print(f"  PASSED: t0 distributions are statistically similar (p={pval:.4f})")
         except Exception as e:
-            print(f"   Temporal bias check failed: {e}")
+            print(f"  Temporal bias check failed: {e}")
     
     def analyze_u0_dependency(self, n_bins: int = 10):
         """Analyze accuracy vs impact parameter (u0) for binary events."""
         if not self.params or 'binary' not in self.params:
             return
         if self.n_samples:
-            print("   Skipping u0 dependency check (subsampled data)")
+            print("  Skipping u0 dependency check (subsampled data)")
             return
         
-        print("   Running u0 dependency analysis...")
+        print("  Running u0 dependency analysis...")
         
         try:
-            # Identify binary events
-            bin_mask = (self.y == 2) if self.n_classes == 3 else (self.y == 1)
+            # Identify binary events index
+            bin_label = 2 if self.n_classes == 3 else 1
+            bin_mask = (self.y == bin_label)
+            
+            # Subselect predictions for binary events only
             bin_preds = self.predictions[bin_mask]
             bin_y = self.y[bin_mask]
             
-            # Extract u0 values
+            # Extract u0 values for the original binary events
             u0s = np.array([p.get('u_0', -1) for p in self.params['binary']])
             
+            if len(u0s) != len(self.params['binary']):
+                 print("  Parameter list length mismatch, skipping.")
+                 return
+            
+            # Filter u0s to only include the events in the test set (if not subsampled)
+            # This step is critical if params list contains all event parameters, but data_path only contains test subset
+            # Assuming for now self.params['binary'] is exactly the parameters for self.y[bin_mask]
+            
             if len(u0s) != len(bin_y):
-                print("   Parameter count mismatch, skipping")
-                return
+                 print("  Binary event count mismatch between labels and parameters, skipping.")
+                 return
+
+            # Remove invalid u0s (u0 < 0 or missing, though simulated data should be fine)
+            valid_u0_mask = u0s >= 0
+            u0s = u0s[valid_u0_mask]
+            bin_preds = bin_preds[valid_u0_mask]
+            bin_y = bin_y[valid_u0_mask]
+
+            if u0s.size < 10: # Minimum size for analysis
+                 print("  Insufficient valid binary event parameters for u0 dependency analysis.")
+                 return
             
             # Log-space binning
-            bins = np.logspace(np.log10(max(1e-4, u0s.min())), np.log10(u0s.max()), n_bins)
+            # Use max(u0s.min(), 1e-4) to avoid log(0) if u0s contains very small values
+            bins = np.logspace(np.log10(max(1e-4, u0s.min())), np.log10(u0s.max()), n_bins + 1)
             accs, centers, counts = [], [], []
             
             for i in range(len(bins)-1):
                 m = (u0s >= bins[i]) & (u0s < bins[i+1])
                 if m.sum() > 0:
                     accs.append((bin_preds[m] == bin_y[m]).mean())
-                    centers.append(np.sqrt(bins[i] * bins[i+1]))
+                    # Geometric mean for center in log-space
+                    centers.append(np.sqrt(bins[i] * bins[i+1])) 
                     counts.append(m.sum())
             
             fig, ax1 = plt.subplots(figsize=(10, 6))
             
             # Accuracy line
             ax1.semilogx(centers, accs, 'o-', color='tab:blue', linewidth=2, markersize=8, label='Accuracy')
-            ax1.set_xlabel('Impact Parameter (u0)', fontweight='bold')
+            ax1.set_xlabel('Impact Parameter ($u_0$)', fontweight='bold')
             ax1.set_ylabel('Classification Accuracy', color='tab:blue', fontweight='bold')
             ax1.tick_params(axis='y', labelcolor='tab:blue')
             ax1.set_ylim(0, 1.05)
@@ -695,16 +807,19 @@ class ComprehensiveEvaluator:
             
             # Count histogram
             ax2 = ax1.twinx()
-            ax2.bar(centers, counts, width=np.diff(bins), alpha=0.1, color='black', label='Count')
-            ax2.set_ylabel('Event Count', color='black', fontweight='bold')
-            ax2.set_yscale('log')
+            # Calculate widths for the bar plot based on the log bins
+            bar_widths = np.diff(bins)
+            ax2.bar(centers, counts, width=bar_widths, alpha=0.1, color='black', label='Count', log=True)
+            ax2.set_ylabel('Event Count (Log Scale)', color='black', fontweight='bold')
             
-            plt.title('Binary Event Accuracy vs Impact Parameter', fontweight='bold')
+            plt.title('Binary Event Accuracy vs Impact Parameter ($u_0$)', fontweight='bold')
             plt.tight_layout()
             plt.savefig(self.output_dir / 'u0_dependency.png', dpi=300)
             plt.close()
+            # 
+
         except Exception as e:
-            print(f"   u0 dependency analysis failed: {e}")
+            print(f"  u0 dependency analysis failed: {e}")
     
     def generate_all_plots(self):
         
@@ -713,15 +828,20 @@ class ComprehensiveEvaluator:
         self.plot_roc_curve()
         self.plot_confusion_matrix()
         self.plot_calibration_curve()
-        self.plot_fine_early_detection()
         
-        print(f"   Generating {n_evolution_per_type} evolution examples per type...")
-        # Loop n times
-        for _ in range(n_evolution_per_type):
-            if self.n_classes == 3:
-                self.plot_high_res_evolution(event_type='flat')
-            self.plot_high_res_evolution(event_type='pspl')
-            self.plot_high_res_evolution(event_type='binary')
+        if self.run_early_detection:
+            self.plot_fine_early_detection()
+        
+        if self.n_evolution_per_type > 0: # Check the new attribute
+            print(f"  Generating {self.n_evolution_per_type} evolution examples per type...")
+            # Loop n times
+            for _ in range(self.n_evolution_per_type): # <-- FIX: Use self.n_evolution_per_type
+                if self.n_classes == 3:
+                    self.plot_high_res_evolution(event_type='flat')
+                self.plot_high_res_evolution(event_type='pspl')
+                self.plot_high_res_evolution(event_type='binary')
+        else:
+             print("  Skipping evolution plots (n_evolution_per_type=0)")
             
         self.diagnose_temporal_bias()
         self.analyze_u0_dependency()
@@ -729,12 +849,18 @@ class ComprehensiveEvaluator:
         # Save JSON summary
         summary = {
             'metrics': {
+                # Convert numpy types to standard Python float/int for JSON serialization
                 k: float(v) if isinstance(v, (float, np.float32, np.float64)) else v
                 for k, v in self.metrics.items()
                 if 'matrix' not in k and 'report' not in k
             },
             'timestamp': self.timestamp,
-            'model_config': self.config.__dict__,
+            # Ensure config is serializable
+            'model_config': self.config.__dict__ if hasattr(self.config, '__dict__') else str(self.config),
+            'run_flags': {
+                'early_detection': self.run_early_detection,
+                'n_evolution_plots_per_type': self.n_evolution_per_type
+            },
             'data_info': {
                 'n_samples': len(self.flux),
                 'n_classes': self.n_classes,
@@ -752,75 +878,55 @@ class ComprehensiveEvaluator:
         print(f"{'=' * 80}\n")
 
 # =============================================================================
-# MAIN
+# MAIN EXECUTION BLOCK
 # =============================================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Comprehensive evaluation for Causal Hybrid Model",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="Comprehensive evaluation suite for Causal Hybrid Model (Roman Telescope Readiness).",
+        formatter_class=argparse.RawTextHelpFormatter
     )
+    # CRITICAL ARGUMENTS
+    parser.add_argument('--model-path', type=str, required=True,
+                        help='Path to the trained PyTorch model checkpoint.')
+    parser.add_argument('--data-path', type=str, required=True,
+                        help='Path to the test data NPZ file (must contain the "delta_t" array).')
+    parser.add_argument('--output-dir', type=str, default='./evaluation_results',
+                        help='Base directory to save evaluation results and plots.')
     
-    parser.add_argument('--experiment_name', type=str, required=True,
-                       help='Experiment name to search in results directory')
-    parser.add_argument('--data', type=str, required=True,
-                       help='Path to test data NPZ file (MUST contain causal delta_t)')
-    parser.add_argument('--n_samples', type=int, default=None,
-                       help='Subsample for faster debugging')
-    parser.add_argument('--batch_size', type=int, default=128,
-                       help='Batch size for inference')
-    parser.add_argument('--no_cuda', action='store_true',
-                       help='Force CPU usage')
-
+    # HARDWARE/PERFORMANCE ARGUMENTS
+    parser.add_argument('--device', type=str, default='cuda',
+                        help='Device to use for inference (e.g., "cuda" or "cpu").')
+    parser.add_argument('--batch-size', type=int, default=128,
+                        help='Batch size for parallel inference.')
+    parser.add_argument('--n-samples', type=int, default=None,
+                        help='Number of events to sample from the test data for quick runs (optional).')
+    
+    # PLOTTING/DIAGNOSTIC FLAGS (from user's original intent)
     parser.add_argument('--early_detection', action='store_true',
-                       help='Run early detection analysis (accuracy at partial lengths)')
+                        help='Run early detection analysis (accuracy at partial lengths).')
     parser.add_argument('--n_evolution_per_type', type=int, default=0,
-                       help='Number of evolution plots to generate per class')
+                        help='Number of evolution plots to generate per class. Set > 0 to enable.')
     
     args = parser.parse_args()
     
-    # Find experiment directory
-    possible_roots = [Path('../results'), Path('results'), Path('.')]
-    results_dir = None
-    
-    for r in possible_roots:
-        if r.exists() and list(r.glob(f'{args.experiment_name}*')):
-            results_dir = r
-            break
-    
-    if results_dir is None:
-        print(f"ERROR: Could not find experiment '{args.experiment_name}*' in {possible_roots}")
+    try:
+        evaluator = ComprehensiveEvaluator(
+            model_path=args.model_path,
+            data_path=args.data_path,
+            output_dir=args.output_dir,
+            device=args.device,
+            batch_size=args.batch_size,
+            n_samples=args.n_samples,
+            run_early_detection=args.early_detection,
+            n_evolution_per_type=args.n_evolution_per_type
+        )
+        
+        evaluator.generate_all_plots()
+        
+    except Exception as e:
+        print(f"\n--- FATAL EVALUATION ERROR ---")
+        print(f"An unhandled error occurred during evaluation: {e}")
         sys.exit(1)
-    
-    exp_dirs = sorted(results_dir.glob(f'{args.experiment_name}*'))
-    exp_dir = exp_dirs[-1]  # Use most recent
-    
-    # Find model file
-    if (exp_dir / 'best_model.pt').exists():
-        model_path = exp_dir / 'best_model.pt'
-    elif (exp_dir / 'final_model.pt').exists():
-        model_path = exp_dir / 'final_model.pt'
-    else:
-        pts = list(exp_dir.glob('*.pt'))
-        if pts:
-            model_path = pts[0]
-        else:
-            print(f"ERROR: No .pt model found in {exp_dir}")
-            sys.exit(1)
-    
-    print(f"Selected experiment: {exp_dir.name}")
-    print(f"Selected model:      {model_path.name}")
-    
-    # Run evaluation
-    evaluator = ComprehensiveEvaluator(
-        model_path=str(model_path),
-        data_path=args.data,
-        output_dir=str(exp_dir),
-        device='cpu' if args.no_cuda else 'cuda',
-        batch_size=args.batch_size,
-        n_samples=args.n_samples
-    )
-    
-    evaluator.generate_all_plots()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
