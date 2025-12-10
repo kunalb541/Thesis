@@ -18,18 +18,18 @@ from datetime import datetime
 import warnings
 import random
 
-# Import God Mode Model
 try:
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
-    from model import GodModeCausalGRU, GRUConfig
+    from model import GodModeCausalGRU, GRUConfig, count_parameters as count_params_helper
     
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 except ImportError:
-    print("\nCRITICAL: 'model.py' not found. Ensure both files are in the same directory.")
-    sys.exit(1)
+    # Use helper if imported, else fallback
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 warnings.filterwarnings("ignore")
 
@@ -39,11 +39,8 @@ warnings.filterwarnings("ignore")
 CLIP_NORM = 1.0
 DEFAULT_LR = 3e-4
 SEED = 42
-PREFETCH_FACTOR = 4
+PREFETCH_FACTOR = 2 # Reduced for stability on high-GPU count
 
-# =============================================================================
-# CUSTOM JSON ENCODER
-# =============================================================================
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (np.float32, np.float64, np.floating)):
@@ -66,15 +63,15 @@ def setup_distributed():
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
             dist.init_process_group(backend='nccl', init_method='env://')
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
+            # Speed optimizations
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.enabled = True
             return rank, local_rank, world_size, True
         else:
             return 0, 0, 1, False
     
     if torch.cuda.is_available():
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.benchmark = True
     
     return 0, 0, 1, False
 
@@ -114,6 +111,7 @@ def set_seed(seed: int):
 # =============================================================================
 class MicrolensingDataset(Dataset):
     def __init__(self, flux: np.ndarray, delta_t: np.ndarray, labels: np.ndarray, stats: dict = None):
+        # Use copy to ensure negative strides are fixed for CUDA alignment
         self.flux = torch.from_numpy(np.ascontiguousarray(flux)).float()
         self.delta_t = torch.from_numpy(np.ascontiguousarray(delta_t)).float()
         self.labels = torch.from_numpy(np.ascontiguousarray(labels)).long()
@@ -128,6 +126,7 @@ class MicrolensingDataset(Dataset):
             median = stats['median']
             iqr = stats['iqr'] if stats['iqr'] > 1e-6 else 1.0
             
+            # Vectorized normalization
             self.flux = torch.where(
                 self.padding_mask,
                 (self.flux - median) / iqr,
@@ -172,16 +171,13 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
-        # Note: AutoCast is handled inside the GodMode model forward pass
         out = model(flux, delta_t, lengths=lengths, return_all_timesteps=False)
         
         # Loss Calculation
         if config.hierarchical:
-            # Output is already log_softmax from hierarchical head
             log_probs = out['logits']
             loss = F.nll_loss(log_probs, labels, weight=class_weights, reduction='mean')
         else:
-            # Standard raw logits
             final_logits = out['logits']
             loss = F.cross_entropy(final_logits, labels, weight=class_weights, reduction='mean')
 
@@ -193,18 +189,12 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
         
         # Check for NaN gradients
         all_finite = True
-        for param in model.parameters():
-            if param.grad is not None:
-                if not torch.isfinite(param.grad).all():
-                    param.grad = None  # Effectively zero out
-                    all_finite = False
-
-        if all_finite:
-            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
-            if torch.isfinite(norm):
-                scaler.step(optimizer)
-            else:
-                nan_count += 1
+        # Explicit check loop removed for speed, relying on scaler logic mostly
+        # but kept safety clip
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+        
+        if torch.isfinite(norm):
+            scaler.step(optimizer)
         else:
             nan_count += 1
         
@@ -256,8 +246,7 @@ def evaluate(model: nn.Module, loader: DataLoader, class_weights: torch.Tensor,
         lengths = lengths.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        if check_early_detection and not config.hierarchical:
-            # Request all timesteps for audit
+        if check_early_detection:
             out = model(flux, delta_t, lengths=lengths, return_all_timesteps=True)
             
             # Standard metrics on final
@@ -268,15 +257,22 @@ def evaluate(model: nn.Module, loader: DataLoader, class_weights: torch.Tensor,
                 loss = F.cross_entropy(final_logits, labels, weight=class_weights, reduction='mean')
             
             # Early Detection Logic
-            probs_seq = out['probs_seq'] # (B, T, Classes)
+            probs_seq = out['probs_seq'] 
             B = flux.size(0)
             
-            for b in range(B):
-                seq_len = lengths[b].item()
-                true_lbl = labels[b].item()
-                for m in milestones:
+            # Vectorized early detection check
+            for m in milestones:
+                # Calculate indices for all batch elements at once
+                # idxs = (lengths * m).long().clamp(min=0, max=probs_seq.size(1)-1)
+                # preds_at_m = probs_seq[torch.arange(B), idxs].argmax(dim=1)
+                # early_correct[m] += (preds_at_m == labels).sum().item()
+                # early_total[m] += B
+                
+                # Slower but safer loop for verification
+                for b in range(B):
+                    seq_len = lengths[b].item()
+                    true_lbl = labels[b].item()
                     idx = max(0, min(int(seq_len * m) - 1, seq_len - 1))
-                    # Check prediction at specific % of lightcurve
                     if probs_seq[b, idx].argmax().item() == true_lbl:
                         early_correct[m] += 1
                     early_total[m] += 1
@@ -329,18 +325,18 @@ def main():
     parser = argparse.ArgumentParser(description="God Mode Causal Training")
     parser.add_argument('--experiment_name', required=True)
     parser.add_argument('--data', required=True)
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=1024)
     parser.add_argument('--d_model', type=int, default=128)
-    parser.add_argument('--n_heads', type=int, default=8) # Kept for back-compat, not used in GRU
+    parser.add_argument('--n_heads', type=int, default=8)
     parser.add_argument('--n_layers', type=int, default=3)
     parser.add_argument('--window_size', type=int, default=7)
     parser.add_argument('--dropout', type=float, default=0.2)
     parser.add_argument('--lr', type=float, default=DEFAULT_LR)
     parser.add_argument('--weight_decay', type=float, default=1e-2)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=2) # Default 2 for safety
     parser.add_argument('--grad_checkpoint', action='store_true')
-    parser.add_argument('--compile', action='store_true', help="Use torch.compile")
+    parser.add_argument('--compile', action='store_true', help="Enable torch.compile (Not needed with JIT)")
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
@@ -356,7 +352,6 @@ def main():
     logger = setup_logging(rank, output_dir, args.debug)
     set_seed(SEED)
 
-    # Determine precision based on hardware
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         amp_dtype = torch.bfloat16
         if rank == 0: logger.info("⚡ Using BFloat16 Precision")
@@ -364,7 +359,6 @@ def main():
         amp_dtype = torch.float16
         if rank == 0: logger.info("⚡ Using Float16 Precision")
 
-    # Load Data
     if rank == 0: logger.info(f"Loading data from {args.data}...")
     try:
         data = np.load(args.data, allow_pickle=True)
@@ -387,12 +381,10 @@ def main():
         'iqr': float(np.subtract(*np.percentile(valid_flux, [75, 25]))) if len(valid_flux) > 0 else 1.0
     }
 
-    # Split
     flux_tr, flux_val, dt_tr, dt_val, y_tr, y_val = train_test_split(
         flux, delta_t, labels, test_size=0.2, stratify=labels, random_state=SEED
     )
 
-    # Dataset & Loader
     train_ds = MicrolensingDataset(flux_tr, dt_tr, y_tr, stats)
     val_ds = MicrolensingDataset(flux_val, dt_val, y_val, stats)
     
@@ -406,7 +398,6 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, sampler=val_sampler, shuffle=False, 
                             num_workers=args.num_workers, pin_memory=True, persistent_workers=(args.num_workers > 0))
 
-    # Model Setup
     n_classes = len(np.unique(labels))
     config = GRUConfig(
         d_model=args.d_model,
@@ -420,6 +411,7 @@ def main():
 
     model = GodModeCausalGRU(config, dtype=amp_dtype).to(device)
     
+    # Optional compile (only if explicitly requested)
     if args.compile and torch.cuda.is_available():
         if rank == 0: logger.info("🔧 Compiling model with torch.compile...")
         try:
@@ -439,7 +431,6 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=True)
     class_weights = compute_class_weights(y_tr, n_classes).to(device)
 
-    # Resume Logic
     start_epoch = 1
     best_acc = 0.0
     history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
@@ -449,7 +440,6 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device)
         
         state_dict = checkpoint['state_dict']
-        # Handle DDP prefix mismatch
         if is_ddp and not any(k.startswith('module.') for k in state_dict.keys()):
             state_dict = {'module.' + k: v for k, v in state_dict.items()}
         elif not is_ddp and any(k.startswith('module.') for k in state_dict.keys()):
@@ -461,7 +451,6 @@ def main():
         best_acc = checkpoint.get('accuracy', 0.0)
         history = checkpoint.get('history', history)
 
-    # Training Loop
     for epoch in range(start_epoch, args.epochs + 1):
         if is_ddp:
             train_sampler.set_epoch(epoch)
@@ -497,7 +486,7 @@ def main():
                 torch.save({
                     'epoch': epoch,
                     'state_dict': state_to_save,
-                    'config': config.__dict__,
+                    'config': config.__dict__,\
                     'accuracy': best_acc,
                     'optimizer': optimizer.state_dict(),
                     'history': history
@@ -506,6 +495,10 @@ def main():
             
             with open(output_dir / "history.json", 'w') as f:
                 json.dump(history, f, indent=2, cls=NumpyEncoder)
+        
+        # Clean memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     cleanup_distributed()
 
