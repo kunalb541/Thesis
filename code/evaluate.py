@@ -88,13 +88,18 @@ class ComprehensiveEvaluator:
     
     def __init__(self, model_path: str, data_path: str, output_dir: str, 
                  device: str = 'cuda', batch_size: int = 128, n_samples: Optional[int] = None,
-                 run_early_detection: bool = False, n_evolution_per_type: int = 0): # <-- FIX: ADDED ARGUMENTS
+                 run_early_detection: bool = False, n_evolution_per_type: int = 0):
         
         self.device = torch.device(device if torch.cuda.is_available() and device == 'cuda' else 'cpu')
         self.batch_size = batch_size
         self.n_samples = n_samples
-        self.run_early_detection = run_early_detection # <-- ADDED ATTRIBUTE
-        self.n_evolution_per_type = n_evolution_per_type # <-- ADDED ATTRIBUTE
+        self.run_early_detection = run_early_detection
+        self.n_evolution_per_type = n_evolution_per_type
+        
+        # CRITICAL FIX: Set deterministic mode for reproducibility
+        if torch.cuda.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         
         # Setup output directory with timestamp
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
