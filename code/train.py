@@ -11,7 +11,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.cuda.amp import autocast, GradScaler
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from tqdm import tqdm
@@ -472,7 +471,43 @@ def main():
     
     # Setup distributed training
     rank, local_rank, world_size, is_ddp = setup_distributed()
-    device = torch.device(f'cuda:{local_rank}')
+    
+    # Select device safely: use GPU if available, otherwise CPU.
+    if is_ddp:
+        # setup_distributed already exits if CUDA isn't available for DDP.
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+
+    # ========= AMP & Scaler configuration =========
+    use_amp = (device.type == 'cuda') and torch.cuda.is_available()
+    
+    if use_amp:
+        # GPU path (native AMP)
+        from torch.cuda.amp import autocast, GradScaler
+        scaler = GradScaler()
+    else:
+        # CPU fallback: provide no-op autocast context and a dummy scaler
+        from contextlib import contextmanager
+    
+        @contextmanager
+        def autocast():
+            # no-op context manager for CPU
+            yield
+    
+        class DummyScaler:
+            def scale(self, loss):
+                return loss
+            def unscale_(self, optimizer):
+                pass
+            def step(self, optimizer):
+                # optimizer.step() should be called explicitly where used; follow your code's contract:
+                optimizer.step()
+            def update(self):
+                pass
+    
+        scaler = DummyScaler()
+    # ==============================================
     
     # FIXED: Set reproducibility seed BEFORE model creation
     set_seed(SEED)
