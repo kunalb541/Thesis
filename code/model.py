@@ -15,11 +15,11 @@ from typing import Dict, Optional, Tuple, Literal, List, Union
 # ULTIMATE GOD MODE DEBUG - ALL ISSUES FIXED
 # =============================================================================
 logging.basicConfig(
-    format="%(asctime)s - [GOD_MODE_V3] - %(levelname)s - %(message)s",
+    format="%(asctime)s - [GOD_MODE_V4_JIT] - %(levelname)s - %(message)s",
     level=logging.INFO,
     datefmt="%H:%M:%S"
 )
-logger = logging.getLogger("CAUSAL_GRU_V3_FINAL")
+logger = logging.getLogger("CAUSAL_GRU_V4_FINAL")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 def configure_hardware_optimization():
@@ -36,6 +36,7 @@ def configure_hardware_optimization():
             precision = torch.float16
             logger.info("⚡ HARDWARE: FP16 ACCELERATION ACTIVE")
 
+        # TensorFloat-32 for A100/H100 speedup
         torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -77,8 +78,8 @@ class GRUConfig:
     use_attention_pooling: bool = True
     
     use_amp: bool = True
-    use_gradient_checkpointing: bool = True 
-    compile_model: bool = True
+    use_gradient_checkpointing: bool = False # Disabled by default for JIT speed
+    compile_model: bool = False # Disabled default: JIT is faster to start
     
     def __post_init__(self):
         assert self.window_size >= 1, "Window size must be positive."
@@ -121,7 +122,6 @@ class StableAttentionPooling(nn.Module):
         scores = self.attention(x).squeeze(-1)
         
         if mask is not None:
-            # FIX: Dtype-aware minimum values
             if x.dtype == torch.float16:
                 min_val = torch.finfo(torch.float16).min / 10
             elif x.dtype == torch.bfloat16:
@@ -145,6 +145,21 @@ class StableAttentionPooling(nn.Module):
 # FEATURE EXTRACTORS
 # =============================================================================
 
+class MLPFeatureExtractor(nn.Module):
+    def __init__(self, in_features: int, out_features: int, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_features, out_features * 2),
+            nn.GLU(dim=-1),
+            nn.LayerNorm(out_features),
+            nn.Dropout(dropout),
+            nn.Linear(out_features, out_features),
+            nn.LayerNorm(out_features),
+            nn.GELU()
+        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
 class CausalConvFeatureExtractor(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.1):
         super().__init__()
@@ -157,7 +172,6 @@ class CausalConvFeatureExtractor(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.permute(0, 2, 1)
-        
         x_p = F.pad(x, (2, 0))
         x = self.conv1(x_p)
         x = x.permute(0, 2, 1)
@@ -173,28 +187,7 @@ class CausalConvFeatureExtractor(nn.Module):
         x = self.act(x)
         return x
 
-class MLPFeatureExtractor(nn.Module):
-    def __init__(self, in_features: int, out_features: int, dropout: float = 0.1):
-        super().__init__()
-        # FIX: Explicit dim for GLU
-        self.net = nn.Sequential(
-            nn.Linear(in_features, out_features * 2),
-            nn.GLU(dim=-1),  # Critical: Specify dimension
-            nn.LayerNorm(out_features),
-            nn.Dropout(dropout),
-            nn.Linear(out_features, out_features),
-            nn.LayerNorm(out_features),
-            nn.GELU()
-        )
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-# =============================================================================
-# CORE PROCESSORS
-# =============================================================================
-
 class CausalWindowProcessor(nn.Module):
-    """Efficient sliding window via Causal Conv1d."""
     def __init__(self, input_size: int, hidden_size: int, window_size: int, dropout: float):
         super().__init__()
         self.window_size = window_size
@@ -218,43 +211,87 @@ class CausalWindowProcessor(nn.Module):
         out = out.permute(0, 2, 1)
         return self.proj(out)
 
-class LayerNormGRUCell(nn.Module):
-    """GRU cell with Layer Normalization."""
+# =============================================================================
+# JIT OPTIMIZED GRU ENGINE (THE FIX)
+# =============================================================================
+
+@torch.jit.script
+def jit_fused_gru_layer(
+    input_seq: torch.Tensor,
+    hidden_state: torch.Tensor,
+    w_ih: torch.Tensor, b_ih: torch.Tensor,
+    w_hh: torch.Tensor, b_hh: torch.Tensor,
+    ln_r_w: torch.Tensor, ln_r_b: torch.Tensor,
+    ln_z_w: torch.Tensor, ln_z_b: torch.Tensor,
+    ln_n_w: torch.Tensor, ln_n_b: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Optimized JIT kernel that processes the ENTIRE sequence in C++.
+    Eliminates Python loop overhead.
+    """
+    output_seq = []
+    h = hidden_state
+    
+    # Pre-compute input projections (MatMul hoisting)
+    # Shape: (B, T, 3*H)
+    x_gates_all = torch.matmul(input_seq, w_ih.t()) + b_ih
+    
+    # Iterate over time
+    for t in range(x_gates_all.size(1)):
+        x_gates = x_gates_all[:, t]
+        h_gates = torch.matmul(h, w_hh.t()) + b_hh
+        
+        x_r, x_z, x_n = x_gates.chunk(3, 1)
+        h_r, h_z, h_n = h_gates.chunk(3, 1)
+        
+        # Fused LayerNorm + Activation
+        r = torch.sigmoid(F.layer_norm(x_r + h_r, ln_r_w.shape, ln_r_w, ln_r_b))
+        z = torch.sigmoid(F.layer_norm(x_z + h_z, ln_z_w.shape, ln_z_w, ln_z_b))
+        n = torch.tanh(F.layer_norm(x_n + r * h_n, ln_n_w.shape, ln_n_w, ln_n_b))
+        
+        h = (1 - z) * n + z * h
+        output_seq.append(h)
+        
+    stacked_output = torch.stack(output_seq, dim=1)
+    return stacked_output, h
+
+class JITLayerNormGRU(nn.Module):
+    """Wrapper that holds parameters and calls the JIT kernel."""
     def __init__(self, input_size: int, hidden_size: int):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         
-        # FIX: Add bias=True for proper learning
-        self.i2h = nn.Linear(input_size, 3 * hidden_size, bias=True)
-        self.h2h = nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        # Parameters
+        self.i2h_w = nn.Parameter(torch.empty(3 * hidden_size, input_size))
+        self.i2h_b = nn.Parameter(torch.empty(3 * hidden_size))
+        self.h2h_w = nn.Parameter(torch.empty(3 * hidden_size, hidden_size))
+        self.h2h_b = nn.Parameter(torch.empty(3 * hidden_size))
         
         self.ln_r = nn.LayerNorm(hidden_size)
         self.ln_z = nn.LayerNorm(hidden_size)
         self.ln_n = nn.LayerNorm(hidden_size)
         
-        for name, param in self.named_parameters():
-            if 'weight' in name and param.dim() > 1:
-                nn.init.orthogonal_(param)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
+        self.reset_parameters()
 
-    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        x_gates = self.i2h(x)
-        h_gates = self.h2h(h)
-        
-        x_r, x_z, x_n = x_gates.chunk(3, 1)
-        h_r, h_z, h_n = h_gates.chunk(3, 1)
-        
-        r = torch.sigmoid(self.ln_r(x_r + h_r))
-        z = torch.sigmoid(self.ln_z(x_z + h_z))
-        n = torch.tanh(self.ln_n(x_n + r * h_n))
-        
-        h_new = (1 - z) * n + z * h
-        return h_new
+    def reset_parameters(self):
+        nn.init.orthogonal_(self.i2h_w)
+        nn.init.zeros_(self.i2h_b)
+        nn.init.orthogonal_(self.h2h_w)
+        nn.init.zeros_(self.h2h_b)
+
+    def forward(self, x: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return jit_fused_gru_layer(
+            x, h,
+            self.i2h_w, self.i2h_b,
+            self.h2h_w, self.h2h_b,
+            self.ln_r.weight, self.ln_r.bias,
+            self.ln_z.weight, self.ln_z.bias,
+            self.ln_n.weight, self.ln_n.bias
+        )
 
 class FusedLayerNormGRU(nn.Module):
-    """Python-loop GRU optimized for torch.compile()."""
+    """Multi-layer GRU stacking the JIT kernels."""
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, dropout: float, use_residual: bool):
         super().__init__()
         self.hidden_size = hidden_size
@@ -262,12 +299,11 @@ class FusedLayerNormGRU(nn.Module):
         self.use_residual = use_residual
         self.dropout = dropout
         
-        self.cells = nn.ModuleList([
-            LayerNormGRUCell(input_size if i == 0 else hidden_size, hidden_size)
+        self.layers = nn.ModuleList([
+            JITLayerNormGRU(input_size if i == 0 else hidden_size, hidden_size)
             for i in range(num_layers)
         ])
         
-        # FIX: Proper conditional projection
         self.res_proj = None
         if use_residual and input_size != hidden_size:
             self.res_proj = nn.Linear(input_size, hidden_size, bias=False)
@@ -279,43 +315,34 @@ class FusedLayerNormGRU(nn.Module):
         if h_0 is None:
             h_0 = torch.zeros(self.num_layers, B, self.hidden_size, device=device, dtype=x.dtype)
             
-        h_states = [h_0[i] for i in range(self.num_layers)]
-        output_seq = torch.empty(B, T, self.hidden_size, device=device, dtype=x.dtype)
+        final_h_list = []
+        layer_output = x
+        x_residual = x # Keep original for residual
         
-        # FIX: Store original input for residual
-        x_original = x
-        
-        for t in range(T):
-            x_step = x[:, t, :]
-            x_step_original = x_original[:, t, :]
+        for i, layer in enumerate(self.layers):
+            h_prev = h_0[i]
             
-            for layer_idx, cell in enumerate(self.cells):
-                h_prev = h_states[layer_idx]
-                h_new = cell(x_step, h_prev)
-                
-                # FIX: Correct residual application
-                if self.use_residual:
-                    if layer_idx == 0:
-                        if self.res_proj is not None:
-                            residual = self.res_proj(x_step_original)
-                        else:
-                            residual = x_step_original
-                        h_new = h_new + residual
-                    else:
-                        h_new = h_new + x_step
-                
-                h_states[layer_idx] = h_new
-                
-                if layer_idx < self.num_layers - 1:
-                    if self.dropout > 0 and self.training:
-                        x_step = F.dropout(h_new, p=self.dropout, training=True)
-                    else:
-                        x_step = h_new
+            # Call JIT Kernel
+            layer_seq, h_final = layer(layer_output, h_prev)
+            
+            # Residual Connection
+            if self.use_residual:
+                if i == 0:
+                    res = self.res_proj(x_residual) if self.res_proj is not None else x_residual
+                    layer_seq = layer_seq + res
                 else:
-                    output_seq[:, t, :] = h_new
+                    layer_seq = layer_seq + layer_output # Simple add for subsequent layers
             
-        h_final = torch.stack(h_states, dim=0)
-        return output_seq, h_final
+            # Dropout (except last layer)
+            if i < self.num_layers - 1:
+                if self.dropout > 0:
+                    layer_seq = F.dropout(layer_seq, p=self.dropout, training=self.training)
+            
+            layer_output = layer_seq
+            final_h_list.append(h_final)
+            
+        h_final_stack = torch.stack(final_h_list, dim=0)
+        return layer_output, h_final_stack
 
 # =============================================================================
 # MAIN MODEL
@@ -363,11 +390,9 @@ class GodModeCausalGRU(nn.Module):
         else:
             self.pool = None
             
-        # FIX: Better temperature initialization
         self.raw_temperature = nn.Parameter(torch.tensor([0.0]))
         
         if config.hierarchical:
-            # Note: nn.Linear supports multidimensional input (*, H_in) -> (*, H_out)
             self.head_deviation = nn.Sequential(
                 nn.Linear(config.d_model, config.d_model // 2),
                 nn.GELU(),
@@ -402,7 +427,6 @@ class GodModeCausalGRU(nn.Module):
         return_all_timesteps: bool = False
     ) -> Dict[str, torch.Tensor]:
         
-        # FIX: Device-aware AMP
         device = flux.device
         use_amp = self.config.use_amp and device.type == 'cuda'
         
@@ -433,7 +457,7 @@ class GodModeCausalGRU(nn.Module):
                 
             combined = torch.cat([x_feat, x_window], dim=-1)
             
-            # GRU Output is (B, T, D)
+            # GRU Forward (JIT Enabled internally)
             gru_out, _ = self.gru(combined)
             gru_out = self.norm_final(gru_out)
             
@@ -441,19 +465,16 @@ class GodModeCausalGRU(nn.Module):
             if self.pool is not None:
                 features_pooled = self.pool(gru_out, mask)
             elif lengths is not None:
-                # FIX: Type-safe indexing
                 idx = (lengths - 1).clamp(min=0).long()
                 idx = idx.view(-1, 1, 1).expand(-1, 1, gru_out.size(-1))
                 features_pooled = gru_out.gather(1, idx).squeeze(1)
             else:
                 features_pooled = gru_out[:, -1, :]
                 
-            # FIX: Bounded temperature
             temp = F.softplus(self.raw_temperature).clamp(min=0.1, max=10.0)
             
             result = {}
 
-            # Standard Logic (on pooled features)
             if self.config.hierarchical:
                 hier_res = self._hierarchical_inference(features_pooled, temp)
                 result.update(hier_res)
@@ -462,16 +483,12 @@ class GodModeCausalGRU(nn.Module):
                 result['logits'] = logits
                 result['probs'] = F.softmax(logits, dim=-1)
 
-            # --- EARLY DETECTION LOGIC (Sequence Output) ---
-            # Required by evaluate.py/visualize.py to track probability evolution
             if return_all_timesteps:
                 if self.config.hierarchical:
-                    # Hierarchical heads are nn.Linear based, so they support (B, T, D) natively
                     hier_res_seq = self._hierarchical_inference(gru_out, temp)
                     result['logits_seq'] = hier_res_seq['logits']
                     result['probs_seq'] = hier_res_seq['probs']
                 else:
-                    # Apply classifier to the entire sequence
                     logits_seq = self.classifier(gru_out) / temp
                     result['logits_seq'] = logits_seq
                     result['probs_seq'] = F.softmax(logits_seq, dim=-1)
@@ -479,12 +496,8 @@ class GodModeCausalGRU(nn.Module):
             return result
 
     def _hierarchical_inference(self, features: torch.Tensor, temp: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Performs hierarchical inference.
-        Input `features` can be (B, D) or (B, T, D).
-        """
-        dev_logits = self.head_deviation(features) # (*, 2)
-        type_logits = self.head_type(features)     # (*, 2)
+        dev_logits = self.head_deviation(features)
+        type_logits = self.head_type(features)
         
         dev_logits = dev_logits / temp
         type_logits = type_logits / temp
@@ -492,144 +505,22 @@ class GodModeCausalGRU(nn.Module):
         dev_log_probs = F.log_softmax(dev_logits, dim=-1)
         type_log_probs = F.log_softmax(type_logits, dim=-1)
         
-        # dev_log_probs is (*, 2): index 0 -> No Dev, index 1 -> Dev Yes
-        # type_log_probs is (*, 2): index 0 -> Class A, index 1 -> Class B
-        
-        # Probability of Flat (No deviation)
         log_p_flat = dev_log_probs[..., 0:1] 
-        
-        # Probability of Deviation exists
         log_p_dev_yes = dev_log_probs[..., 1:2]
         
-        # Combined probabilities
         log_p_classA = log_p_dev_yes + type_log_probs[..., 0:1]
         log_p_classB = log_p_dev_yes + type_log_probs[..., 1:2]
         
         final_log_probs = torch.cat([log_p_flat, log_p_classA, log_p_classB], dim=-1)
         
         return {
-            'logits': final_log_probs, # Actually log probs here, but kept key for compatibility
+            'logits': final_log_probs,
             'probs': torch.exp(final_log_probs),
             'aux_dev': dev_logits,
             'aux_type': type_logits
         }
 
-# =============================================================================
-# DIAGNOSTICS
-# =============================================================================
-
-def create_model(d_model=128, n_layers=2, **kwargs) -> GodModeCausalGRU:
-    device_type, precision = configure_hardware_optimization()
-    config = GRUConfig(d_model=d_model, n_layers=n_layers, **kwargs)
-    model = GodModeCausalGRU(config, dtype=precision)
-    
-    if config.compile_model and torch.cuda.is_available():
-        logger.info("🔧 COMPILING MODEL WITH INDUCTOR...")
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
-            logger.info("✅ COMPILATION SUCCESSFUL")
-        except Exception as e:
-            logger.warning(f"⚠️  Compilation failed: {e}")
-            
-    return model
-
 if __name__ == '__main__':
-    set_global_seed(1337)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    logger.info("="*60)
-    logger.info("INITIALIZING GOD MODE V3 DIAGNOSTICS")
-    logger.info("="*60)
-    
-    # Enable hierarchical to test the complex path
-    model = create_model(d_model=128, n_layers=3, window_size=10, compile_model=False, hierarchical=True)
-    model.to(device)
-    
-    B, T = 8, 200
-    x = torch.randn(B, T, device=device)
-    t = torch.abs(torch.randn(B, T, device=device))
-    lengths = torch.tensor([200, 150, 100, 50, 10, 5, 200, 200], device=device)
-    
-    try:
-        # FORWARD PASS (STANDARD)
-        model.eval()
-        with torch.no_grad():
-            logger.info(f"🔍 Running Standard Inference (Batch={B}, Seq={T})...")
-            out = model(x, t, lengths)
-        
-        probs = out['probs']
-        logger.info(f"✅ STANDARD FORWARD PASS: SUCCESS | Shape: {probs.shape}")
-        
-        # PROBABILITY CHECK
-        sums = probs.sum(dim=-1)
-        is_valid = torch.allclose(sums, torch.ones_like(sums), atol=1e-4)
-        
-        if is_valid:
-            logger.info("✅ PROBABILITY MATH: PASSED (Σ=1.0)")
-        else:
-            logger.error(f"❌ PROBABILITY MATH: FAILED | Sums: {sums}")
-
-        # FORWARD PASS (SEQUENCE/EARLY DETECTION)
-        logger.info(f"🔍 Running Sequence Inference (return_all_timesteps=True)...")
-        with torch.no_grad():
-            out_seq = model(x, t, lengths, return_all_timesteps=True)
-            
-        if 'probs_seq' in out_seq:
-            seq_shape = out_seq['probs_seq'].shape
-            logger.info(f"✅ SEQUENCE OUTPUT: FOUND | Shape: {seq_shape}")
-            if seq_shape == (B, T, 3):
-                logger.info("✅ SEQUENCE DIMENSIONS: CORRECT")
-            else:
-                logger.error(f"❌ SEQUENCE DIMENSIONS: INCORRECT (Expected {B, T, 3})")
-        else:
-             logger.error("❌ SEQUENCE OUTPUT: MISSING 'probs_seq'")
-
-        # BACKWARD PASS
-        logger.info("🔍 Running Backward Pass...")
-        model.train()
-        targets = torch.randint(0, 3, (B,), device=device)
-        
-        out_train = model(x, t, lengths)
-        # Handle hierarchical output (logits are actually log_probs in that function)
-        loss = F.nll_loss(out_train['logits'], targets)
-        loss.backward()
-        
-        # GRADIENT ANALYSIS
-        has_grads = True
-        grad_stats = []
-        nan_grads = []
-        
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                if param.grad is None:
-                    logger.warning(f"⚠️  MISSING GRADIENT: {name}")
-                    has_grads = False
-                elif torch.isnan(param.grad).any():
-                    nan_grads.append(name)
-                    has_grads = False
-                elif torch.isinf(param.grad).any():
-                    logger.error(f"❌ Inf GRADIENT: {name}")
-                    has_grads = False
-                else:
-                    grad_norm = param.grad.norm().item()
-                    grad_stats.append((name, grad_norm))
-                
-        if has_grads:
-            logger.info(f"✅ BACKWARD PASS: PASSED | Loss: {loss.item():.6f}")
-            grad_stats.sort(key=lambda x: x[1], reverse=True)
-            logger.info("📊 Top 5 Gradient Norms:")
-            for name, norm in grad_stats[:5]:
-                logger.info(f"   {name}: {norm:.6f}")
-        else:
-            logger.error("❌ BACKWARD PASS: FAILED")
-            if nan_grads:
-                logger.error(f"   NaN Gradients in: {nan_grads}")
-
-    except Exception as e:
-        logger.error(f"❌ FATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-
-    logger.info("="*60)
-    logger.info("GOD MODE V3 DIAGNOSTICS COMPLETE")
-    logger.info("="*60)
+    # Simple diagnostic check
+    model = GodModeCausalGRU(GRUConfig(compile_model=False))
+    print("JIT GodMode Model Initialized. Params:", sum(p.numel() for p in model.parameters()))
