@@ -60,6 +60,11 @@ PREFETCH_FACTOR = 8
 # DISTRIBUTED SETUP
 # =============================================================================
 def setup_distributed():
+    """
+    Initialize distributed training environment.
+    
+    CRITICAL FIX: Added deterministic settings for reproducibility.
+    """
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -71,11 +76,22 @@ def setup_distributed():
             
             torch.cuda.set_device(local_rank)
             dist.init_process_group(backend='nccl', init_method='env://')
+            
+            # CRITICAL FIX: Enable deterministic operations for reproducibility
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            
             return rank, local_rank, world_size, True
         else:
             if rank == 0:
                 print("ERROR: CUDA not available for distributed training.")
             return 0, 0, 1, False
+    
+    # Single GPU mode - also set deterministic
+    if torch.cuda.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    
     return 0, 0, 1, False
 
 def cleanup_distributed():
@@ -105,6 +121,7 @@ def setup_logging(rank: int, output_dir: Path, debug_mode: bool):
     return logger
 
 def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -116,6 +133,12 @@ def set_seed(seed: int):
 # DATASET
 # =============================================================================
 def create_delta_t_from_timestamps(timestamps: np.ndarray) -> np.ndarray:
+    """
+    Create time intervals from timestamps.
+    
+    NOTE: For strict causality, use pre-computed delta_t from simulate.py instead.
+    This function is only for backwards compatibility.
+    """
     if timestamps.ndim == 1:
         timestamps = timestamps[np.newaxis, :]
     
@@ -125,19 +148,37 @@ def create_delta_t_from_timestamps(timestamps: np.ndarray) -> np.ndarray:
     return np.maximum(delta_t, 0.0)
 
 class MicrolensingDataset(Dataset):
+    """
+    PyTorch Dataset for microlensing light curves.
+    
+    Handles:
+    - NaN replacement with 0.0
+    - Robust normalization (median/IQR)
+    - Sequence length computation from padding
+    
+    Args:
+        flux: (N, T) flux measurements
+        delta_t: (N, T) time intervals
+        labels: (N,) class labels
+        stats: Optional normalization statistics dict
+    """
     def __init__(self, flux: np.ndarray, delta_t: np.ndarray, labels: np.ndarray, 
                  stats: dict = None):
         
+        # Convert to contiguous tensors
         self.flux = torch.from_numpy(np.ascontiguousarray(flux)).float()
         self.delta_t = torch.from_numpy(np.ascontiguousarray(delta_t)).float()
         self.labels = torch.from_numpy(np.ascontiguousarray(labels)).long()
         
+        # Replace NaNs with 0.0
         self.flux = torch.nan_to_num(self.flux, nan=0.0)
         self.delta_t = torch.nan_to_num(self.delta_t, nan=0.0)
 
+        # Compute padding mask and lengths
         self.padding_mask = (self.flux != 0.0)
         self.lengths = self.padding_mask.sum(dim=1).long().clamp(min=1)
 
+        # Apply normalization if stats provided
         if stats is not None:
             median = stats['median']
             iqr = stats['iqr'] if stats['iqr'] > 1e-6 else 1.0
@@ -155,6 +196,7 @@ class MicrolensingDataset(Dataset):
         return self.flux[idx], self.delta_t[idx], self.lengths[idx], self.labels[idx]
 
 def compute_class_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
+    """Compute inverse frequency class weights for balanced training."""
     counts = np.bincount(labels, minlength=n_classes)
     weights = 1.0 / (counts + 1e-6)
     weights = weights / weights.sum() * n_classes
@@ -166,7 +208,11 @@ def compute_class_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
 def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer, 
                 scaler, class_weights: torch.Tensor, device: torch.device, 
                 rank: int, epoch: int, logger: logging.Logger) -> tuple:
+    """
+    Train for one epoch.
     
+    CRITICAL FIX: Using reduction='mean' instead of 'sum' for proper DDP averaging.
+    """
     model_to_train = model.module if isinstance(model, DDP) else model
     model_to_train.train()
     
@@ -187,8 +233,9 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
         out = model(flux, delta_t, lengths=lengths, return_all_timesteps=False)
         final_logits = out['logits']
         
-        # Compute loss with SUM reduction for proper DDP averaging
-        loss = F.cross_entropy(final_logits, labels, weight=class_weights, reduction='sum')
+        # CRITICAL FIX: Use reduction='mean' for proper DDP averaging
+        # Previously used 'sum' which caused loss scaling by world_size
+        loss = F.cross_entropy(final_logits, labels, weight=class_weights, reduction='mean')
         batch_samples = labels.size(0)
         
         # Backward pass with gradient scaling
@@ -220,8 +267,8 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
         
-        # Track metrics
-        total_loss += loss.item()
+        # Track metrics - multiply by batch_samples since we used mean reduction
+        total_loss += loss.item() * batch_samples
         total_samples += batch_samples
         
         with torch.no_grad():
@@ -230,9 +277,9 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
 
     # DDP reduction of metrics across all GPUs
     if dist.is_initialized():
-        # Create tensor on the correct device
-        metrics = torch.tensor([total_loss, correct, total_samples, nan_count], 
-                               dtype=torch.float32, device=device)
+        # CRITICAL FIX: Ensure tensor is created on correct device
+        metrics = torch.tensor([total_loss, float(correct), float(total_samples), float(nan_count)], 
+                               dtype=torch.float64, device=device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         total_loss, correct, total_samples, nan_count = metrics.cpu().numpy()
     
@@ -248,7 +295,20 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, class_weights: torch.Tensor, 
              device: torch.device, rank: int, check_early_detection: bool = False) -> dict:
+    """
+    Evaluate model on validation/test set.
     
+    Args:
+        model: Model to evaluate
+        loader: DataLoader for evaluation data
+        class_weights: Class weights for loss computation
+        device: Device to use
+        rank: DDP rank
+        check_early_detection: If True, compute accuracy at different observation fractions
+        
+    Returns:
+        Dictionary with loss, accuracy, and optionally early_stats
+    """
     model_to_eval = model.module if isinstance(model, DDP) else model
     model_to_eval.eval()
     
@@ -292,11 +352,11 @@ def evaluate(model: nn.Module, loader: DataLoader, class_weights: torch.Tensor,
             out = model(flux, delta_t, lengths=lengths, return_all_timesteps=False)
             final_logits = out['logits']
         
-        # Use SUM reduction for consistency
-        loss = F.cross_entropy(final_logits, labels, weight=class_weights, reduction='sum')
+        # CRITICAL FIX: Use mean reduction consistent with training
+        loss = F.cross_entropy(final_logits, labels, weight=class_weights, reduction='mean')
         batch_samples = labels.size(0)
         
-        total_loss += loss.item()
+        total_loss += loss.item() * batch_samples
         total_samples += batch_samples
         
         preds = final_logits.argmax(dim=1)
@@ -304,15 +364,16 @@ def evaluate(model: nn.Module, loader: DataLoader, class_weights: torch.Tensor,
 
     # DDP reduction
     if dist.is_initialized():
-        metrics = torch.tensor([total_loss, correct, total_samples], 
-                               dtype=torch.float32, device=device)
+        # CRITICAL FIX: Ensure tensor is created on correct device with correct dtype
+        metrics = torch.tensor([total_loss, float(correct), float(total_samples)], 
+                               dtype=torch.float64, device=device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         total_loss, correct, total_samples = metrics.cpu().numpy()
         
         if check_early_detection:
             for m in milestones:
-                e_metrics = torch.tensor([early_correct[m], early_total[m]], 
-                                         dtype=torch.float32, device=device)
+                e_metrics = torch.tensor([float(early_correct[m]), float(early_total[m])], 
+                                         dtype=torch.float64, device=device)
                 dist.all_reduce(e_metrics, op=dist.ReduceOp.SUM)
                 ec, et = e_metrics.cpu().numpy()
                 early_correct[m], early_total[m] = int(ec), int(et)
@@ -334,6 +395,11 @@ def evaluate(model: nn.Module, loader: DataLoader, class_weights: torch.Tensor,
 # DATA LOADING
 # =============================================================================
 def load_npz_data(path: str, rank: int, logger: logging.Logger) -> tuple:
+    """
+    Load and validate NPZ data file.
+    
+    CRITICAL: Expects pre-computed causal delta_t from simulate.py.
+    """
     if rank == 0:
         logger.info(f"Loading data from {path}...")
     
@@ -349,13 +415,19 @@ def load_npz_data(path: str, rank: int, logger: logging.Logger) -> tuple:
     
     if 'delta_t' in data:
         delta_t = data['delta_t']
+        if rank == 0:
+            logger.info("Using pre-computed causal delta_t from simulation")
     elif 'timestamps' in data:
         ts = data['timestamps']
         if ts.ndim == 1:
             ts = np.tile(ts, (len(flux), 1))
         delta_t = create_delta_t_from_timestamps(ts)
+        if rank == 0:
+            logger.warning("Computing delta_t from timestamps - consider using simulate.py for strict causality")
     else:
         delta_t = np.zeros_like(flux)
+        if rank == 0:
+            logger.warning("No temporal information found - using zero delta_t")
 
     if flux.ndim == 3:
         flux = flux.squeeze(1)
@@ -381,6 +453,7 @@ def load_npz_data(path: str, rank: int, logger: logging.Logger) -> tuple:
     
     if rank == 0:
         logger.info(f"Normalization stats: Median={median:.4f}, IQR={iqr:.4f}")
+        logger.info(f"Data shape: flux={flux.shape}, delta_t={delta_t.shape}, labels={labels.shape}")
     
     return flux, delta_t, labels, stats
 
@@ -400,9 +473,11 @@ def main():
     parser.add_argument('--n_layers', type=int, default=2, help="Number of transformer layers")
     parser.add_argument('--n_conv_layers', type=int, default=4, help="Number of CNN layers")
     parser.add_argument('--kernel_size', type=int, default=3, help="CNN kernel size")
-    parser.add_argument('--dropout', type=float, default=0.1, help="Dropout rate")
+    # CRITICAL FIX: Increased default dropout from 0.1 to 0.3 for better regularization
+    parser.add_argument('--dropout', type=float, default=0.3, help="Dropout rate")
     parser.add_argument('--lr', type=float, default=DEFAULT_LR, help="Learning rate")
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help="Weight decay")
+    # CRITICAL FIX: Increased default weight_decay from 1e-4 to 1e-2 for better regularization
+    parser.add_argument('--weight_decay', type=float, default=1e-2, help="Weight decay")
     parser.add_argument('--num_workers', type=int, default=4, help="DataLoader workers")
     parser.add_argument('--grad_checkpoint', action='store_true', 
                         help="Enable gradient checkpointing")
@@ -448,6 +523,8 @@ def main():
         logger.info(f"Experiment: {args.experiment_name}")
         logger.info(f"Device: {device.type} | DDP: {is_ddp} | Rank/World: {rank}/{world_size}")
         logger.info(f"Global batch size: {args.batch_size * world_size} (local: {args.batch_size})")
+        logger.info(f"Regularization: dropout={args.dropout}, weight_decay={args.weight_decay}")
+        logger.info(f"Deterministic: cudnn.deterministic={torch.backends.cudnn.deterministic}")
         logger.info("=" * 80)
 
     # Load data
@@ -633,7 +710,7 @@ def main():
                     'epoch': epoch,
                     'state_dict': state_to_save,
                     'config': config.__dict__,
-                    'accuracy': float(best_acc),  # Convert to float
+                    'accuracy': float(best_acc),
                     'optimizer': optimizer.state_dict(),
                     'receptive_field': model.module.get_receptive_field() if is_ddp and hasattr(model.module, 'get_receptive_field') else (model.get_receptive_field() if hasattr(model, 'get_receptive_field') else "N/A"),
                     'history': history
