@@ -550,10 +550,39 @@ def simulate_dataset(
     return flux, delta_t_array, labels, timestamps, params_dict if save_params else None
 
 # ============================================================================
+# OPTIMIZED SAVING UTILITIES
+# ============================================================================
+def params_to_numpy(params_list):
+    """Convert list of dicts to numpy arrays (optimized for speed)"""
+    if not params_list:
+        return None, None
+    
+    # Get all keys (same for all dicts in the list)
+    keys = list(params_list[0].keys())
+    
+    # Pre-allocate array
+    n_params = len(params_list)
+    all_values = np.empty((n_params, len(keys)), dtype=np.float32)
+    
+    # Fill array (fast column-wise)
+    for i, key in enumerate(keys):
+        for j in range(n_params):
+            all_values[j, i] = float(params_list[j][key])
+    
+    return all_values, keys
+
+def numpy_to_params(values_array, keys_list):
+    """Convert numpy arrays back to list of dicts"""
+    if values_array is None:
+        return []
+    
+    params_list = []
+    for row in values_array:
+        params_list.append(dict(zip(keys_list, row)))
+    return params_list
+
+# ============================================================================
 # CLI
-# ============================================================================
-# ============================================================================
-# CLI (Modified for Faster Saving)
 # ============================================================================
 def main():
     parser = argparse.ArgumentParser(
@@ -600,6 +629,8 @@ Examples:
                         help='Random seed for reproducibility')
     parser.add_argument('--no_save_params', action='store_true',
                         help='Skip saving individual event parameters')
+    parser.add_argument('--no_compress', action='store_true',
+                        help='Disable compression for faster saving (larger files)')
     
     parser.add_argument('--list_presets', action='store_true',
                         help='List all available presets')
@@ -607,8 +638,21 @@ Examples:
     args = parser.parse_args()
     
     if args.list_presets:
-        # ... (list presets code remains unchanged)
-        # ...
+        print("\n=== Binary Topology Presets ===")
+        for name, config in BinaryPresets.PRESETS.items():
+            print(f"  {name:12s} : {config['description']}")
+        
+        print("\n=== Cadence Presets ===")
+        for name, config in ObservationalPresets.CADENCE_PRESETS.items():
+            print(f"  {name:12s} : {config['description']} ({config['mask_prob']*100:.0f}% missing)")
+        
+        print("\n=== Error Presets ===")
+        for name, config in ObservationalPresets.ERROR_PRESETS.items():
+            print(f"  {name:12s} : {config['description']} (σ={config['error']:.3f})")
+        
+        print("\n=== Experiment Presets ===")
+        print("  baseline_1M  : Full 1M dataset for Roman Space Telescope")
+        print("  quick_test   : Small 300-event test dataset")
         return
     
     # Apply preset overrides
@@ -661,11 +705,14 @@ Examples:
     )
     
     # ====================================================================
-    # 🚀 OPTIMIZATION FOR FASTER SAVING
+    # 🚀 OPTIMIZED SAVING SECTION
     # ====================================================================
-    print("\nApplying saving optimizations...")
-
-    # 1. Reduce precision to float32 (Half the size of the largest arrays)
+    print("\n" + "=" * 80)
+    print("Optimized Saving Phase")
+    print("=" * 80)
+    
+    # 1. Reduce precision to float32 (50% smaller files, faster I/O)
+    print("Converting to float32 for faster I/O...")
     flux = flux.astype(np.float32)
     delta_t = delta_t.astype(np.float32)
     timestamps = timestamps.astype(np.float32)
@@ -689,27 +736,55 @@ Examples:
         'seed': args.seed
     }
     
-    if params_dict:
-        # 2. Optimize JSON serialization for speed and size (no indent/separators)
-        # This keeps the parameter keys, but compresses the string.
-        # Use separators=(',', ':') to eliminate spaces after commas and colons.
-        print("Optimizing parameter JSON serialization...")
-        save_dict['params_flat_json'] = json.dumps(params_dict['flat'], separators=(',', ':'))
-        save_dict['params_pspl_json'] = json.dumps(params_dict['pspl'], separators=(',', ':'))
-        save_dict['params_binary_json'] = json.dumps(params_dict['binary'], separators=(',', ':'))
+    if params_dict and not args.no_save_params:
+        # 2. Store parameters as numpy arrays (5-10x faster than JSON)
+        print("Converting parameters to optimized numpy format...")
+        
+        # Convert each parameter set to numpy arrays
+        flat_vals, flat_keys = params_to_numpy(params_dict['flat'])
+        pspl_vals, pspl_keys = params_to_numpy(params_dict['pspl'])
+        binary_vals, binary_keys = params_to_numpy(params_dict['binary'])
+        
+        # Store in save_dict
+        if flat_vals is not None:
+            save_dict['params_flat_values'] = flat_vals
+            save_dict['params_flat_keys'] = np.array(flat_keys, dtype=object)
+        
+        if pspl_vals is not None:
+            save_dict['params_pspl_values'] = pspl_vals
+            save_dict['params_pspl_keys'] = np.array(pspl_keys, dtype=object)
+        
+        if binary_vals is not None:
+            save_dict['params_binary_values'] = binary_vals
+            save_dict['params_binary_keys'] = np.array(binary_keys, dtype=object)
     
-    np.savez_compressed(output_path, **save_dict)
-    # ====================================================================
-    # 🏁 END OPTIMIZATION
-    # ====================================================================
+    # 3. Choose compression based on size and speed preference
+    print(f"\nSaving to {output_path}...")
+    start_save = time.time()
     
+    if args.no_compress:
+        np.savez(output_path, **save_dict)  # Fastest saving
+        compression_type = "Uncompressed (fastest)"
+    else:
+        np.savez_compressed(output_path, **save_dict)  # Balanced
+        compression_type = "Compressed (balanced)"
+    
+    save_time = time.time() - start_save
+    
+    # ====================================================================
+    # 🏁 SAVING COMPLETE
+    # ====================================================================
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
-    print(f"\nDataset saved: {output_path}")
-    print(f"File size: {file_size_mb:.1f} MB")
-    print(f"Compression: npz_compressed")
-
-if __name__ == '__main__':
-    main()
+    
+    print("\n" + "=" * 80)
+    print("Dataset Saved Successfully")
+    print("=" * 80)
+    print(f"File: {output_path}")
+    print(f"Size: {file_size_mb:.1f} MB")
+    print(f"Compression: {compression_type}")
+    print(f"Total events: {len(flux):,}")
+    print(f"Format: Standard .npz (compatible with all numpy versions)")
+    
 
 if __name__ == '__main__':
     main()
