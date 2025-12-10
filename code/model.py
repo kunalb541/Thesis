@@ -367,18 +367,19 @@ class GodModeCausalGRU(nn.Module):
         self.raw_temperature = nn.Parameter(torch.tensor([0.0]))
         
         if config.hierarchical:
+            # Note: nn.Linear supports multidimensional input (*, H_in) -> (*, H_out)
             self.head_deviation = nn.Sequential(
                 nn.Linear(config.d_model, config.d_model // 2),
                 nn.GELU(),
                 nn.LayerNorm(config.d_model // 2),
-                nn.Dropout(config.dropout),  # FIX: Add dropout
+                nn.Dropout(config.dropout), 
                 nn.Linear(config.d_model // 2, 2)
             )
             self.head_type = nn.Sequential(
                 nn.Linear(config.d_model, config.d_model),
                 nn.GELU(),
                 nn.LayerNorm(config.d_model),
-                nn.Dropout(config.dropout),  # FIX: Add dropout
+                nn.Dropout(config.dropout),
                 nn.Linear(config.d_model, 2)
             )
         else:
@@ -393,7 +394,13 @@ class GodModeCausalGRU(nn.Module):
             elif 'bias' in name:
                 nn.init.zeros_(p)
 
-    def forward(self, flux: torch.Tensor, delta_t: torch.Tensor, lengths: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+    def forward(
+        self, 
+        flux: torch.Tensor, 
+        delta_t: torch.Tensor, 
+        lengths: Optional[torch.Tensor] = None,
+        return_all_timesteps: bool = False
+    ) -> Dict[str, torch.Tensor]:
         
         # FIX: Device-aware AMP
         device = flux.device
@@ -426,31 +433,58 @@ class GodModeCausalGRU(nn.Module):
                 
             combined = torch.cat([x_feat, x_window], dim=-1)
             
+            # GRU Output is (B, T, D)
             gru_out, _ = self.gru(combined)
             gru_out = self.norm_final(gru_out)
             
+            # --- POOLED/FINAL PREDICTION ---
             if self.pool is not None:
-                features = self.pool(gru_out, mask)
+                features_pooled = self.pool(gru_out, mask)
             elif lengths is not None:
                 # FIX: Type-safe indexing
                 idx = (lengths - 1).clamp(min=0).long()
                 idx = idx.view(-1, 1, 1).expand(-1, 1, gru_out.size(-1))
-                features = gru_out.gather(1, idx).squeeze(1)
+                features_pooled = gru_out.gather(1, idx).squeeze(1)
             else:
-                features = gru_out[:, -1, :]
+                features_pooled = gru_out[:, -1, :]
                 
             # FIX: Bounded temperature
             temp = F.softplus(self.raw_temperature).clamp(min=0.1, max=10.0)
             
-            if self.config.hierarchical:
-                return self._hierarchical_inference(features, temp)
-            else:
-                logits = self.classifier(features) / temp
-                return {'logits': logits, 'probs': F.softmax(logits, dim=-1)}
+            result = {}
 
-    def _hierarchical_inference(self, features, temp):
-        dev_logits = self.head_deviation(features)
-        type_logits = self.head_type(features)
+            # Standard Logic (on pooled features)
+            if self.config.hierarchical:
+                hier_res = self._hierarchical_inference(features_pooled, temp)
+                result.update(hier_res)
+            else:
+                logits = self.classifier(features_pooled) / temp
+                result['logits'] = logits
+                result['probs'] = F.softmax(logits, dim=-1)
+
+            # --- EARLY DETECTION LOGIC (Sequence Output) ---
+            # Required by evaluate.py/visualize.py to track probability evolution
+            if return_all_timesteps:
+                if self.config.hierarchical:
+                    # Hierarchical heads are nn.Linear based, so they support (B, T, D) natively
+                    hier_res_seq = self._hierarchical_inference(gru_out, temp)
+                    result['logits_seq'] = hier_res_seq['logits']
+                    result['probs_seq'] = hier_res_seq['probs']
+                else:
+                    # Apply classifier to the entire sequence
+                    logits_seq = self.classifier(gru_out) / temp
+                    result['logits_seq'] = logits_seq
+                    result['probs_seq'] = F.softmax(logits_seq, dim=-1)
+
+            return result
+
+    def _hierarchical_inference(self, features: torch.Tensor, temp: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Performs hierarchical inference.
+        Input `features` can be (B, D) or (B, T, D).
+        """
+        dev_logits = self.head_deviation(features) # (*, 2)
+        type_logits = self.head_type(features)     # (*, 2)
         
         dev_logits = dev_logits / temp
         type_logits = type_logits / temp
@@ -458,16 +492,23 @@ class GodModeCausalGRU(nn.Module):
         dev_log_probs = F.log_softmax(dev_logits, dim=-1)
         type_log_probs = F.log_softmax(type_logits, dim=-1)
         
-        log_p_flat = dev_log_probs[:, 0:1]
-        log_p_dev_yes = dev_log_probs[:, 1:2]
+        # dev_log_probs is (*, 2): index 0 -> No Dev, index 1 -> Dev Yes
+        # type_log_probs is (*, 2): index 0 -> Class A, index 1 -> Class B
         
-        log_p_classA = log_p_dev_yes + type_log_probs[:, 0:1]
-        log_p_classB = log_p_dev_yes + type_log_probs[:, 1:2]
+        # Probability of Flat (No deviation)
+        log_p_flat = dev_log_probs[..., 0:1] 
+        
+        # Probability of Deviation exists
+        log_p_dev_yes = dev_log_probs[..., 1:2]
+        
+        # Combined probabilities
+        log_p_classA = log_p_dev_yes + type_log_probs[..., 0:1]
+        log_p_classB = log_p_dev_yes + type_log_probs[..., 1:2]
         
         final_log_probs = torch.cat([log_p_flat, log_p_classA, log_p_classB], dim=-1)
         
         return {
-            'logits': final_log_probs,
+            'logits': final_log_probs, # Actually log probs here, but kept key for compatibility
             'probs': torch.exp(final_log_probs),
             'aux_dev': dev_logits,
             'aux_type': type_logits
@@ -500,7 +541,8 @@ if __name__ == '__main__':
     logger.info("INITIALIZING GOD MODE V3 DIAGNOSTICS")
     logger.info("="*60)
     
-    model = create_model(d_model=128, n_layers=3, window_size=10, compile_model=False)
+    # Enable hierarchical to test the complex path
+    model = create_model(d_model=128, n_layers=3, window_size=10, compile_model=False, hierarchical=True)
     model.to(device)
     
     B, T = 8, 200
@@ -509,14 +551,14 @@ if __name__ == '__main__':
     lengths = torch.tensor([200, 150, 100, 50, 10, 5, 200, 200], device=device)
     
     try:
-        # FORWARD PASS
+        # FORWARD PASS (STANDARD)
         model.eval()
         with torch.no_grad():
-            logger.info(f"🔍 Running Inference (Batch={B}, Seq={T})...")
+            logger.info(f"🔍 Running Standard Inference (Batch={B}, Seq={T})...")
             out = model(x, t, lengths)
         
         probs = out['probs']
-        logger.info(f"✅ FORWARD PASS: SUCCESS | Shape: {probs.shape}")
+        logger.info(f"✅ STANDARD FORWARD PASS: SUCCESS | Shape: {probs.shape}")
         
         # PROBABILITY CHECK
         sums = probs.sum(dim=-1)
@@ -527,12 +569,28 @@ if __name__ == '__main__':
         else:
             logger.error(f"❌ PROBABILITY MATH: FAILED | Sums: {sums}")
 
+        # FORWARD PASS (SEQUENCE/EARLY DETECTION)
+        logger.info(f"🔍 Running Sequence Inference (return_all_timesteps=True)...")
+        with torch.no_grad():
+            out_seq = model(x, t, lengths, return_all_timesteps=True)
+            
+        if 'probs_seq' in out_seq:
+            seq_shape = out_seq['probs_seq'].shape
+            logger.info(f"✅ SEQUENCE OUTPUT: FOUND | Shape: {seq_shape}")
+            if seq_shape == (B, T, 3):
+                logger.info("✅ SEQUENCE DIMENSIONS: CORRECT")
+            else:
+                logger.error(f"❌ SEQUENCE DIMENSIONS: INCORRECT (Expected {B, T, 3})")
+        else:
+             logger.error("❌ SEQUENCE OUTPUT: MISSING 'probs_seq'")
+
         # BACKWARD PASS
         logger.info("🔍 Running Backward Pass...")
         model.train()
         targets = torch.randint(0, 3, (B,), device=device)
         
         out_train = model(x, t, lengths)
+        # Handle hierarchical output (logits are actually log_probs in that function)
         loss = F.nll_loss(out_train['logits'], targets)
         loss.backward()
         
