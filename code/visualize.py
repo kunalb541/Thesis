@@ -119,6 +119,11 @@ class GodModeVisualizer:
         self.out_dir = Path(output_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         
+        # CRITICAL FIX: Set deterministic mode for reproducibility
+        if torch.cuda.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        
         print(f"Visualization seed set to 42 for reproducibility")
         
         # Load Model
