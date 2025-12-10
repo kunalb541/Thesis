@@ -618,7 +618,6 @@ def main():
         mode='max', 
         factor=0.5, 
         patience=5,
-        verbose=(rank == 0)
     )
     
     if rank == 0:
