@@ -10,6 +10,25 @@ logger = logging.getLogger("causal_model")
 
 @dataclass
 class CausalConfig:
+    """
+    Configuration for CausalHybridModel.
+    
+    All parameters are validated in __post_init__ to ensure
+    correct architecture construction.
+    
+    Attributes:
+        d_model: Model dimension (must be divisible by n_heads)
+        n_heads: Number of attention heads
+        n_transformer_layers: Number of transformer blocks
+        kernel_size: CNN kernel size
+        n_conv_layers: Number of residual CNN blocks
+        dilation_growth: Dilation growth factor (typically 2)
+        dropout: Dropout probability
+        max_seq_len: Maximum sequence length
+        n_classes: Number of output classes (3 for Flat/PSPL/Binary)
+        classifier_hidden_dim: Hidden dimension in classifier head
+        use_gradient_checkpointing: Enable memory-efficient training
+    """
     d_model: int = 512
     n_heads: int = 8
     n_transformer_layers: int = 6
@@ -70,6 +89,13 @@ class CausalConv1d(nn.Module):
         1. Pre-fill buffer with receptive_field-1 warmup observations
         2. Alternatively, discard predictions for first receptive_field-1 steps
         3. Zero-padding is the scientifically correct approach (no lookahead)
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels
+        kernel_size: Convolution kernel size
+        dilation: Dilation factor
+        dropout: Dropout probability
     """
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, 
                  dilation: int = 1, dropout: float = 0.0):
@@ -109,6 +135,10 @@ class ChannelLayerNorm(nn.Module):
     LayerNorm that operates on (B, C, T) format by normalizing over C dimension.
     Eliminates expensive transpose operations in CNN blocks.
     Critical for DDP stability with small per-GPU batches.
+    
+    Args:
+        num_channels: Number of channels to normalize
+        eps: Numerical stability constant
     """
     def __init__(self, num_channels: int, eps: float = 1e-5):
         super().__init__()
@@ -133,6 +163,12 @@ class ResidualCausalBlock(nn.Module):
     Residual block with two causal convolutions and channel layer normalization.
     Operates entirely in (B, C, T) format - NO TRANSPOSES.
     Uses ChannelLayerNorm for DDP stability with small per-GPU batches.
+    
+    Args:
+        d_model: Model dimension
+        kernel_size: Convolution kernel size
+        dilation: Dilation factor for this block
+        dropout: Dropout probability
     """
     def __init__(self, d_model: int, kernel_size: int, dilation: int, dropout: float):
         super().__init__()
@@ -165,6 +201,13 @@ class ContinuousSinusoidalEncoding(nn.Module):
     """
     Continuous time encoding using logarithmically-scaled sinusoids.
     Maps irregular time intervals to positional embeddings.
+    
+    This is critical for Roman Telescope data where observation gaps
+    vary due to weather, satellite orbits, etc.
+    
+    Args:
+        d_model: Model dimension (embedding size)
+        max_timescale: Maximum timescale for sinusoid frequencies
     """
     def __init__(self, d_model: int, max_timescale: float = 10000.0):
         super().__init__()
@@ -190,6 +233,14 @@ class FlashCausalAttention(nn.Module):
     Multi-head causal attention using PyTorch's scaled_dot_product_attention.
     Supports optional padding masks merged with causal masking.
     Caches causal masks for efficiency on 40-GPU training.
+    
+    CRITICAL: Uses is_causal=True for flash attention kernel optimization
+    when no padding mask is needed.
+    
+    Args:
+        d_model: Model dimension
+        n_heads: Number of attention heads
+        dropout: Attention dropout probability
     """
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
@@ -202,7 +253,7 @@ class FlashCausalAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout_p = dropout
         
-        # Cache for causal mask (HPC optimization) - FIX: Use None for efficiency
+        # Cache for causal mask (HPC optimization)
         self.register_buffer('_cached_mask', None, persistent=False)
         self._cached_size = 0
     
@@ -225,24 +276,26 @@ class FlashCausalAttention(nn.Module):
             (B, T, C) output tensor
         """
         B, T, C = x.shape
-        q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        
+        # Project and reshape - CRITICAL: Add .contiguous() after view/transpose
+        q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2).contiguous()
+        k = self.k_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2).contiguous()
+        v = self.v_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2).contiguous()
         
         if key_padding_mask is None:
+            # Use flash attention with built-in causal masking (optimal CUDA kernel)
             out = F.scaled_dot_product_attention(
                 q, k, v, 
                 dropout_p=self.dropout_p if self.training else 0.0, 
                 is_causal=True
             )
         else:
-            # Use cached causal mask
+            # Use cached causal mask merged with padding mask
             attn_mask = self._get_causal_mask(T, x.device, q.dtype)
             
             # Expand padding mask and merge with causal mask
             pad_mask_expanded = key_padding_mask.view(B, 1, 1, T).expand(B, self.n_heads, T, T)
-            # FIX: Remove unnecessary .clone() - expand creates view, masked_fill_ operates in-place safely
-            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0).expand(B, self.n_heads, T, T)
+            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0).expand(B, self.n_heads, T, T).clone()
             attn_mask = attn_mask.masked_fill(pad_mask_expanded, float('-inf'))
 
             out = F.scaled_dot_product_attention(
@@ -251,6 +304,7 @@ class FlashCausalAttention(nn.Module):
                 dropout_p=self.dropout_p if self.training else 0.0
             )
 
+        # Reshape output - CRITICAL: Add .contiguous() before view
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
@@ -283,7 +337,8 @@ class CausalHybridModel(nn.Module):
     Streaming Inference (Roman Telescope):
         For real-time classification, maintain a rolling buffer of size
         `model.get_receptive_field()` to preserve causal history. Example:
-```python
+        
+        ```python
         rf = model.get_receptive_field()
         buffer_flux = torch.zeros(1, rf, device=device)
         buffer_time = torch.zeros(1, rf, device=device)
@@ -295,7 +350,7 @@ class CausalHybridModel(nn.Module):
             
             # Predict on full buffer (only last timestep matters)
             pred = model(buffer_flux, buffer_time, return_all_timesteps=False)
-```
+        ```
     
     NaN Handling:
         - Training: NaNs replaced with 0.0 via torch.nan_to_num
@@ -309,10 +364,10 @@ class CausalHybridModel(nn.Module):
         - Save via: `model.save_model(path, is_ddp=True)`
         
         Example DDP initialization:
-```python
+        ```python
         model = CausalHybridModel(config).to(rank)
         model = DDP(model, device_ids=[rank], find_unused_parameters=False)
-```
+        ```
     
     Args:
         config: CausalConfig with validated hyperparameters
@@ -384,8 +439,12 @@ class CausalHybridModel(nn.Module):
     def _calculate_receptive_field(self) -> int:
         """
         Calculate total receptive field of causal CNN layers.
+        
         For each residual block with two convolutions at the same dilation:
         RF_new = RF_old + 2 * (kernel_size - 1) * dilation
+        
+        Returns:
+            Total receptive field in timesteps
         """
         rf = 1
         dilation = 1
@@ -456,7 +515,8 @@ class CausalHybridModel(nn.Module):
             x = x * mask_float
         
         # Causal CNN feature extraction - operates in (B, C, T) format
-        x = x.transpose(1, 2)  # (B, T, C) -> (B, C, T)
+        # CRITICAL: Add .contiguous() after transpose for optimal CUDA performance
+        x = x.transpose(1, 2).contiguous()  # (B, T, C) -> (B, C, T)
         
         if lengths is not None:
             # Prepare mask for CNN: (B, T, 1) -> (B, 1, T) -> broadcast to (B, C, T)
@@ -467,7 +527,8 @@ class CausalHybridModel(nn.Module):
             if lengths is not None:
                 x = x * mask_cnn  # Broadcasts (B, 1, T) to (B, C, T)
         
-        x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
+        # CRITICAL: Add .contiguous() after transpose
+        x = x.transpose(1, 2).contiguous()  # (B, C, T) -> (B, T, C)
         
         # Causal transformer layers
         for layer in self.transformer_layers:
