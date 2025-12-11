@@ -6,7 +6,7 @@ import math
 import logging
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Literal, Any
+from typing import Dict, Optional, Tuple, Literal, Any, Union
 
 
 # =============================================================================

@@ -567,9 +567,7 @@ def main():
             f"Per-GPU batch size must be >= 4, got {args.batch_size // world_size}"
         
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(f"
+            logger.info(f"
 {'='*80}")
             if rank == 0:
     
@@ -611,8 +609,6 @@ def main():
     set_seed(args.seed)
     
     if rank == 0:
-        if rank == 0:
-    
             logger.info("=" * 80)
         if rank == 0:
     
@@ -641,21 +637,15 @@ def main():
     if is_ddp:
         if args.batch_size % world_size != 0:
             if rank == 0:
-                if rank == 0:
-    
-                    logger.error(f"Batch size {args.batch_size} not divisible by world_size {world_size}")
+            logger.error(f"Batch size {args.batch_size} not divisible by world_size {world_size}")
             sys.exit(1)
         
         effective_batch = args.batch_size // world_size
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(f"DDP Mode: {world_size} GPUs × {effective_batch} batch = {args.batch_size} global batch")
+            logger.info(f"DDP Mode: {world_size} GPUs × {effective_batch} batch = {args.batch_size} global batch")
 
     # Load data
     if rank == 0:
-        if rank == 0:
-    
             logger.info(f"\nLoading data from {args.data}...")
     
     data = np.load(args.data, allow_pickle=True)
@@ -673,8 +663,6 @@ def main():
     
     # Verify physical realism flags
     if rank == 0:
-        if rank == 0:
-    
             logger.info("\nDataset Information:")
         if rank == 0:
     
@@ -698,28 +686,20 @@ def main():
         if 'ab_zeropoint_jy' in data:
             # GOD MODE: Rank 0 logging
             if rank == 0:
-                if rank == 0:
-    
-                    logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
+            logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
         
         if 'mission_duration_days' in data:
             # GOD MODE: Rank 0 logging
             if rank == 0:
-                if rank == 0:
-    
-                    logger.info(f"  Mission duration: {data['mission_duration_days']} days")
+            logger.info(f"  Mission duration: {data['mission_duration_days']} days")
     
     # Compute normalization statistics
     if rank == 0:
-        if rank == 0:
-    
             logger.info("\nComputing normalization statistics...")
     
     stats = compute_normalization_stats(flux, sample_size=10000)
     
     if rank == 0:
-        if rank == 0:
-    
             logger.info(f"  Median: {stats['median']:.4f}")
         if rank == 0:
     
@@ -751,8 +731,6 @@ def main():
     )
     
     if rank == 0:
-        if rank == 0:
-    
             logger.info(f"\nDataset splits:")
         if rank == 0:
     
@@ -839,7 +817,7 @@ def main():
             gradient_as_bucket_view=True,  # ✅ GOD MODE: Memory efficiency
             find_unused_parameters=False,  # ✅ GOD MODE: All params used (faster)
             static_graph=False  # ✅ GOD MODE: Dynamic graph support
-        )
+        ,
             gradient_as_bucket_view=True,  # Memory efficiency
             find_unused_parameters=False  # All parameters used
         )
@@ -847,9 +825,7 @@ def main():
     # Compile model (PyTorch 2.0+)
     if args.compile and hasattr(torch, 'compile'):
         if rank == 0:
-            if rank == 0:
-    
-                logger.info("  Compiling model with torch.compile...")
+            logger.info("  Compiling model with torch.compile...")
         model = torch.compile(model)
     
     # Optimizer and scheduler
@@ -861,8 +837,7 @@ def main():
     )
     
     # FIXED: GradScaler only needed for FP16 (not BF16)
-    # FIXED: GradScaler only needed for FP16 (not BF16)
-    use_fp16 = (torch.bfloat16 != torch.bfloat16)  # Always False for BF16
+    use_fp16 = False  # Using BF16, not FP16
     scaler = torch.cuda.amp.GradScaler(enabled=use_fp16) if torch.cuda.is_available() else None
     
     # Learning rate scheduler with warmup
@@ -877,16 +852,12 @@ def main():
     if args.use_class_weights:
         class_weights = compute_class_weights(labels, device)
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(f"\nClass weights: {class_weights.cpu().numpy()}")
+            logger.info(f"\nClass weights: {class_weights.cpu().numpy()}")
     else:
         class_weights = torch.ones(3, device=device)
     
     # Training loop
     if rank == 0:
-        if rank == 0:
-    
             logger.info("\n" + "=" * 80)
         if rank == 0:
     
@@ -925,9 +896,7 @@ def main():
             val_acc = val_results['accuracy']
             
             if rank == 0:
-                if rank == 0:
-    
-                    logger.info(
+            logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
                     f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                     f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | "
@@ -946,9 +915,7 @@ def main():
                     
                     # GOD MODE: Rank 0 logging
                     if rank == 0:
-                        if rank == 0:
-    
-                            logger.info(f"  New best accuracy: {best_acc:.4f}")
+            logger.info(f"  New best accuracy: {best_acc:.4f}")
                 else:
                     patience_counter += 1
                 
@@ -960,9 +927,7 @@ def main():
                     )
         else:
             if rank == 0:
-                if rank == 0:
-    
-                    logger.info(
+            logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
                     f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                     f"LR: {scheduler.get_last_lr()[0]:.2e}"
@@ -971,15 +936,11 @@ def main():
         # Early stopping
         if args.early_stopping_patience > 0 and patience_counter >= args.early_stopping_patience:
             if rank == 0:
-                if rank == 0:
-    
-                    logger.info(f"\nEarly stopping triggered after {epoch} epochs")
+            logger.info(f"\nEarly stopping triggered after {epoch} epochs")
             break
     
     # Final evaluation with detailed metrics
     if rank == 0:
-        if rank == 0:
-    
             logger.info("\n" + "=" * 80)
         if rank == 0:
     
@@ -1005,39 +966,27 @@ def main():
         
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
+            logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
+            logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
         
         # Confusion matrix
         cm = confusion_matrix(val_results['labels'], val_results['predictions'])
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info("\nConfusion Matrix:")
+            logger.info("\nConfusion Matrix:")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info("                Predicted")
+            logger.info("                Predicted")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info("             Flat  PSPL  Binary")
+            logger.info("             Flat  PSPL  Binary")
         for i, row in enumerate(cm):
             class_name = ['Flat', 'PSPL', 'Binary'][i]
             # GOD MODE: Rank 0 logging
             if rank == 0:
-                if rank == 0:
-    
-                    logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
+            logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
         
         # Classification report
         class_names = ['Flat', 'PSPL', 'Binary']
@@ -1049,14 +998,10 @@ def main():
         )
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info("\nClassification Report:")
+            logger.info("\nClassification Report:")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(report)
+            logger.info(report)
         
         # Save metrics
         metrics = {
@@ -1072,14 +1017,10 @@ def main():
         
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info(f"\nTraining complete. Results saved to {output_dir}")
+            logger.info(f"\nTraining complete. Results saved to {output_dir}")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            if rank == 0:
-    
-                logger.info("=" * 80)
+            logger.info("=" * 80)
     
     # Cleanup
     if dist.is_initialized():
