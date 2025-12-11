@@ -1,18 +1,3 @@
-"""
-Roman Space Telescope Microlensing Classifier Evaluation Suite
-
-Comprehensive evaluation framework for trained models including:
-- Standard classification metrics
-- ROC curves and calibration plots
-- Physical parameter analysis
-- Temporal bias diagnostics
-- Early detection simulations
-- Probability evolution visualization
-
-Author: Thesis Implementation
-Date: December 2024
-"""
-
 import os
 import sys
 import json
