@@ -730,12 +730,15 @@ def main():
     
     # Wrap with DDP
     if is_ddp:
+        # GOD MODE: Optimal DDP configuration for 40 GPUs
         model = DDP(
-        model,
-        device_ids=[local_rank],
-        broadcast_buffers=False,  # GOD MODE: Reduce sync overhead
-        gradient_as_bucket_view=True  # GOD MODE: Memory efficiency
-    )
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,  # Buffers don't need syncing (no running stats)
+            gradient_as_bucket_view=True,  # Memory efficiency
+            find_unused_parameters=False  # All parameters used
+        )
     
     # Compile model (PyTorch 2.0+)
     if args.compile and hasattr(torch, 'compile'):
@@ -752,7 +755,8 @@ def main():
     )
     
     # FIXED: GradScaler only needed for FP16 (not BF16)
-    use_fp16 = (model.amp_dtype == torch.float16)
+    # FIXED: GradScaler only needed for FP16 (not BF16)
+    use_fp16 = (torch.bfloat16 != torch.bfloat16)  # Always False for BF16
     scaler = torch.cuda.amp.GradScaler(enabled=use_fp16) if torch.cuda.is_available() else None
     
     # Learning rate scheduler with warmup
@@ -857,7 +861,10 @@ def main():
         logger.info("=" * 80)
         
         # Load best model
-        best_checkpoint = torch.load(output_dir / "best_model.pt")
+        if is_ddp:
+            dist.barrier()  # GOD MODE: Ensure all ranks finish
+        
+        best_checkpoint = torch.load(output_dir / "best_model.pt", map_location=device)
         if isinstance(model, DDP):
             model.module.load_state_dict(best_checkpoint['model_state_dict'])
         else:

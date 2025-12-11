@@ -184,12 +184,12 @@ class RomanEvaluator:
         
         # Extract config
         config_dict = checkpoint.get('config', {})
-        valid_keys = set(GRUConfig.__annotations__.keys())
+        valid_keys = set(ModelConfig.__annotations__.keys())
         clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
-        config = GRUConfig(**clean_conf)
+        config = ModelConfig(**clean_conf)
         
         # Create model
-        model = RomanMicrolensingGRU(config, dtype=torch.float32).to(self.device)
+        model = RomanMicrolensingGRU(config, dtype=torch.float32), device=self.device)
         
         # Load weights
         state_dict = checkpoint.get('state_dict', checkpoint.get('model_state_dict', checkpoint))
@@ -338,17 +338,17 @@ class RomanEvaluator:
                 flux_batch = torch.tensor(
                     self.flux[i:batch_end], 
                     dtype=torch.float32
-                ).to(self.device)
+                ), device=self.device)
                 
                 dt_batch = torch.tensor(
                     self.delta_t[i:batch_end], 
                     dtype=torch.float32
-                ).to(self.device)
+                ), device=self.device)
                 
                 len_batch = torch.tensor(
                     self.lengths[i:batch_end], 
                     dtype=torch.long
-                ).to(self.device)
+                ), device=self.device)
                 
                 output = self.model(flux_batch, dt_batch, lengths=len_batch)
                 probs = output['probs'].cpu().numpy()
@@ -649,9 +649,9 @@ class RomanEvaluator:
     def _plot_single_evolution(self, idx: int, cls_name: str, cls_idx: int):
         """Plot single event evolution."""
         # Rerun model with timestep outputs
-        f = torch.tensor(self.flux[idx], dtype=torch.float32).unsqueeze(0).to(self.device)
-        d = torch.tensor(self.delta_t[idx], dtype=torch.float32).unsqueeze(0).to(self.device)
-        l = torch.tensor([self.lengths[idx]], dtype=torch.long).to(self.device)
+        f = torch.tensor(self.flux[idx], dtype=torch.float32).unsqueeze(0), device=self.device)
+        d = torch.tensor(self.delta_t[idx], dtype=torch.float32).unsqueeze(0), device=self.device)
+        l = torch.tensor([self.lengths[idx]], dtype=torch.long), device=self.device)
         
         with torch.no_grad():
             output = self.model(f, d, lengths=l, return_all_timesteps=True)

@@ -92,7 +92,7 @@ class RomanVisualizer:
         print(f"\nLoading model from {Path(model_path).name}...")
         
         try:
-            from model import RomanMicrolensingGRU, GRUConfig
+            from model import RomanMicrolensingGRU, ModelConfig
         except ImportError as e:
             print(f"CRITICAL: Cannot import model: {e}")
             print("Make sure model.py is in the same directory")
@@ -106,9 +106,9 @@ class RomanVisualizer:
         
         # Extract config
         config_dict = ckpt.get('config', {})
-        valid_keys = set(GRUConfig.__annotations__.keys())
+        valid_keys = set(ModelConfig.__annotations__.keys())
         clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
-        config = GRUConfig(**clean_conf)
+        config = ModelConfig(**clean_conf)
         
         # Create model
         model = RomanMicrolensingGRU(config, dtype=torch.float32).to(self.device)

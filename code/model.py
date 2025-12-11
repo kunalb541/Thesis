@@ -19,17 +19,6 @@ from typing import Dict, Optional, Tuple, Literal, Any
 # ✅ Memory efficient: Gradient checkpointing available for 40-GPU scaling
 # =============================================================================
 
-
-# =============================================================================
-# ROMAN SPACE TELESCOPE READINESS VERIFICATION
-# =============================================================================
-# ✅ Causality: All convolutions use left-padding only (lines 234, 243, 288)
-# ✅ No look-ahead: TimeDistributed architecture ensures sequential processing
-# ✅ State management: Model is stateless - no hidden state carried between samples
-# ✅ DDP-ready: All buffers registered, all ops differentiable
-# ✅ Memory efficient: Gradient checkpointing available for 40-GPU scaling
-# =============================================================================
-
 # =============================================================================
 # LOGGING CONFIGURATION
 # =============================================================================
@@ -52,7 +41,7 @@ class ModelConfig:
     
     Architecture Parameters:
         d_model: Hidden dimension size
-        n_layers: Number of GRU layers
+        n_layers: Number of recurrent layers
         dropout: Dropout probability
         window_size: Causal convolution window size
         max_seq_len: Maximum sequence length
@@ -698,7 +687,7 @@ if __name__ == '__main__':
     print("=" * 80)
     
     # Test configuration
-    config = GRUConfig(
+    config = ModelConfig(
         d_model=128,
         n_layers=3,
         hierarchical=True,
