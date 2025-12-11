@@ -19,6 +19,7 @@ from datetime import datetime
 import warnings
 import random
 import h5py
+from typing import Dict, Any, Tuple, Optional
 
 try:
     current_dir = Path(__file__).resolve().parent
@@ -62,7 +63,7 @@ class NumpyEncoder(json.JSONEncoder):
 # =============================================================================
 # DISTRIBUTED TRAINING SETUP
 # =============================================================================
-def setup_distributed():
+def setup_distributed() -> Tuple[int, int, int, bool]:
     """Initialize distributed training if environment variables are set."""
     if 'RANK' in os.environ:
         rank = int(os.environ["RANK"])
@@ -115,7 +116,7 @@ def setup_logging(rank: int, output_dir: Path):
     return logger
 
 
-def set_seed_everywhere(seed: int, rank: int = 0):
+def set_seed_everywhere(seed: int, rank: int = 0) -> None:
     """
     GOD MODE: Set all random seeds for perfect reproducibility.
     
@@ -123,8 +124,6 @@ def set_seed_everywhere(seed: int, rank: int = 0):
         seed: Base random seed
         rank: Process rank (for rank-specific seeds if needed)
     """
-    import random
-    
     # Python
     random.seed(seed + rank)
     
@@ -147,7 +146,6 @@ def set_seed_everywhere(seed: int, rank: int = 0):
         print(f"🎲 GOD MODE: All random seeds set to {seed}")
 
 
-
 # =============================================================================
 # DATASET WITH PHYSICAL REALISM
 # =============================================================================
@@ -167,8 +165,8 @@ class MicrolensingDataset(Dataset):
         flux: np.ndarray, 
         delta_t: np.ndarray, 
         labels: np.ndarray, 
-        stats: dict = None,
-        handle_nans: str = 'zero'  # 'zero', 'mask', or 'median'
+        stats: Optional[Dict] = None,
+        handle_nans: str = 'zero'
     ):
         """
         Args:
@@ -187,11 +185,10 @@ class MicrolensingDataset(Dataset):
         self.padding_mask = (~torch.isnan(self.flux)) & (self.flux != 0.0)
         self.lengths = self.padding_mask.sum(dim=1).long().clamp(min=1)
         
-        # Handle NaN values (from negative flux in mag conversion)
+        # Handle NaN values
         if handle_nans == 'zero':
             self.flux = torch.nan_to_num(self.flux, nan=0.0)
         elif handle_nans == 'median':
-            # Replace NaNs with median of each light curve
             for i in range(len(self.flux)):
                 valid = self.flux[i][self.padding_mask[i]]
                 if len(valid) > 0:
@@ -211,19 +208,18 @@ class MicrolensingDataset(Dataset):
             iqr = stats['iqr']
             
             if iqr < 1e-6:
-                iqr = 1.0  # Prevent division by zero
+                iqr = 1.0
             
-            # Normalize only valid (non-padded) observations
             self.flux = torch.where(
                 self.padding_mask,
                 (self.flux - median) / iqr,
                 torch.tensor(0.0, dtype=self.flux.dtype)
             )
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.labels)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return (
             self.flux[idx],
             self.delta_t[idx],
@@ -232,10 +228,9 @@ class MicrolensingDataset(Dataset):
         )
 
 
-def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> dict:
+def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> Dict[str, float]:
     """
     Compute median and IQR for flux normalization.
-    Matches the normalization in simulate.py.
     
     Args:
         flux: (N, T) flux array
@@ -244,15 +239,10 @@ def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> d
     Returns:
         Dict with 'median' and 'iqr'
     """
-    # Sample subset for efficiency
     sample_flux = flux[:sample_size]
-    
-    # Extract valid (non-zero, non-NaN) values
-    valid_flux = sample_flux[sample_flux != 0]
-    valid_flux = valid_flux[~np.isnan(valid_flux)]
+    valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
     
     if len(valid_flux) == 0:
-        print("Warning: No valid flux values found. Using default normalization.")
         return {'median': 0.0, 'iqr': 1.0}
     
     median = float(np.median(valid_flux))
@@ -265,506 +255,306 @@ def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> d
     return {'median': median, 'iqr': iqr}
 
 
+def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Tensor:
+    """Compute class weights for balanced training."""
+    unique, counts = np.unique(labels, return_counts=True)
+    total = len(labels)
+    weights = total / (len(unique) * counts)
+    weight_tensor = torch.zeros(3, device=device)
+    weight_tensor[unique] = torch.from_numpy(weights).float()
+    return weight_tensor
+
+
 # =============================================================================
 # TRAINING FUNCTIONS
 # =============================================================================
 def train_epoch(
-    model, 
-    loader, 
-    optimizer, 
-    scaler, 
-    class_weights, 
-    device, 
-    rank, 
-    epoch, 
-    logger, 
-    config
-):
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    class_weights: torch.Tensor,
+    device: torch.device,
+    rank: int,
+    epoch: int,
+    logger: logging.Logger,
+    config: ModelConfig
+) -> Tuple[float, float]:
     """Train for one epoch."""
     model.train()
     
-    total_loss = torch.tensor(0.0, device=device)
-    correct = torch.tensor(0.0, device=device)
-    total_samples = torch.tensor(0.0, device=device)
+    total_loss = 0.0
+    correct = 0
+    total = 0
     
-    # Only show progress bar on rank 0
-    iterator = loader if rank != 0 else tqdm(
-        loader, 
-        desc=f"Epoch {epoch}", 
-        leave=False,
-        dynamic_ncols=True
-    )
-
-    for flux, delta_t, lengths, labels in iterator:
-        # Move to device with non-blocking transfer
+    iterator = tqdm(loader, desc=f"Epoch {epoch}", disable=(rank != 0))
+    
+    for batch_idx, (flux, delta_t, lengths, labels) in enumerate(iterator):
+        # Move to device
         flux = flux.to(device, non_blocking=True)
         delta_t = delta_t.to(device, non_blocking=True)
         lengths = lengths.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-
-        # Forward pass
-        optimizer.zero_grad(set_to_none=True)
-        out = model(flux, delta_t, lengths=lengths)
         
-        # Compute loss (FIXED: Added auxiliary hierarchical losses)
-        if config.hierarchical:
-            # Main loss (joint probability)
-            loss_main = F.nll_loss(out['logits'], labels, weight=class_weights)
+        # Forward pass with AMP
+        with torch.cuda.amp.autocast(enabled=config.use_amp, dtype=torch.bfloat16):
+            output = model(flux, delta_t, lengths=lengths)
             
-            # Auxiliary loss 1: Deviation detection (Flat vs Deviation)
-            dev_labels = (labels > 0).long()  # 0=Flat, 1=Deviation
-            loss_dev = F.cross_entropy(out['aux_dev'], dev_labels)
-            
-            # Auxiliary loss 2: Event type (PSPL vs Binary, only for deviation events)
-            dev_mask = labels > 0
-            if dev_mask.sum() > 0:
-                type_labels = (labels[dev_mask] - 1)  # 0=PSPL, 1=Binary
-                loss_type = F.cross_entropy(out['aux_type'][dev_mask], type_labels)
+            if config.hierarchical:
+                loss = F.cross_entropy(
+                    output['logits'], 
+                    labels, 
+                    weight=class_weights
+                )
             else:
-                loss_type = torch.tensor(0.0, device=device)
-            
-            # Combined loss with auxiliary weights
-            loss = loss_main + 0.3 * loss_dev + 0.3 * loss_type
-        else:
-            loss = F.cross_entropy(out['logits'], labels, weight=class_weights)
-
-        # Backward pass with gradient scaling
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
-        scaler.step(optimizer)
-        scaler.update()
+                loss = F.cross_entropy(
+                    output['logits'],
+                    labels,
+                    weight=class_weights
+                )
         
-        # Accumulate metrics
+        # Backward pass
+        optimizer.zero_grad(set_to_none=True)  # GOD MODE: Memory optimization
+        
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+            optimizer.step()
+        
+        # Metrics
         with torch.no_grad():
-            batch_size = labels.size(0)
-            total_loss += loss.detach() * batch_size
-            correct += (out['probs'].argmax(dim=1) == labels).sum()
-            total_samples += batch_size
-
-    # Synchronize across GPUs (FIXED: Batched all_reduce)
-    if dist.is_initialized():
-        metrics_tensor = torch.stack([total_loss, correct, total_samples])
-        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
-        total_loss, correct, total_samples = metrics_tensor
+            pred = output['probs'].argmax(dim=-1)
+            correct += (pred == labels).sum().item()
+            total += labels.size(0)
+            total_loss += loss.item() * labels.size(0)
+        
+        if rank == 0:
+            iterator.set_postfix({
+                'loss': loss.item(),
+                'acc': 100.0 * correct / total
+            })
     
-    avg_loss = float(total_loss / total_samples)
-    accuracy = float(correct / total_samples)
+    avg_loss = total_loss / total
+    accuracy = correct / total
     
     return avg_loss, accuracy
 
 
-@torch.no_grad()
-def evaluate(model, loader, class_weights, device, rank, config, return_predictions=False):
-    """Evaluate model on validation/test set."""
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    class_weights: torch.Tensor,
+    device: torch.device,
+    rank: int,
+    config: ModelConfig,
+    return_predictions: bool = False
+) -> Dict[str, Any]:
+    """Evaluate model."""
     model.eval()
     
-    total_loss = torch.tensor(0.0, device=device)
-    correct = torch.tensor(0.0, device=device)
-    total_samples = torch.tensor(0.0, device=device)
+    total_loss = 0.0
+    correct = 0
+    total = 0
     
-    all_predictions = []
+    all_preds = []
     all_labels = []
-
-    for flux, delta_t, lengths, labels in loader:
-        flux = flux.to(device, non_blocking=True)
-        delta_t = delta_t.to(device, non_blocking=True)
-        lengths = lengths.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        
-        out = model(flux, delta_t, lengths=lengths)
-        
-        # Compute loss (FIXED: Added auxiliary hierarchical losses)
-        if config.hierarchical:
-            # Main loss (joint probability)
-            loss_main = F.nll_loss(out['logits'], labels, weight=class_weights)
-            
-            # Auxiliary loss 1: Deviation detection (Flat vs Deviation)
-            dev_labels = (labels > 0).long()  # 0=Flat, 1=Deviation
-            loss_dev = F.cross_entropy(out['aux_dev'], dev_labels)
-            
-            # Auxiliary loss 2: Event type (PSPL vs Binary, only for deviation events)
-            dev_mask = labels > 0
-            if dev_mask.sum() > 0:
-                type_labels = (labels[dev_mask] - 1)  # 0=PSPL, 1=Binary
-                loss_type = F.cross_entropy(out['aux_type'][dev_mask], type_labels)
-            else:
-                loss_type = torch.tensor(0.0, device=device)
-            
-            # Combined loss with auxiliary weights
-            loss = loss_main + 0.3 * loss_dev + 0.3 * loss_type
-        else:
-            loss = F.cross_entropy(out['logits'], labels, weight=class_weights)
-        
-        predictions = out['probs'].argmax(dim=1)
-        
-        # Accumulate metrics
-        batch_size = labels.size(0)
-        total_loss += loss * batch_size
-        correct += (predictions == labels).sum()
-        total_samples += batch_size
-        
-        if return_predictions:
-            all_predictions.append(predictions.cpu())
-            all_labels.append(labels.cpu())
-
-    # Synchronize across GPUs (FIXED: Batched all_reduce)
-    if dist.is_initialized():
-        metrics_tensor = torch.stack([total_loss, correct, total_samples])
-        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
-        total_loss, correct, total_samples = metrics_tensor
+    all_probs = []
     
-    avg_loss = float(total_loss / total_samples)
-    accuracy = float(correct / total_samples)
+    with torch.no_grad():
+        for flux, delta_t, lengths, labels in tqdm(loader, disable=(rank != 0), desc="Evaluating"):
+            flux = flux.to(device, non_blocking=True)
+            delta_t = delta_t.to(device, non_blocking=True)
+            lengths = lengths.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            
+            with torch.cuda.amp.autocast(enabled=config.use_amp, dtype=torch.bfloat16):
+                output = model(flux, delta_t, lengths=lengths)
+                
+                if config.hierarchical:
+                    loss = F.cross_entropy(
+                        output['logits'],
+                        labels,
+                        weight=class_weights
+                    )
+                else:
+                    loss = F.cross_entropy(
+                        output['logits'],
+                        labels,
+                        weight=class_weights
+                    )
+            
+            pred = output['probs'].argmax(dim=-1)
+            correct += (pred == labels).sum().item()
+            total += labels.size(0)
+            total_loss += loss.item() * labels.size(0)
+            
+            if return_predictions:
+                all_preds.extend(pred.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+                all_probs.extend(output['probs'].cpu().numpy())
     
-    results = {'loss': avg_loss, 'accuracy': accuracy}
+    results = {
+        'loss': total_loss / total,
+        'accuracy': correct / total,
+    }
     
     if return_predictions:
-        results['predictions'] = torch.cat(all_predictions).numpy()
-        results['labels'] = torch.cat(all_labels).numpy()
+        results['predictions'] = np.array(all_preds)
+        results['labels'] = np.array(all_labels)
+        results['probabilities'] = np.array(all_probs)
     
     return results
 
 
-def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Tensor:
-    """
-    Compute balanced class weights.
-    
-    Args:
-        labels: (N,) array of class labels
-        device: torch device
-        
-    Returns:
-        Tensor of shape (n_classes,) with weights
-    """
-    unique, counts = np.unique(labels, return_counts=True)
-    n_classes = len(unique)
-    
-    # Inverse frequency weighting
-    total = len(labels)
-    weights = np.zeros(n_classes)
-    
-    for cls, count in zip(unique, counts):
-        weights[cls] = total / (n_classes * count)
-    
-    return torch.tensor(weights, dtype=torch.float32, device=device)
-
-
 def save_checkpoint(
-    model,
-    optimizer,
-    scaler,
-    epoch,
-    best_acc,
-    config,
-    stats,
-    output_dir,
-    is_best=False
-):
-    """Save training checkpoint."""
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    epoch: int,
+    best_acc: float,
+    config: ModelConfig,
+    stats: Dict,
+    output_dir: Path,
+    is_best: bool = False
+) -> None:
+    """Save model checkpoint."""
+    # GOD MODE: Strip DDP wrapper for clean save
+    if isinstance(model, DDP):
+        model_state = model.module.state_dict()
+    else:
+        model_state = model.state_dict()
+    
     checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
+        'model_state_dict': model_state,
         'optimizer_state_dict': optimizer.state_dict(),
-        'scaler_state_dict': scaler.state_dict(),
-        'best_acc': best_acc,
+        'epoch': epoch,
+        'best_accuracy': best_acc,
         'config': config.__dict__,
         'normalization_stats': stats,
     }
     
-    # Save regular checkpoint
-    checkpoint_path = output_dir / f"checkpoint_epoch_{epoch}.pt"
-    torch.save(checkpoint, checkpoint_path)
+    if scaler is not None:
+        checkpoint['scaler_state_dict'] = scaler.state_dict()
     
-    # Save best model separately
     if is_best:
-        best_path = output_dir / "best_model.pt"
-        torch.save(checkpoint, best_path)
-    
-    return checkpoint_path
+        torch.save(checkpoint, output_dir / 'best_model.pt')
+    else:
+        torch.save(checkpoint, output_dir / f'checkpoint_epoch_{epoch}.pt')
 
 
 # =============================================================================
-# MAIN TRAINING SCRIPT
+# MAIN TRAINING LOOP
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train Roman Space Telescope microlensing classifier",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description='Train Roman microlensing classifier')
     
-    # Required arguments
-    parser.add_argument('--experiment_name', required=True, 
-                        help='Experiment name for output directory')
-    parser.add_argument('--data', required=True, 
-                        help='Path to training data (.npz file)')
+    # Data arguments
+    parser.add_argument('--data', type=str, required=True, help='Path to training data (.npz)')
+    parser.add_argument('--output-dir', type=str, default='experiments', help='Output directory')
+    parser.add_argument('--experiment-name', type=str, default=None, help='Experiment name')
     
-    # Training hyperparameters
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=1024,
-                        help='Batch size per GPU')
-    parser.add_argument('--lr', type=float, default=DEFAULT_LR,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-2,
-                        help='Weight decay for AdamW')
-    parser.add_argument('--warmup_epochs', type=int, default=WARMUP_EPOCHS,
-                        help='Number of warmup epochs for learning rate')
+    # Model arguments
+    parser.add_argument('--d-model', type=int, default=128, help='Hidden dimension')
+    parser.add_argument('--n-layers', type=int, default=3, help='Number of GRU layers')
+    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
+    parser.add_argument('--hierarchical', action='store_true', help='Use hierarchical classification')
+    parser.add_argument('--feature-extraction', type=str, default='mlp', choices=['mlp', 'conv'])
+    parser.add_argument('--use-attention-pooling', action='store_true', help='Use attention pooling')
     
-    # Model architecture
-    parser.add_argument('--d_model', type=int, default=128,
-                        help='Model hidden dimension')
-    parser.add_argument('--n_layers', type=int, default=3,
-                        help='Number of GRU layers')
-    parser.add_argument('--dropout', type=float, default=0.2,
-                        help='Dropout probability')
-    parser.add_argument('--window_size', type=int, default=7,
-                        help='Causal window size')
-    parser.add_argument('--feature_extraction', type=str, default='mlp',
-                        choices=['mlp', 'conv'],
-                        help='Feature extraction method')
-    parser.add_argument('--use_attention_pooling', action='store_true',
-                        help='Use attention pooling instead of last-step')
-    parser.add_argument('--non_hierarchical', action='store_true',
-                        help='Use flat classification instead of hierarchical')
+    # Training arguments
+    parser.add_argument('--batch-size', type=int, default=256, help='Batch size per GPU')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=DEFAULT_LR, help='Learning rate')
+    parser.add_argument('--weight-decay', type=float, default=0.01, help='Weight decay')
+    parser.add_argument('--warmup-epochs', type=int, default=WARMUP_EPOCHS, help='Warmup epochs')
+    parser.add_argument('--clip-norm', type=float, default=CLIP_NORM, help='Gradient clipping')
+    parser.add_argument('--use-amp', action='store_true', default=True, help='Use automatic mixed precision')
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=1, help='Gradient accumulation steps')
     
-    # Data handling
-    parser.add_argument('--test_size', type=float, default=0.2,
-                        help='Fraction of data for validation')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of DataLoader workers')
-    parser.add_argument('--handle_nans', type=str, default='zero',
-                        choices=['zero', 'mask', 'median'],
-                        help='Strategy for handling NaN values')
+    # Optimization arguments
+    parser.add_argument('--use-class-weights', action='store_true', help='Use class weighting')
+    parser.add_argument('--compile', action='store_true', help='Use torch.compile (PyTorch 2.0+)')
     
-    # Training options
-    parser.add_argument('--use_class_weights', action='store_true',
-                        help='Use balanced class weights')
-    parser.add_argument('--eval_every', type=int, default=5,
-                        help='Evaluate every N epochs')
-    parser.add_argument('--save_every', type=int, default=10,
-                        help='Save checkpoint every N epochs')
-    parser.add_argument('--early_stopping_patience', type=int, default=20,
-                        help='Early stopping patience (0 to disable)')
-    
-    # System
-    parser.add_argument('--seed', type=int, default=SEED,
-                        help='Random seed')
-    parser.add_argument('--compile', action='store_true',
-                        help='Use torch.compile (PyTorch 2.0+)')
+    # Evaluation arguments
+    parser.add_argument('--eval-every', type=int, default=5, help='Evaluate every N epochs')
+    parser.add_argument('--save-every', type=int, default=10, help='Save checkpoint every N epochs')
+    parser.add_argument('--early-stopping-patience', type=int, default=0, help='Early stopping patience (0=disabled)')
     
     args = parser.parse_args()
     
     # Setup distributed training
     rank, local_rank, world_size, is_ddp = setup_distributed()
-    device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available()
-
-    # ✅ GOD MODE: Hyperparameter validation for distributed training
-    if is_ddp:
-        assert args.batch_size % world_size == 0, \
-            f"Batch size {args.batch_size} must be divisible by world size {world_size}"
-        assert args.batch_size // world_size >= 4, \
-            f"Per-GPU batch size must be >= 4, got {args.batch_size // world_size}"
-        
-        if rank == 0:
-            logger.info(f"
-{'='*80}")
-            if rank == 0:
-    
-                logger.info("DDP CONFIGURATION VALIDATION")
-            if rank == 0:
-    
-                logger.info(f"{'='*80}")
-            if rank == 0:
-    
-                logger.info(f"  World size: {world_size}")
-            if rank == 0:
-    
-                logger.info(f"  Global batch size: {args.batch_size}")
-            if rank == 0:
-    
-                logger.info(f"  Per-GPU batch size: {args.batch_size // world_size}")
-            if rank == 0:
-    
-                logger.info(f"  Gradient accumulation: {args.gradient_accumulation_steps if hasattr(args, 'gradient_accumulation_steps') else 1}")
-            if rank == 0:
-    
-                logger.info(f"{'='*80}
-")
- else 'cpu')
+    device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
     # Create output directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = Path(__file__).resolve().parent.parent / 'results' / f"{args.experiment_name}_{timestamp}"
+    if args.experiment_name is None:
+        args.experiment_name = f"gru_d{args.d_model}_l{args.n_layers}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    if rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save arguments
-        with open(output_dir / 'args.json', 'w') as f:
-            json.dump(vars(args), f, indent=2)
+    output_dir = Path(args.output_dir) / args.experiment_name
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Setup logging
     logger = setup_logging(rank, output_dir)
-    set_seed(args.seed)
     
-    if rank == 0:
-            logger.info("=" * 80)
-        if rank == 0:
+    # Set random seed
+    set_seed_everywhere(SEED, rank)
     
-            logger.info("ROMAN SPACE TELESCOPE MICROLENSING CLASSIFIER TRAINING")
-        if rank == 0:
-    
-            logger.info("=" * 80)
-        if rank == 0:
-    
-            logger.info(f"Experiment: {args.experiment_name}")
-        if rank == 0:
-    
-            logger.info(f"Output directory: {output_dir}")
-        if rank == 0:
-    
-            logger.info(f"Device: {device}")
-        if rank == 0:
-    
-            logger.info(f"World size: {world_size}")
-        if rank == 0:
-    
-            logger.info(f"Random seed: {args.seed}")
-    
-    
-    # GOD MODE: Validate hyperparameters for DDP
-    if is_ddp:
-        if args.batch_size % world_size != 0:
-            if rank == 0:
-            logger.error(f"Batch size {args.batch_size} not divisible by world_size {world_size}")
-            sys.exit(1)
-        
-        effective_batch = args.batch_size // world_size
-        if rank == 0:
-            logger.info(f"DDP Mode: {world_size} GPUs × {effective_batch} batch = {args.batch_size} global batch")
-
     # Load data
     if rank == 0:
-            logger.info(f"\nLoading data from {args.data}...")
+        logger.info(f"Loading data from {args.data}")
     
-    data = np.load(args.data, allow_pickle=True)
-    
-    # Extract arrays
+    data = np.load(args.data)
     flux = data['flux']
-    if flux.ndim == 3 and flux.shape[-1] == 1:
-        flux = flux.squeeze(-1)
-    
-    delta_t = data['delta_t'] if 'delta_t' in data else np.zeros_like(flux)
-    if delta_t.ndim == 3 and delta_t.shape[-1] == 1:
-        delta_t = delta_t.squeeze(-1)
-    
+    delta_t = data['delta_t']
     labels = data['labels']
     
-    # Verify physical realism flags
-    if rank == 0:
-            logger.info("\nDataset Information:")
-        if rank == 0:
-    
-            logger.info(f"  Shape: {flux.shape}")
-        if rank == 0:
-    
-            logger.info(f"  Classes: {np.unique(labels)}")
-        if rank == 0:
-    
-            logger.info(f"  Class distribution: {np.bincount(labels)}")
-        
-        if 'physical_realism' in data:
-            if rank == 0:
-    
-                logger.info(f"  Physical realism: {data['physical_realism']}")
-        else:
-            if rank == 0:
-    
-                logger.warning("  Warning: Dataset may not have physical realism flag")
-        
-        if 'ab_zeropoint_jy' in data:
-            # GOD MODE: Rank 0 logging
-            if rank == 0:
-            logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
-        
-        if 'mission_duration_days' in data:
-            # GOD MODE: Rank 0 logging
-            if rank == 0:
-            logger.info(f"  Mission duration: {data['mission_duration_days']} days")
-    
-    # Compute normalization statistics
-    if rank == 0:
-            logger.info("\nComputing normalization statistics...")
-    
-    stats = compute_normalization_stats(flux, sample_size=10000)
-    
-    if rank == 0:
-            logger.info(f"  Median: {stats['median']:.4f}")
-        if rank == 0:
-    
-            logger.info(f"  IQR: {stats['iqr']:.4f}")
-    
     # Split data
-    train_indices, val_indices = train_test_split(
-        np.arange(len(labels)),
-        test_size=args.test_size,
-        stratify=labels,
-        random_state=args.seed
+    flux_train, flux_val, delta_t_train, delta_t_val, labels_train, labels_val = train_test_split(
+        flux, delta_t, labels, test_size=0.2, random_state=SEED, stratify=labels
     )
+    
+    # Compute normalization stats
+    stats = compute_normalization_stats(flux_train)
+    
+    if rank == 0:
+        logger.info(f"Normalization stats: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
     
     # Create datasets
-    train_ds = MicrolensingDataset(
-        flux[train_indices],
-        delta_t[train_indices],
-        labels[train_indices],
-        stats=stats,
-        handle_nans=args.handle_nans
-    )
+    train_dataset = MicrolensingDataset(flux_train, delta_t_train, labels_train, stats)
+    val_dataset = MicrolensingDataset(flux_val, delta_t_val, labels_val, stats)
     
-    val_ds = MicrolensingDataset(
-        flux[val_indices],
-        delta_t[val_indices],
-        labels[val_indices],
-        stats=stats,
-        handle_nans=args.handle_nans
-    )
-    
-    if rank == 0:
-            logger.info(f"\nDataset splits:")
-        if rank == 0:
-    
-            logger.info(f"  Training: {len(train_ds):,} samples")
-        if rank == 0:
-    
-            logger.info(f"  Validation: {len(val_ds):,} samples")
-    
-    # Create data loaders
+    # Create dataloaders
     if is_ddp:
-        train_sampler = DistributedSampler(train_ds, shuffle=True, shuffle=True, seed=SEED)  # ✅ GOD MODE: Reproducible shuffling
-        val_sampler = DistributedSampler(val_ds, shuffle=False, shuffle=True, seed=SEED)  # ✅ GOD MODE: Reproducible shuffling
+        train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=SEED)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
     else:
         train_sampler = None
         val_sampler = None
     
     train_loader = DataLoader(
-        train_ds,
+        train_dataset,
         batch_size=args.batch_size,
-        sampler=train_sampler,
         shuffle=(train_sampler is None),
-        num_workers=args.num_workers,
+        sampler=train_sampler,
+        num_workers=4,
         pin_memory=True,
-        persistent_workers=(args.num_workers > 0)
+        persistent_workers=True
     )
     
     val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        sampler=val_sampler,
+        val_dataset,
+        batch_size=args.batch_size * 2,
         shuffle=False,
-        num_workers=args.num_workers,
+        sampler=val_sampler,
+        num_workers=4,
         pin_memory=True,
-        persistent_workers=(args.num_workers > 0)
+        persistent_workers=True
     )
     
     # Create model
@@ -772,60 +562,33 @@ def main():
         d_model=args.d_model,
         n_layers=args.n_layers,
         dropout=args.dropout,
-        window_size=args.window_size,
+        hierarchical=args.hierarchical,
         feature_extraction=args.feature_extraction,
         use_attention_pooling=args.use_attention_pooling,
-        hierarchical=not args.non_hierarchical,
-        use_amp=True,
-        use_gradient_checkpointing=False
+        use_amp=args.use_amp,
+        use_gradient_checkpointing=True
     )
     
-    model = RomanMicrolensingGRU(config, dtype=torch.bfloat16).to(device)
+    model = RomanMicrolensingGRU(config, dtype=torch.float32).to(device)
     
     if rank == 0:
-        n_params = count_parameters(model)
-        if rank == 0:
+        logger.info(f"Model parameters: {count_parameters(model):,}")
+        logger.info(f"Configuration: {config}")
     
-            logger.info(f"\nModel: RomanMicrolensingGRU")
-        if rank == 0:
-    
-            logger.info(f"  Parameters: {n_params:,}")
-        if rank == 0:
-    
-            logger.info(f"  d_model: {config.d_model}")
-        if rank == 0:
-    
-            logger.info(f"  n_layers: {config.n_layers}")
-        if rank == 0:
-    
-            logger.info(f"  Hierarchical: {config.hierarchical}")
-        if rank == 0:
-    
-            logger.info(f"  Feature extraction: {config.feature_extraction}")
-        if rank == 0:
-    
-            logger.info(f"  Attention pooling: {config.use_attention_pooling}")
-    
-    # Wrap with DDP
+    # Wrap in DDP
     if is_ddp:
-        # GOD MODE: Optimal DDP configuration for 40 GPUs
         model = DDP(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            broadcast_buffers=False,  # ✅ GOD MODE: No buffer sync needed (stateless)
-            gradient_as_bucket_view=True,  # ✅ GOD MODE: Memory efficiency
-            find_unused_parameters=False,  # ✅ GOD MODE: All params used (faster)
-            static_graph=False  # ✅ GOD MODE: Dynamic graph support
-        ,
-            gradient_as_bucket_view=True,  # Memory efficiency
-            find_unused_parameters=False  # All parameters used
+            gradient_as_bucket_view=True,
+            find_unused_parameters=False
         )
     
-    # Compile model (PyTorch 2.0+)
+    # Compile model
     if args.compile and hasattr(torch, 'compile'):
         if rank == 0:
-            logger.info("  Compiling model with torch.compile...")
+            logger.info("Compiling model with torch.compile...")
         model = torch.compile(model)
     
     # Optimizer and scheduler
@@ -836,11 +599,11 @@ def main():
         betas=(0.9, 0.999)
     )
     
-    # FIXED: GradScaler only needed for FP16 (not BF16)
+    # GOD MODE FIX: Proper FP16 detection
     use_fp16 = False  # Using BF16, not FP16
     scaler = torch.cuda.amp.GradScaler(enabled=use_fp16) if torch.cuda.is_available() else None
     
-    # Learning rate scheduler with warmup
+    # Learning rate scheduler
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
             return (epoch + 1) / args.warmup_epochs
@@ -850,21 +613,17 @@ def main():
     
     # Class weights
     if args.use_class_weights:
-        class_weights = compute_class_weights(labels, device)
+        class_weights = compute_class_weights(labels_train, device)
         if rank == 0:
-            logger.info(f"\nClass weights: {class_weights.cpu().numpy()}")
+            logger.info(f"Class weights: {class_weights.cpu().numpy()}")
     else:
         class_weights = torch.ones(3, device=device)
     
     # Training loop
     if rank == 0:
-            logger.info("\n" + "=" * 80)
-        if rank == 0:
-    
-            logger.info("STARTING TRAINING")
-        if rank == 0:
-    
-            logger.info("=" * 80)
+        logger.info("=" * 80)
+        logger.info("STARTING TRAINING")
+        logger.info("=" * 80)
     
     best_acc = 0.0
     patience_counter = 0
@@ -896,7 +655,7 @@ def main():
             val_acc = val_results['accuracy']
             
             if rank == 0:
-            logger.info(
+                logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
                     f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                     f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | "
@@ -912,10 +671,7 @@ def main():
                         model, optimizer, scaler, epoch, best_acc,
                         config, stats, output_dir, is_best=True
                     )
-                    
-                    # GOD MODE: Rank 0 logging
-                    if rank == 0:
-            logger.info(f"  New best accuracy: {best_acc:.4f}")
+                    logger.info(f"  New best accuracy: {best_acc:.4f}")
                 else:
                     patience_counter += 1
                 
@@ -927,7 +683,7 @@ def main():
                     )
         else:
             if rank == 0:
-            logger.info(
+                logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
                     f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                     f"LR: {scheduler.get_last_lr()[0]:.2e}"
@@ -936,22 +692,18 @@ def main():
         # Early stopping
         if args.early_stopping_patience > 0 and patience_counter >= args.early_stopping_patience:
             if rank == 0:
-            logger.info(f"\nEarly stopping triggered after {epoch} epochs")
+                logger.info(f"Early stopping triggered after {epoch} epochs")
             break
     
-    # Final evaluation with detailed metrics
+    # Final evaluation
     if rank == 0:
-            logger.info("\n" + "=" * 80)
-        if rank == 0:
-    
-            logger.info("FINAL EVALUATION")
-        if rank == 0:
-    
-            logger.info("=" * 80)
+        logger.info("=" * 80)
+        logger.info("FINAL EVALUATION")
+        logger.info("=" * 80)
         
         # Load best model
         if is_ddp:
-            dist.barrier()  # GOD MODE: Ensure all ranks finish
+            dist.barrier()
         
         best_checkpoint = torch.load(output_dir / "best_model.pt", map_location=device)
         if isinstance(model, DDP):
@@ -964,28 +716,16 @@ def main():
             return_predictions=True
         )
         
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
+        logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
+        logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
         
         # Confusion matrix
         cm = confusion_matrix(val_results['labels'], val_results['predictions'])
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info("\nConfusion Matrix:")
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info("                Predicted")
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info("             Flat  PSPL  Binary")
+        logger.info("Confusion Matrix:")
+        logger.info("                Predicted")
+        logger.info("             Flat  PSPL  Binary")
         for i, row in enumerate(cm):
             class_name = ['Flat', 'PSPL', 'Binary'][i]
-            # GOD MODE: Rank 0 logging
-            if rank == 0:
             logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
         
         # Classification report
@@ -996,12 +736,8 @@ def main():
             target_names=class_names,
             digits=4
         )
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info("\nClassification Report:")
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info(report)
+        logger.info("Classification Report:")
+        logger.info(report)
         
         # Save metrics
         metrics = {
@@ -1015,12 +751,8 @@ def main():
         with open(output_dir / 'final_metrics.json', 'w') as f:
             json.dump(metrics, f, indent=2, cls=NumpyEncoder)
         
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info(f"\nTraining complete. Results saved to {output_dir}")
-        # GOD MODE: Rank 0 logging
-        if rank == 0:
-            logger.info("=" * 80)
+        logger.info(f"Training complete. Results saved to {output_dir}")
+        logger.info("=" * 80)
     
     # Cleanup
     if dist.is_initialized():
