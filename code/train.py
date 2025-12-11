@@ -35,6 +35,18 @@ except ImportError as e:
 
 warnings.filterwarnings("ignore")
 
+def load_compat(path):
+    """Hybrid loader for NPZ and HDF5."""
+    import h5py
+    import numpy as np
+    path = str(path)
+    if path.endswith('.h5') or path.endswith('.hdf5'):
+        with h5py.File(path, 'r') as f:
+            # Load all datasets into memory to mimic np.load dictionary behavior
+            return {k: f[k][:] for k in f.keys()}
+    return np.load(path, allow_pickle=True)
+
+
 # =============================================================================
 # TRAINING CONFIGURATION
 # =============================================================================
@@ -762,14 +774,5 @@ def main():
 if __name__ == '__main__':
     main()
 
-def load_compat(path):
-    """Hybrid loader for NPZ and HDF5."""
-    import h5py
-    import numpy as np
-    path = str(path)
-    if path.endswith('.h5') or path.endswith('.hdf5'):
-        with h5py.File(path, 'r') as f:
-            # Load all datasets into memory to mimic np.load dictionary behavior
-            return {k: f[k][:] for k in f.keys()}
-    return np.load(path, allow_pickle=True)
+
 
