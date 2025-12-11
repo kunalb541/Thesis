@@ -353,10 +353,6 @@ def binary_magnification_vbb_fast(t: np.ndarray, t_E: float, u_0: float, t_0: fl
                                  s: float, q: float, alpha: float, rho: float) -> np.ndarray:
     """
     OPTIMIZED binary magnification using VBBinaryLensing.
-    
-    RETRY LOGIC EXPLAINED: This function includes error handling for VBB failures.
-    Some binary parameter combinations cause numerical instability in VBB.
-    The retry logic in simulate_binary_event handles this by trying different parameters.
     """
     VBB = VBBinaryLensing.VBBinaryLensing()
     VBB.Tol = SimConfig.VBM_TOLERANCE
@@ -503,12 +499,6 @@ def simulate_pspl_event(params: dict) -> dict:
 def simulate_binary_event(params: dict) -> dict:
     """
     Simulate a binary microlensing event.
-    
-    RETRY LOGIC EXPLAINED:
-    1. Some binary parameter combinations cause VBBinaryLensing to fail numerically
-    2. We try up to 3 different parameter sets (reduced from 10 for speed)
-    3. If all fail, we use PSPL as fallback (labeled as binary but no caustics)
-    4. This prevents crashes while maintaining dataset size
     """
     time_grid = params['time_grid'].astype(np.float32)
     n = len(time_grid)
@@ -526,15 +516,11 @@ def simulate_binary_event(params: dict) -> dict:
     # =====================================================
     # RETRY LOGIC (CRITICAL FOR SPEED AND STABILITY)
     # =====================================================
-    # For 1.1M events, we need fast generation
-    # Only 3 attempts instead of 10
     max_attempts = 3
     attempts = 0
     A = None
     binary_params = None
     
-    # For speed: 95% try binary, 5% use PSPL directly
-    # This dramatically speeds up generation for large datasets
     use_pspl_fallback = np.random.random() < 0.05
     
     if not use_pspl_fallback:
@@ -550,9 +536,6 @@ def simulate_binary_event(params: dict) -> dict:
                 A = binary_magnification_vbb_fast(time_grid, t_E, u_0, t_0, s, q, alpha, rho)
                 
                 # Validation checks:
-                # 1. No NaN/Inf values
-                # 2. Magnification >= 1 (physical)
-                # 3. At least 10% peak magnification (not just noise)
                 if (np.all(np.isfinite(A)) and 
                     np.all(A >= 1.0) and 
                     A.max() > 1.1):
@@ -749,12 +732,13 @@ def simulate_dataset_fast(
     num_workers: int = None,
     seed: int = 42,
     save_params: bool = True,
-    chunk_size: int = 2000  # Larger chunks for 128 workers
+    chunk_size: int = 2000,  # Larger chunks for 128 workers
+    node_rank: int = 0,      # Cluster Node ID
+    num_nodes: int = 1       # Total Cluster Nodes
 ):
     """
     GOD-MODE OPTIMIZED dataset generation for 1.1M events.
-    
-    FIXED: All Numba issues resolved, optimized retry logic.
+    DISTRIBUTED VERSION: Slices tasks based on node_rank.
     """
     np.random.seed(seed)
     
@@ -766,21 +750,12 @@ def simulate_dataset_fast(
     total_events = n_flat + n_pspl + n_binary
     
     print("\n" + "=" * 80)
-    print("ROMAN SPACE TELESCOPE MICROLENSING SIMULATION (FIXED & OPTIMIZED)")
+    print("ROMAN SPACE TELESCOPE MICROLENSING SIMULATION (DISTRIBUTED)")
     print("=" * 80)
     print(f"Mission Duration: {ROMAN_MISSION_DURATION_DAYS:.1f} days")
-    print(f"Time Grid: [0.0, {SimConfig.TIME_MAX:.1f}] days")
-    print(f"Observation Points: {SimConfig.N_POINTS}")
+    print(f"Node: {node_rank + 1} / {num_nodes}")
     print(f"Filter: {RomanWFI_F146.NAME}")
-    print(f"\nEvent Distribution:")
-    print(f"  Flat: {n_flat:,}")
-    print(f"  PSPL: {n_pspl:,}")
-    print(f"  Binary ({binary_preset}): {n_binary:,}")
-    print(f"  TOTAL: {total_events:,}")
-    print(f"\nBinary Retry Logic: 3 attempts max, 5% PSPL fallback for speed")
-    print(f"Parallel Workers: {num_workers or 'auto'}")
-    print(f"Chunk Size: {chunk_size}")
-    print("=" * 80 + "\n")
+    print(f"Global Total: {total_events:,}")
     
     # Create SHARED time grid
     time_grid = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, 
@@ -794,36 +769,53 @@ def simulate_dataset_fast(
         'binary_preset': binary_preset
     }
     
-    # Create task list
+    # Create FULL task list (same on all nodes)
     tasks = []
     tasks += [('flat', batch_params) for _ in range(n_flat)]
     tasks += [('pspl', batch_params) for _ in range(n_pspl)]
     tasks += [('binary', batch_params) for _ in range(n_binary)]
     
+    # Deterministic Shuffle (Global)
     np.random.shuffle(tasks)
     
+    # =========================================================================
+    # CLUSTER SLICING
+    # =========================================================================
+    chunk_per_node = int(math.ceil(total_events / num_nodes))
+    start_idx = node_rank * chunk_per_node
+    end_idx = min(start_idx + chunk_per_node, total_events)
+    
+    # Select only this node's tasks
+    my_tasks = tasks[start_idx:end_idx]
+    
+    print(f"Node Task Slice: {start_idx:,} -> {end_idx:,} ({len(my_tasks):,} events)")
+    print("=" * 80 + "\n")
+    
+    if len(my_tasks) == 0:
+        print("No tasks for this node. Exiting.")
+        return [], [], [], [], {}
+
     # Determine optimal number of workers
     if num_workers is None:
         num_workers = min(cpu_count(), 8)
     
     # Create chunks for parallel processing
-    # For 1.1M events and 128 workers, use ~2000 events per chunk
-    n_chunks = max(1, min(num_workers * 10, total_events // chunk_size))
-    chunk_size_actual = max(1, total_events // n_chunks)
+    n_chunks = max(1, min(num_workers * 10, len(my_tasks) // chunk_size))
+    chunk_size_actual = max(1, len(my_tasks) // n_chunks)
     
     chunks = []
-    for i in range(0, total_events, chunk_size_actual):
-        chunk = tasks[i:i+chunk_size_actual]
+    for i in range(0, len(my_tasks), chunk_size_actual):
+        chunk = my_tasks[i:i+chunk_size_actual]
         chunks.append(chunk)
     
-    print(f"Generating {total_events:,} events with {num_workers} workers...")
-    print(f"Using {len(chunks)} chunks of size ~{chunk_size_actual}")
+    print(f"Generating {len(my_tasks):,} events with {num_workers} workers...")
     
     start_time = time.time()
     
     if num_workers > 1 and len(chunks) > 1:
         # Prepare arguments for workers
-        chunk_args = [(chunk, i, seed) for i, chunk in enumerate(chunks)]
+        # Offset chunk_id by node_rank to ensure unique seeds per node
+        chunk_args = [(chunk, i + (node_rank * 1000), seed) for i, chunk in enumerate(chunks)]
         
         with Pool(num_workers) as pool:
             # Use imap_unordered for speed
@@ -831,13 +823,13 @@ def simulate_dataset_fast(
             for chunk_result in tqdm(
                 pool.imap_unordered(generate_event_batch_optimized, chunk_args),
                 total=len(chunks),
-                desc="Simulating chunks"
+                desc=f"Node {node_rank} Simulating"
             ):
                 results.extend(chunk_result)
     else:
         # Serial fallback
         results = []
-        for task in tqdm(tasks, desc="Simulating"):
+        for task in tqdm(my_tasks, desc="Simulating"):
             event_type, batch_params = task
             if event_type == 'flat':
                 results.append(simulate_flat_event(batch_params))
@@ -851,11 +843,13 @@ def simulate_dataset_fast(
     # Aggregate results
     print("\nAggregating results...")
     
+    n_local = len(results)
+    
     # Pre-allocate arrays for speed
-    flux = np.zeros((total_events, SimConfig.N_POINTS), dtype=np.float32)
-    delta_t = np.zeros((total_events, SimConfig.N_POINTS), dtype=np.float32)
-    labels = np.zeros(total_events, dtype=np.int32)
-    timestamps = np.zeros((total_events, SimConfig.N_POINTS), dtype=np.float32)
+    flux = np.zeros((n_local, SimConfig.N_POINTS), dtype=np.float32)
+    delta_t = np.zeros((n_local, SimConfig.N_POINTS), dtype=np.float32)
+    labels = np.zeros(n_local, dtype=np.int32)
+    timestamps = np.zeros((n_local, SimConfig.N_POINTS), dtype=np.float32)
     
     for i, r in enumerate(results):
         flux[i] = r['flux']
@@ -874,11 +868,9 @@ def simulate_dataset_fast(
                 fallback_count += 1
     
     # Performance summary
-    events_per_sec = total_events / generation_time
-    print(f"\n✓ Generation Complete in {generation_time:.1f}s")
+    events_per_sec = n_local / generation_time
+    print(f"\n✓ Node Generation Complete in {generation_time:.1f}s")
     print(f"✓ Speed: {events_per_sec:.1f} events/sec")
-    print(f"✓ Dataset Shape: {flux.shape}")
-    print(f"✓ Binary fallbacks: {fallback_count:,} ({fallback_count/n_binary*100:.1f}%)")
     
     return flux, delta_t, labels, timestamps, params_dict
 
@@ -900,17 +892,6 @@ def save_dataset_hdf5(
 ):
     """
     Save dataset in HDF5 format (37x faster than NPZ compressed).
-    
-    Args:
-        output_path: Output .h5 file path
-        flux: Flux array (N, T)
-        delta_t: Delta_t array (N, T)
-        labels: Labels array (N,)
-        timestamps: Timestamps array (N, T)
-        params_dict: Parameter dictionaries by event type
-        metadata: Metadata dictionary
-        save_params: Whether to save parameter arrays
-        compression: Use gzip compression (slower but smaller)
     """
     print(f"\nSaving HDF5 dataset to: {output_path}")
     save_start = time.time()
@@ -963,28 +944,14 @@ def save_dataset_hdf5(
     
     print(f"✅ HDF5 dataset saved successfully")
     print(f"   File size: {file_size_mb:.1f} MB")
-    print(f"   Save time: {save_time:.2f}s")
-    print(f"   Format: {'HDF5 + gzip' if compression else 'HDF5 uncompressed'}")
-    print(f"   Speed boost: ~37x faster than NPZ compressed!")
     
     return save_time, file_size_mb
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Roman Space Telescope Microlensing Simulation (FIXED & OPTIMIZED)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Your 1.1M event run (fixed):
-  python simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 --binary_preset distinct --num_workers 128
-  
-  # Quick test:
-  python simulate.py --n_flat 1000 --n_pspl 1000 --n_binary 1000 --num_workers 4
-  
-  # Custom balanced dataset:
-  python simulate.py --n_flat 50000 --n_pspl 50000 --n_binary 50000 --binary_preset planetary
-        """
+        description="Roman Space Telescope Microlensing Simulation (DISTRIBUTED)",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     parser.add_argument('--n_flat', type=int, default=10000)
@@ -994,17 +961,21 @@ Examples:
                         choices=list(BinaryPresets.PRESETS.keys()))
     parser.add_argument('--cadence_mask_prob', type=float, default=None)
     parser.add_argument('--noise_scale', type=float, default=None)
-    parser.add_argument('--output', type=str, default='../data/dataset_fixed.h5')
+    parser.add_argument('--output', type=str, default='../data/dataset.h5')
     parser.add_argument('--num_workers', type=int, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--no_save_params', action='store_true')
     parser.add_argument('--no_compress', action='store_true')
     parser.add_argument('--chunk_size', type=int, default=2000)
     
+    # CLUSTER ARGUMENTS
+    parser.add_argument('--node_rank', type=int, default=0, help="Node ID (0 to num_nodes-1)")
+    parser.add_argument('--num_nodes', type=int, default=1, help="Total number of nodes")
+    
     args = parser.parse_args()
     
     # Generate dataset
-    print("\nStarting fixed simulation...")
+    print(f"\nStarting distributed simulation on Node {args.node_rank}...")
     start_total = time.time()
     
     flux, delta_t, labels, timestamps, params_dict = simulate_dataset_fast(
@@ -1017,71 +988,53 @@ Examples:
         num_workers=args.num_workers,
         seed=args.seed,
         save_params=not args.no_save_params,
-        chunk_size=args.chunk_size
+        chunk_size=args.chunk_size,
+        node_rank=args.node_rank,
+        num_nodes=args.num_nodes
     )
     
     total_time = time.time() - start_total
     
-    # Save dataset
-    print("\n" + "=" * 80)
-    print("SAVING DATASET (HDF5 FORMAT - 37x FASTER)")
-    print("=" * 80)
-    
-    output_path = Path(args.output)
-    
-    # Force .h5 extension
-    if output_path.suffix not in ['.h5', '.hdf5']:
-        output_path = output_path.with_suffix('.h5')
-    
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Build metadata dictionary
-    metadata = {
-        'n_classes': 3,
-        'class_names': np.array(['Flat', 'PSPL', 'Binary'], dtype='<U10'),
-        'binary_preset': args.binary_preset,
-        'cadence_mask_prob': args.cadence_mask_prob or SimConfig.CADENCE_MASK_PROB,
-        'noise_scale': args.noise_scale or 1.0,
-        'seed': args.seed,
-        'generation_time': total_time,
-        'num_workers': args.num_workers or cpu_count(),
-        'ab_zeropoint_jy': ROMAN_ZP_FLUX_JY,
-        'mission_duration_days': ROMAN_MISSION_DURATION_DAYS,
-        'n_points': SimConfig.N_POINTS,
-        'numba_optimized': HAS_NUMBA,
-        'mission_days': 200,
-        'retry_attempts': 3,
-        'pspl_fallback_rate': 0.05,
-    }
-    
-    # Save with HDF5
-    save_time, file_size_mb = save_dataset_hdf5(
-        output_path,
-        flux,
-        delta_t,
-        labels,
-        timestamps,
-        params_dict,
-        metadata,
-        save_params=not args.no_save_params,
-        compression=not args.no_compress
-    )
-    
-    print("\n" + "=" * 80)
-    print("✓ DATASET SAVED SUCCESSFULLY")
-    print("=" * 80)
-    print(f"File: {output_path}")
-    print(f"Size: {file_size_mb:.1f} MB")
-    print(f"Total Time: {total_time:.1f}s")
-    print(f"Events: {len(flux):,}")
-    print(f"Events/sec: {len(flux)/total_time:.1f}")
-    print(f"\nKey Fixes Applied:")
-    print(f"  • FIXED: Numba class access error (module-level constants)")
-    print(f"  • FIXED: Single value magnitude conversion")
-    print(f"  • OPTIMIZED: Retry logic (3 attempts max)")
-    print(f"  • OPTIMIZED: 5% PSPL fallback for binary events (speed)")
-    print(f"  • OPTIMIZED: Chunk size {args.chunk_size} for {args.num_workers or 'auto'} workers")
-    print("=" * 80 + "\n")
+    if len(flux) > 0:
+        # Save dataset (Node specific filename)
+        output_path = Path(args.output)
+        
+        # Append node rank to filename to prevent overwrite
+        if args.num_nodes > 1:
+            stem = output_path.stem
+            output_path = output_path.with_name(f"{stem}_node_{args.node_rank}.h5")
+        else:
+            if output_path.suffix not in ['.h5', '.hdf5']:
+                output_path = output_path.with_suffix('.h5')
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Build metadata dictionary
+        metadata = {
+            'n_classes': 3,
+            'class_names': np.array(['Flat', 'PSPL', 'Binary'], dtype='<U10'),
+            'binary_preset': args.binary_preset,
+            'cadence_mask_prob': args.cadence_mask_prob or SimConfig.CADENCE_MASK_PROB,
+            'noise_scale': args.noise_scale or 1.0,
+            'seed': args.seed,
+            'generation_time': total_time,
+            'num_workers': args.num_workers or cpu_count(),
+            'node_rank': args.node_rank,
+            'num_nodes': args.num_nodes,
+        }
+        
+        # Save with HDF5
+        save_dataset_hdf5(
+            output_path,
+            flux,
+            delta_t,
+            labels,
+            timestamps,
+            params_dict,
+            metadata,
+            save_params=not args.no_save_params,
+            compression=not args.no_compress
+        )
 
 
 if __name__ == '__main__':
