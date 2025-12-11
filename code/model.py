@@ -540,8 +540,8 @@ class RomanMicrolensingGRU(nn.Module):
                 mask = torch.arange(T, device=device).unsqueeze(0) < lengths.unsqueeze(1)
                 
                 # Apply mask to inputs (for safety, though pack_padded_sequence would be better)
-                flux = flux * mask.to(dtype=x.dtype, device=x.device)
-                delta_t = delta_t * mask.to(dtype=x.dtype, device=x.device)
+                flux = flux * mask.to(dtype=flux.dtype, device=flux.device)
+                delta_t = delta_t * mask.to(dtype=flux.dtype, device=flux.device)
             
             # 1. Embed inputs
             flux_emb = self.flux_proj(flux.unsqueeze(-1))  # (B, T, d_model/2)

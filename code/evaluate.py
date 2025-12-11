@@ -207,7 +207,7 @@ class RomanEvaluator:
     def _load_data(self, path):
         """Load and preprocess test data."""
         print(f"\nLoading data from {path}...")
-        data = np.load(path, allow_pickle=True)
+        data = load_compat(path)
         
         # Extract arrays
         raw_flux = data['flux'].astype(np.float32)
@@ -814,6 +814,8 @@ if __name__ == '__main__':
                        help="Device: cuda or cpu")
     
     parser.add_argument('--n_evolution_per_type', type=int, default=5,
+    parser.add_argument('--early_detection', action='store_true', help='Run early detection analysis')
+
                        help="Number of evolution plots per class")
     
     args = parser.parse_args()
@@ -829,3 +831,15 @@ if __name__ == '__main__':
     )
     
     evaluator.run()
+
+def load_compat(path):
+    """Hybrid loader for NPZ and HDF5."""
+    import h5py
+    import numpy as np
+    path = str(path)
+    if path.endswith('.h5') or path.endswith('.hdf5'):
+        with h5py.File(path, 'r') as f:
+            # Load all datasets into memory to mimic np.load dictionary behavior
+            return {k: f[k][:] for k in f.keys()}
+    return np.load(path, allow_pickle=True)
+
