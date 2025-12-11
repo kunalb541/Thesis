@@ -189,7 +189,7 @@ class RomanEvaluator:
         config = ModelConfig(**clean_conf)
         
         # Create model
-        model = RomanMicrolensingGRU(config, dtype=torch.float32), device=self.device)
+        model = RomanMicrolensingGRU(config, dtype=torch.float32).to(self.device)
         
         # Load weights
         state_dict = checkpoint.get('state_dict', checkpoint.get('model_state_dict', checkpoint))
@@ -338,17 +338,17 @@ class RomanEvaluator:
                 flux_batch = torch.tensor(
                     self.flux[i:batch_end], 
                     dtype=torch.float32
-                ), device=self.device)
+                , device=self.device), device=self.device)
                 
                 dt_batch = torch.tensor(
                     self.delta_t[i:batch_end], 
                     dtype=torch.float32
-                ), device=self.device)
+                , device=self.device), device=self.device)
                 
                 len_batch = torch.tensor(
                     self.lengths[i:batch_end], 
                     dtype=torch.long
-                ), device=self.device)
+                , device=self.device), device=self.device)
                 
                 output = self.model(flux_batch, dt_batch, lengths=len_batch)
                 probs = output['probs'].cpu().numpy()
@@ -649,9 +649,9 @@ class RomanEvaluator:
     def _plot_single_evolution(self, idx: int, cls_name: str, cls_idx: int):
         """Plot single event evolution."""
         # Rerun model with timestep outputs
-        f = torch.tensor(self.flux[idx], dtype=torch.float32).unsqueeze(0), device=self.device)
-        d = torch.tensor(self.delta_t[idx], dtype=torch.float32).unsqueeze(0), device=self.device)
-        l = torch.tensor([self.lengths[idx]], dtype=torch.long), device=self.device)
+        f = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0), device=self.device)
+        d = torch.tensor(self.delta_t[idx], dtype=torch.float32, device=self.device).unsqueeze(0), device=self.device)
+        l = torch.tensor([self.lengths[idx]], dtype=torch.long, device=self.device), device=self.device)
         
         with torch.no_grad():
             output = self.model(f, d, lengths=l, return_all_timesteps=True)
@@ -710,6 +710,50 @@ class RomanEvaluator:
         plt.close()
 
     def run(self):
+    def verify_causal_inference(self):
+        """
+        ✅ GOD MODE: Verify that model maintains causality in streaming mode.
+        
+        Tests that predictions at timestep T only depend on observations <= T.
+        """
+        print("
+Verifying causal inference...")
+        
+        # Take a random sample
+        idx = np.random.randint(len(self.flux))
+        flux_full = torch.tensor(self.flux[idx:idx+1], dtype=torch.float32, device=self.device)
+        delta_t_full = torch.tensor(self.delta_t[idx:idx+1], dtype=torch.float32, device=self.device)
+        length = self.lengths[idx]
+        
+        # Full sequence prediction
+        with torch.no_grad():
+            out_full = self.model(flux_full, delta_t_full, 
+                                 lengths=torch.tensor([length]), 
+                                 return_all_timesteps=True)
+            probs_full = out_full['probs_seq'][0, :length].cpu().numpy()
+        
+        # Verify causality by truncating
+        for t in range(10, length, length // 10):
+            flux_trunc = flux_full[:, :t]
+            delta_t_trunc = delta_t_full[:, :t]
+            
+            with torch.no_grad():
+                out_trunc = self.model(flux_trunc, delta_t_trunc,
+                                      lengths=torch.tensor([t]),
+                                      return_all_timesteps=True)
+                probs_trunc = out_trunc['probs_seq'][0, -1].cpu().numpy()
+            
+            # Should match the t-th timestep from full
+            diff = np.abs(probs_trunc - probs_full[t-1]).max()
+            
+            if diff > 1e-5:
+                print(f"  ⚠️  CAUSALITY VIOLATION at t={t}: max diff={diff:.6f}")
+                return False
+        
+        print("  ✅ Causality verified: Predictions are properly causal")
+        return True
+
+    
         """Run full evaluation suite."""
         print("\n" + "=" * 80)
         print("RUNNING EVALUATION SUITE")

@@ -557,7 +557,43 @@ def main():
     
     # Setup distributed training
     rank, local_rank, world_size, is_ddp = setup_distributed()
-    device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available()
+
+    # ✅ GOD MODE: Hyperparameter validation for distributed training
+    if is_ddp:
+        assert args.batch_size % world_size == 0, \
+            f"Batch size {args.batch_size} must be divisible by world size {world_size}"
+        assert args.batch_size // world_size >= 4, \
+            f"Per-GPU batch size must be >= 4, got {args.batch_size // world_size}"
+        
+        if rank == 0:
+            if rank == 0:
+    
+                logger.info(f"
+{'='*80}")
+            if rank == 0:
+    
+                logger.info("DDP CONFIGURATION VALIDATION")
+            if rank == 0:
+    
+                logger.info(f"{'='*80}")
+            if rank == 0:
+    
+                logger.info(f"  World size: {world_size}")
+            if rank == 0:
+    
+                logger.info(f"  Global batch size: {args.batch_size}")
+            if rank == 0:
+    
+                logger.info(f"  Per-GPU batch size: {args.batch_size // world_size}")
+            if rank == 0:
+    
+                logger.info(f"  Gradient accumulation: {args.gradient_accumulation_steps if hasattr(args, 'gradient_accumulation_steps') else 1}")
+            if rank == 0:
+    
+                logger.info(f"{'='*80}
+")
+ else 'cpu')
     
     # Create output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -575,30 +611,52 @@ def main():
     set_seed(args.seed)
     
     if rank == 0:
-        logger.info("=" * 80)
-        logger.info("ROMAN SPACE TELESCOPE MICROLENSING CLASSIFIER TRAINING")
-        logger.info("=" * 80)
-        logger.info(f"Experiment: {args.experiment_name}")
-        logger.info(f"Output directory: {output_dir}")
-        logger.info(f"Device: {device}")
-        logger.info(f"World size: {world_size}")
-        logger.info(f"Random seed: {args.seed}")
+        if rank == 0:
+    
+            logger.info("=" * 80)
+        if rank == 0:
+    
+            logger.info("ROMAN SPACE TELESCOPE MICROLENSING CLASSIFIER TRAINING")
+        if rank == 0:
+    
+            logger.info("=" * 80)
+        if rank == 0:
+    
+            logger.info(f"Experiment: {args.experiment_name}")
+        if rank == 0:
+    
+            logger.info(f"Output directory: {output_dir}")
+        if rank == 0:
+    
+            logger.info(f"Device: {device}")
+        if rank == 0:
+    
+            logger.info(f"World size: {world_size}")
+        if rank == 0:
+    
+            logger.info(f"Random seed: {args.seed}")
     
     
     # GOD MODE: Validate hyperparameters for DDP
     if is_ddp:
         if args.batch_size % world_size != 0:
             if rank == 0:
-                logger.error(f"Batch size {args.batch_size} not divisible by world_size {world_size}")
+                if rank == 0:
+    
+                    logger.error(f"Batch size {args.batch_size} not divisible by world_size {world_size}")
             sys.exit(1)
         
         effective_batch = args.batch_size // world_size
         if rank == 0:
-            logger.info(f"DDP Mode: {world_size} GPUs × {effective_batch} batch = {args.batch_size} global batch")
+            if rank == 0:
+    
+                logger.info(f"DDP Mode: {world_size} GPUs × {effective_batch} batch = {args.batch_size} global batch")
 
     # Load data
     if rank == 0:
-        logger.info(f"\nLoading data from {args.data}...")
+        if rank == 0:
+    
+            logger.info(f"\nLoading data from {args.data}...")
     
     data = np.load(args.data, allow_pickle=True)
     
@@ -615,35 +673,57 @@ def main():
     
     # Verify physical realism flags
     if rank == 0:
-        logger.info("\nDataset Information:")
-        logger.info(f"  Shape: {flux.shape}")
-        logger.info(f"  Classes: {np.unique(labels)}")
-        logger.info(f"  Class distribution: {np.bincount(labels)}")
+        if rank == 0:
+    
+            logger.info("\nDataset Information:")
+        if rank == 0:
+    
+            logger.info(f"  Shape: {flux.shape}")
+        if rank == 0:
+    
+            logger.info(f"  Classes: {np.unique(labels)}")
+        if rank == 0:
+    
+            logger.info(f"  Class distribution: {np.bincount(labels)}")
         
         if 'physical_realism' in data:
-            logger.info(f"  Physical realism: {data['physical_realism']}")
+            if rank == 0:
+    
+                logger.info(f"  Physical realism: {data['physical_realism']}")
         else:
-            logger.warning("  Warning: Dataset may not have physical realism flag")
+            if rank == 0:
+    
+                logger.warning("  Warning: Dataset may not have physical realism flag")
         
         if 'ab_zeropoint_jy' in data:
             # GOD MODE: Rank 0 logging
             if rank == 0:
-                logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
+                if rank == 0:
+    
+                    logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
         
         if 'mission_duration_days' in data:
             # GOD MODE: Rank 0 logging
             if rank == 0:
-                logger.info(f"  Mission duration: {data['mission_duration_days']} days")
+                if rank == 0:
+    
+                    logger.info(f"  Mission duration: {data['mission_duration_days']} days")
     
     # Compute normalization statistics
     if rank == 0:
-        logger.info("\nComputing normalization statistics...")
+        if rank == 0:
+    
+            logger.info("\nComputing normalization statistics...")
     
     stats = compute_normalization_stats(flux, sample_size=10000)
     
     if rank == 0:
-        logger.info(f"  Median: {stats['median']:.4f}")
-        logger.info(f"  IQR: {stats['iqr']:.4f}")
+        if rank == 0:
+    
+            logger.info(f"  Median: {stats['median']:.4f}")
+        if rank == 0:
+    
+            logger.info(f"  IQR: {stats['iqr']:.4f}")
     
     # Split data
     train_indices, val_indices = train_test_split(
@@ -671,14 +751,20 @@ def main():
     )
     
     if rank == 0:
-        logger.info(f"\nDataset splits:")
-        logger.info(f"  Training: {len(train_ds):,} samples")
-        logger.info(f"  Validation: {len(val_ds):,} samples")
+        if rank == 0:
+    
+            logger.info(f"\nDataset splits:")
+        if rank == 0:
+    
+            logger.info(f"  Training: {len(train_ds):,} samples")
+        if rank == 0:
+    
+            logger.info(f"  Validation: {len(val_ds):,} samples")
     
     # Create data loaders
     if is_ddp:
-        train_sampler = DistributedSampler(train_ds, shuffle=True)
-        val_sampler = DistributedSampler(val_ds, shuffle=False)
+        train_sampler = DistributedSampler(train_ds, shuffle=True, shuffle=True, seed=SEED)  # ✅ GOD MODE: Reproducible shuffling
+        val_sampler = DistributedSampler(val_ds, shuffle=False, shuffle=True, seed=SEED)  # ✅ GOD MODE: Reproducible shuffling
     else:
         train_sampler = None
         val_sampler = None
@@ -720,13 +806,27 @@ def main():
     
     if rank == 0:
         n_params = count_parameters(model)
-        logger.info(f"\nModel: RomanMicrolensingGRU")
-        logger.info(f"  Parameters: {n_params:,}")
-        logger.info(f"  d_model: {config.d_model}")
-        logger.info(f"  n_layers: {config.n_layers}")
-        logger.info(f"  Hierarchical: {config.hierarchical}")
-        logger.info(f"  Feature extraction: {config.feature_extraction}")
-        logger.info(f"  Attention pooling: {config.use_attention_pooling}")
+        if rank == 0:
+    
+            logger.info(f"\nModel: RomanMicrolensingGRU")
+        if rank == 0:
+    
+            logger.info(f"  Parameters: {n_params:,}")
+        if rank == 0:
+    
+            logger.info(f"  d_model: {config.d_model}")
+        if rank == 0:
+    
+            logger.info(f"  n_layers: {config.n_layers}")
+        if rank == 0:
+    
+            logger.info(f"  Hierarchical: {config.hierarchical}")
+        if rank == 0:
+    
+            logger.info(f"  Feature extraction: {config.feature_extraction}")
+        if rank == 0:
+    
+            logger.info(f"  Attention pooling: {config.use_attention_pooling}")
     
     # Wrap with DDP
     if is_ddp:
@@ -735,7 +835,11 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            broadcast_buffers=False,  # Buffers don't need syncing (no running stats)
+            broadcast_buffers=False,  # ✅ GOD MODE: No buffer sync needed (stateless)
+            gradient_as_bucket_view=True,  # ✅ GOD MODE: Memory efficiency
+            find_unused_parameters=False,  # ✅ GOD MODE: All params used (faster)
+            static_graph=False  # ✅ GOD MODE: Dynamic graph support
+        )
             gradient_as_bucket_view=True,  # Memory efficiency
             find_unused_parameters=False  # All parameters used
         )
@@ -743,7 +847,9 @@ def main():
     # Compile model (PyTorch 2.0+)
     if args.compile and hasattr(torch, 'compile'):
         if rank == 0:
-            logger.info("  Compiling model with torch.compile...")
+            if rank == 0:
+    
+                logger.info("  Compiling model with torch.compile...")
         model = torch.compile(model)
     
     # Optimizer and scheduler
@@ -771,15 +877,23 @@ def main():
     if args.use_class_weights:
         class_weights = compute_class_weights(labels, device)
         if rank == 0:
-            logger.info(f"\nClass weights: {class_weights.cpu().numpy()}")
+            if rank == 0:
+    
+                logger.info(f"\nClass weights: {class_weights.cpu().numpy()}")
     else:
         class_weights = torch.ones(3, device=device)
     
     # Training loop
     if rank == 0:
-        logger.info("\n" + "=" * 80)
-        logger.info("STARTING TRAINING")
-        logger.info("=" * 80)
+        if rank == 0:
+    
+            logger.info("\n" + "=" * 80)
+        if rank == 0:
+    
+            logger.info("STARTING TRAINING")
+        if rank == 0:
+    
+            logger.info("=" * 80)
     
     best_acc = 0.0
     patience_counter = 0
@@ -811,7 +925,9 @@ def main():
             val_acc = val_results['accuracy']
             
             if rank == 0:
-                logger.info(
+                if rank == 0:
+    
+                    logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
                     f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                     f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | "
@@ -830,7 +946,9 @@ def main():
                     
                     # GOD MODE: Rank 0 logging
                     if rank == 0:
-                        logger.info(f"  New best accuracy: {best_acc:.4f}")
+                        if rank == 0:
+    
+                            logger.info(f"  New best accuracy: {best_acc:.4f}")
                 else:
                     patience_counter += 1
                 
@@ -842,7 +960,9 @@ def main():
                     )
         else:
             if rank == 0:
-                logger.info(
+                if rank == 0:
+    
+                    logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
                     f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                     f"LR: {scheduler.get_last_lr()[0]:.2e}"
@@ -851,14 +971,22 @@ def main():
         # Early stopping
         if args.early_stopping_patience > 0 and patience_counter >= args.early_stopping_patience:
             if rank == 0:
-                logger.info(f"\nEarly stopping triggered after {epoch} epochs")
+                if rank == 0:
+    
+                    logger.info(f"\nEarly stopping triggered after {epoch} epochs")
             break
     
     # Final evaluation with detailed metrics
     if rank == 0:
-        logger.info("\n" + "=" * 80)
-        logger.info("FINAL EVALUATION")
-        logger.info("=" * 80)
+        if rank == 0:
+    
+            logger.info("\n" + "=" * 80)
+        if rank == 0:
+    
+            logger.info("FINAL EVALUATION")
+        if rank == 0:
+    
+            logger.info("=" * 80)
         
         # Load best model
         if is_ddp:
@@ -877,27 +1005,39 @@ def main():
         
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
+            if rank == 0:
+    
+                logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
+            if rank == 0:
+    
+                logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
         
         # Confusion matrix
         cm = confusion_matrix(val_results['labels'], val_results['predictions'])
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info("\nConfusion Matrix:")
+            if rank == 0:
+    
+                logger.info("\nConfusion Matrix:")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info("                Predicted")
+            if rank == 0:
+    
+                logger.info("                Predicted")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info("             Flat  PSPL  Binary")
+            if rank == 0:
+    
+                logger.info("             Flat  PSPL  Binary")
         for i, row in enumerate(cm):
             class_name = ['Flat', 'PSPL', 'Binary'][i]
             # GOD MODE: Rank 0 logging
             if rank == 0:
-                logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
+                if rank == 0:
+    
+                    logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
         
         # Classification report
         class_names = ['Flat', 'PSPL', 'Binary']
@@ -909,10 +1049,14 @@ def main():
         )
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info("\nClassification Report:")
+            if rank == 0:
+    
+                logger.info("\nClassification Report:")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info(report)
+            if rank == 0:
+    
+                logger.info(report)
         
         # Save metrics
         metrics = {
@@ -928,10 +1072,14 @@ def main():
         
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info(f"\nTraining complete. Results saved to {output_dir}")
+            if rank == 0:
+    
+                logger.info(f"\nTraining complete. Results saved to {output_dir}")
         # GOD MODE: Rank 0 logging
         if rank == 0:
-            logger.info("=" * 80)
+            if rank == 0:
+    
+                logger.info("=" * 80)
     
     # Cleanup
     if dist.is_initialized():
