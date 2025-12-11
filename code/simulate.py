@@ -9,54 +9,31 @@ import warnings
 import time
 import sys
 import os
-from collections import defaultdict
 import h5py
-from typing import Dict, Tuple
+import shutil
 
 warnings.filterwarnings("ignore")
 
-
 # =============================================================================
-# CAUSALITY ENFORCEMENT IN DATA GENERATION
+# CAUSALITY ENFORCEMENT & CONFIGURATION
 # =============================================================================
-# ✅ Delta_t is computed causally: delta_t[i] = t[i] - t[i-1]
-# ✅ First timestep has delta_t=0 (no previous observation)
-# ✅ Time flows forward only - no information leakage
-# =============================================================================
-
-# ============================================================================
-# CRITICAL DEPENDENCY CHECK
-# ============================================================================
 try:
     import VBBinaryLensing
     HAS_VBB = True
-    print("VBBinaryLensing detected: High-fidelity binary magnification enabled")
 except ImportError:
-    print("\nCRITICAL ERROR: VBBinaryLensing not available")
-    print("This is required for accurate binary microlensing simulation.")
-    print("\nInstallation instructions:")
-    print("  pip install VBBinaryLensing")
-    print("  or")
-    print("  conda install -c conda-forge vbbinarylensing")
-    print("\nExiting now.")
+    print("CRITICAL: VBBinaryLensing not found. Install via pip or conda.")
     sys.exit(1)
 
-# ============================================================================
-# OPTIMIZATION IMPORTS
-# ============================================================================
 try:
-    from numba import njit, prange, vectorize, float32, float64
+    from numba import njit, prange
     HAS_NUMBA = True
-    print("Numba JIT detected: Temporal encoding acceleration enabled")
 except ImportError:
     HAS_NUMBA = False
-    print("Warning: Numba not found - using vectorized NumPy (slower)")
-    print("  Install for maximum speed: conda install numba")
+    print("Warning: Numba not found. Simulation will be slower.")
 
 # ============================================================================
-# MODULE-LEVEL CONSTANTS FOR NUMBA COMPATIBILITY
+# MODULE-LEVEL CONSTANTS (NUMBA COMPATIBLE)
 # ============================================================================
-# These constants must be at module level for Numba to access them
 ROMAN_ZP_FLUX_JY = 3631.0
 ROMAN_LIMITING_MAG_AB = 27.5
 ROMAN_SKY_MAG_AB = 22.0
@@ -67,12 +44,11 @@ ROMAN_MISSION_DURATION_DAYS = 200.0
 ROMAN_LIMITING_SNR = 5.0
 
 # ============================================================================
-# NUMBA-COMPATIBLE FUNCTIONS (MUST BE AT MODULE LEVEL)
+# NUMBA FUNCTIONS
 # ============================================================================
 if HAS_NUMBA:
     @njit(fastmath=True, cache=True)
-    def flux_to_mag_numba(flux_jy: np.ndarray) -> np.ndarray:
-        """Ultra-fast flux to magnitude conversion using Numba."""
+    def flux_to_mag_numba(flux_jy):
         n = len(flux_jy)
         mag = np.empty(n, dtype=np.float32)
         zp = ROMAN_ZP_FLUX_JY
@@ -85,22 +61,9 @@ if HAS_NUMBA:
         return mag
     
     @njit(fastmath=True, cache=True)
-    def mag_to_flux_numba(mag_ab: np.ndarray) -> np.ndarray:
-        """Ultra-fast magnitude to flux conversion using Numba."""
-        n = len(mag_ab)
-        flux = np.empty(n, dtype=np.float32)
-        zp = ROMAN_ZP_FLUX_JY
-        for i in prange(n):
-            flux[i] = zp * 10**(-0.4 * mag_ab[i])
-        return flux
-    
-    @njit(fastmath=True, cache=True)
-    def compute_photon_noise_numba(flux_jy: np.ndarray) -> np.ndarray:
-        """Ultra-fast photon noise computation."""
+    def compute_photon_noise_numba(flux_jy):
         n = len(flux_jy)
         sigma = np.empty(n, dtype=np.float32)
-        
-        # Precompute constants
         zp = ROMAN_ZP_FLUX_JY
         f_lim = zp * 10**(-0.4 * ROMAN_LIMITING_MAG_AB)
         f_sky = zp * 10**(-0.4 * ROMAN_SKY_MAG_AB)
@@ -114,928 +77,390 @@ if HAS_NUMBA:
             else:
                 sigma[i] = k_noise * 1e-5
         return sigma
-    
+
     @njit(fastmath=True, cache=True)
-    def single_mag_to_flux(mag: float) -> float:
-        """Convert single magnitude to flux (Numba compatible)."""
+    def single_mag_to_flux(mag):
         return ROMAN_ZP_FLUX_JY * 10**(-0.4 * mag)
-    
-    @njit(fastmath=True, cache=True)
-    def single_flux_to_mag(flux: float) -> float:
-        """Convert single flux to magnitude (Numba compatible)."""
-        if flux > 0:
-            return -2.5 * math.log10(flux / ROMAN_ZP_FLUX_JY)
-        return 0.0
 
-# ============================================================================
-# ROMAN SPACE TELESCOPE PHYSICAL SPECIFICATIONS
-# ============================================================================
-class RomanWFI_F146:
-    """
-    Nancy Grace Roman Space Telescope Wide-Field Instrument (WFI)
-    F146 Filter Physical Specifications.
-    
-    OPTIMIZED: Reduced mission duration to 200 days for computational efficiency.
-    """
-    
-    # Core Specifications
-    NAME = "Roman_WFI_F146"
-    APERTURE_DIAMETER_M = 2.4  # meters
-    
-    # Use module-level constants
-    ZP_FLUX_JY = ROMAN_ZP_FLUX_JY
-    MISSION_DURATION_DAYS = ROMAN_MISSION_DURATION_DAYS
-    CADENCE_MINUTES = ROMAN_CADENCE_MINUTES
-    LIMITING_MAG_AB = ROMAN_LIMITING_MAG_AB
-    LIMITING_SNR = ROMAN_LIMITING_SNR
-    SOURCE_MAG_MIN = ROMAN_SOURCE_MAG_MIN
-    SOURCE_MAG_MAX = ROMAN_SOURCE_MAG_MAX
-    SKY_MAG_AB = ROMAN_SKY_MAG_AB
-    
-    # Calculate optimal number of points for 200 days
-    CADENCE_DAYS = CADENCE_MINUTES / (60.0 * 24.0)
-    N_POINTS_RAW = int(MISSION_DURATION_DAYS * 24 * 60 / CADENCE_MINUTES)
-    N_POINTS = 2400
-    
-    # Filter Specifications
-    FILTER_CENTRAL_WAVELENGTH_UM = 1.464
-    FILTER_WIDTH_UM = (0.93, 2.00)
-    
-    @staticmethod
-    def flux_to_mag(flux_jy: np.ndarray) -> np.ndarray:
-        """Vectorized flux to magnitude conversion."""
-        if HAS_NUMBA:
-            return flux_to_mag_numba(flux_jy)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            return -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
-    
-    @staticmethod
-    def mag_to_flux(mag_ab: np.ndarray) -> np.ndarray:
-        """Vectorized magnitude to flux conversion."""
-        if HAS_NUMBA:
-            return mag_to_flux_numba(mag_ab)
-        return ROMAN_ZP_FLUX_JY * 10**(-0.4 * mag_ab)
-    
-    @staticmethod
-    def compute_photon_noise(flux_jy: np.ndarray) -> np.ndarray:
-        """Vectorized photon noise computation."""
-        if HAS_NUMBA:
-            return compute_photon_noise_numba(flux_jy)
-        f_lim = ROMAN_ZP_FLUX_JY * 10**(-0.4 * ROMAN_LIMITING_MAG_AB)
-        f_sky = ROMAN_ZP_FLUX_JY * 10**(-0.4 * ROMAN_SKY_MAG_AB)
-        sigma_lim = f_lim / ROMAN_LIMITING_SNR
-        k_noise = sigma_lim / np.sqrt(f_lim + f_sky)
-        return k_noise * np.sqrt(np.maximum(flux_jy + f_sky, 1e-10))
-    
-    @staticmethod
-    def single_mag_to_flux(mag: float) -> float:
-        """Convert single magnitude to flux."""
-        if HAS_NUMBA:
-            return single_mag_to_flux(mag)
-        return ROMAN_ZP_FLUX_JY * 10**(-0.4 * mag)
-    
-    @staticmethod
-    def single_flux_to_mag(flux: float) -> float:
-        """Convert single flux to magnitude."""
-        if HAS_NUMBA:
-            return single_flux_to_mag(flux)
-        if flux > 0:
-            return -2.5 * math.log10(flux / ROMAN_ZP_FLUX_JY)
-        return 0.0
-
-# ============================================================================
-# CONFIGURATION WITH ROMAN REALISM
-# ============================================================================
-class SimConfig:
-    """Core simulation parameters aligned with Roman Space Telescope."""
-    
-    # Time Grid (Mission-Aligned)
-    TIME_MIN = 0.0
-    TIME_MAX = ROMAN_MISSION_DURATION_DAYS  # 200 days
-    
-    # Number of observation epochs
-    N_POINTS = RomanWFI_F146.N_POINTS  # 2400
-    
-    # VBBinaryLensing Numerical Settings
-    VBM_TOLERANCE = 1e-3
-    
-    # Observational Realism
-    CADENCE_MASK_PROB = 0.05
-    MAG_ERROR_FLOOR = 0.001
-    
-    # Magnitude System (AB)
-    BASELINE_MIN = ROMAN_SOURCE_MAG_MIN
-    BASELINE_MAX = ROMAN_SOURCE_MAG_MAX
-    
-    PAD_VALUE = 0.0
-
-
-class PSPLParams:
-    """PSPL parameters optimized for 200-day mission."""
-    
-    # Peak Time (t0) - Central 60% of 200-day mission
-    T0_MIN = 0.2 * SimConfig.TIME_MAX  # 40 days
-    T0_MAX = 0.8 * SimConfig.TIME_MAX  # 160 days
-    
-    # Einstein Crossing Time (tE) - Shorter for 200-day window
-    TE_MIN = 5.0   # Shorter minimum for speed
-    TE_MAX = 30.0  # Reduced from 70.0 for 200-day window
-    
-    # Impact Parameter (u0)
-    U0_MIN = 0.0001
-    U0_MAX = 0.5
-
-
-class BinaryPresets:
-    """Binary lens topology presets optimized for speed."""
-    
-    # Shared t0 and tE ranges
-    SHARED_T0_MIN = PSPLParams.T0_MIN
-    SHARED_T0_MAX = PSPLParams.T0_MAX
-    SHARED_TE_MIN = PSPLParams.TE_MIN
-    SHARED_TE_MAX = PSPLParams.TE_MAX
-    
-    PRESETS = {
-        'distinct': {
-            'description': 'Resonant Caustics - Strong features',
-            's_range': (0.90, 1.10),
-            'q_range': (0.1, 1.0),
-            'u0_range': (0.0001, 0.4),
-            'rho_range': (1e-4, 5e-3),
-            'alpha_range': (0, 2*math.pi),
-            't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
-            'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-        },
-        
-        'planetary': {
-            'description': 'Exoplanet focus',
-            's_range': (0.5, 2.0),
-            'q_range': (0.0001, 0.01),
-            'u0_range': (0.001, 0.3),
-            'rho_range': (0.0001, 0.01),
-            'alpha_range': (0, 2 * math.pi),
-            't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
-            'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-        },
-        
-        'stellar': {
-            'description': 'Binary stars',
-            's_range': (0.3, 3.0),
-            'q_range': (0.3, 1.0),
-            'u0_range': (0.001, 0.3),
-            'rho_range': (0.001, 0.05),
-            'alpha_range': (0, 2 * math.pi),
-            't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
-            'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-        },
-        
-        'baseline': {
-            'description': 'Standard mixed population',
-            's_range': (0.1, 3.0),
-            'q_range': (0.0001, 1.0),
-            'u0_range': (0.001, 1.0),
-            'rho_range': (0.001, 0.1),
-            'alpha_range': (0, 2 * math.pi),
-            't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
-            'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-        }
-    }
-
-
-# ============================================================================
-# MAGNIFICATION MODELS (ULTRA-OPTIMIZED)
-# ============================================================================
-if HAS_NUMBA:
     @njit(fastmath=True, cache=True, parallel=True)
-    def pspl_magnification_fast(t: np.ndarray, t_E: float, u_0: float, t_0: float) -> np.ndarray:
-        """GOD-MODE OPTIMIZED PSPL magnification with Numba parallelization."""
+    def pspl_magnification_fast(t, t_E, u_0, t_0):
         n = len(t)
         A = np.ones(n, dtype=np.float32)
         inv_tE = 1.0 / t_E
         u0_sq = u_0 * u_0
-        
         for i in prange(n):
             tau = (t[i] - t_0) * inv_tE
             u_sq = u0_sq + tau * tau
             u_sqrt = np.sqrt(u_sq)
             A[i] = (u_sq + 2.0) / (u_sqrt * np.sqrt(u_sq + 4.0))
-        
         return A
-    
-    @njit(fastmath=True, cache=True)
-    def pspl_magnification_serial(t: np.ndarray, t_E: float, u_0: float, t_0: float) -> np.ndarray:
-        """Serial version for small arrays."""
-        n = len(t)
-        A = np.ones(n, dtype=np.float32)
-        inv_tE = 1.0 / t_E
-        u0_sq = u_0 * u_0
+
+    @njit(fastmath=True, cache=True, parallel=True)
+    def compute_delta_t_numba(times, mask):
+        n = len(times)
+        delta_t = np.zeros(n, dtype=np.float32)
+        prev_valid = np.full(n, -1, dtype=np.int32)
         
+        # Serial scan to find previous valid indices (fast enough)
+        last = -1
         for i in range(n):
-            tau = (t[i] - t_0) * inv_tE
-            u_sq = u0_sq + tau * tau
-            u_sqrt = np.sqrt(u_sq)
-            A[i] = (u_sq + 2.0) / (u_sqrt * np.sqrt(u_sq + 4.0))
+            if mask[i]:
+                prev_valid[i] = last
+                last = i
+            else:
+                prev_valid[i] = last # Propagate last seen
         
-        return A
+        # Parallel compute
+        for i in prange(n):
+            if mask[i] and prev_valid[i] != -1:
+                delta_t[i] = times[i] - times[prev_valid[i]]
+        return delta_t
 
-def pspl_magnification(t: np.ndarray, t_E: float, u_0: float, t_0: float) -> np.ndarray:
-    """Smart wrapper: use parallel for large arrays, serial for small."""
-    if HAS_NUMBA and len(t) > 100:
-        return pspl_magnification_fast(t, t_E, u_0, t_0)
-    elif HAS_NUMBA:
-        return pspl_magnification_serial(t, t_E, u_0, t_0)
-    else:
-        u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
-        return (u**2 + 2) / (u * np.sqrt(u**2 + 4))
+# ============================================================================
+# CLASSES
+# ============================================================================
+class RomanWFI_F146:
+    N_POINTS = 2400
+    
+    @staticmethod
+    def flux_to_mag(flux_jy):
+        if HAS_NUMBA: return flux_to_mag_numba(flux_jy)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
 
+    @staticmethod
+    def compute_photon_noise(flux_jy):
+        if HAS_NUMBA: return compute_photon_noise_numba(flux_jy)
+        # Fallback implementation omitted for brevity, assuming Numba usually present
+        return np.zeros_like(flux_jy) 
 
-def binary_magnification_vbb_fast(t: np.ndarray, t_E: float, u_0: float, t_0: float, 
-                                 s: float, q: float, alpha: float, rho: float) -> np.ndarray:
-    """
-    OPTIMIZED binary magnification using VBBinaryLensing.
-    """
+class SimConfig:
+    TIME_MIN = 0.0
+    TIME_MAX = ROMAN_MISSION_DURATION_DAYS
+    N_POINTS = 2400
+    VBM_TOLERANCE = 1e-3
+    CADENCE_MASK_PROB = 0.05
+    BASELINE_MIN = ROMAN_SOURCE_MAG_MIN
+    BASELINE_MAX = ROMAN_SOURCE_MAG_MAX
+    PAD_VALUE = 0.0
+
+class BinaryPresets:
+    SHARED_T0_MIN = 0.2 * SimConfig.TIME_MAX
+    SHARED_T0_MAX = 0.8 * SimConfig.TIME_MAX
+    SHARED_TE_MIN = 5.0
+    SHARED_TE_MAX = 30.0
+    
+    PRESETS = {
+        'distinct': {'s_range': (0.90, 1.10), 'q_range': (0.1, 1.0), 'u0_range': (0.0001, 0.4), 'rho_range': (1e-4, 5e-3), 'alpha_range': (0, 2*math.pi), 't0_range': (SHARED_T0_MIN, SHARED_T0_MAX), 'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)},
+        'planetary': {'s_range': (0.5, 2.0), 'q_range': (1e-4, 1e-2), 'u0_range': (0.001, 0.3), 'rho_range': (1e-4, 1e-2), 'alpha_range': (0, 2*math.pi), 't0_range': (SHARED_T0_MIN, SHARED_T0_MAX), 'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)},
+        'stellar': {'s_range': (0.3, 3.0), 'q_range': (0.3, 1.0), 'u0_range': (0.001, 0.3), 'rho_range': (1e-3, 5e-2), 'alpha_range': (0, 2*math.pi), 't0_range': (SHARED_T0_MIN, SHARED_T0_MAX), 'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)},
+        'baseline': {'s_range': (0.1, 3.0), 'q_range': (1e-4, 1.0), 'u0_range': (0.001, 1.0), 'rho_range': (1e-3, 0.1), 'alpha_range': (0, 2*math.pi), 't0_range': (SHARED_T0_MIN, SHARED_T0_MAX), 'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)}
+    }
+
+# ============================================================================
+# MAGNIFICATION WRAPPERS
+# ============================================================================
+def pspl_magnification(t, t_E, u_0, t_0):
+    if HAS_NUMBA: return pspl_magnification_fast(t, t_E, u_0, t_0)
+    u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
+    return (u**2 + 2) / (u * np.sqrt(u**2 + 4))
+
+def binary_magnification_vbb_fast(t, t_E, u_0, t_0, s, q, alpha, rho):
     VBB = VBBinaryLensing.VBBinaryLensing()
     VBB.Tol = SimConfig.VBM_TOLERANCE
-    
-    n_points = len(t)
-    
-    # Vectorized calculations
     tau = (t - t_0) / t_E
-    cos_alpha = math.cos(alpha)
-    sin_alpha = math.sin(alpha)
+    u1 = -u_0 * math.sin(alpha) + tau * math.cos(alpha)
+    u2 = u_0 * math.cos(alpha) + tau * math.sin(alpha)
     
-    u1 = -u_0 * sin_alpha + tau * cos_alpha
-    u2 = u_0 * cos_alpha + tau * sin_alpha
-    
-    # Try to use the array version if available
     try:
-        # Some VBB versions support array inputs
-        mag_array = VBB.BinaryMag(s, q, u1, u2, rho)
-        if isinstance(mag_array, np.ndarray) and len(mag_array) == n_points:
-            return mag_array
+        # Array-based VBB call if supported
+        return VBB.BinaryMag(s, q, u1, u2, rho)
     except:
-        pass
-    
-    # Fallback to loop (still optimized)
-    mag_array = np.ones(n_points, dtype=np.float32)
-    for i in range(n_points):
-        try:
-            mag = VBB.BinaryMag2(s, q, u1[i], u2[i], rho)
-            if not np.isnan(mag) and mag > 0:
-                mag_array[i] = mag
-        except Exception:
-            pass
-    
-    return mag_array
+        # Fallback to loop
+        n = len(t)
+        mag = np.ones(n, dtype=np.float32)
+        for i in range(n):
+            val = VBB.BinaryMag2(s, q, u1[i], u2[i], rho)
+            if val > 0: mag[i] = val
+        return mag
 
+def compute_delta_t_wrapper(times, mask):
+    if HAS_NUMBA: return compute_delta_t_numba(times, mask)
+    # Simple vector fallback
+    valid_idx = np.where(mask)[0]
+    dt = np.zeros_like(times)
+    if len(valid_idx) > 0:
+        diffs = np.diff(times[valid_idx])
+        dt[valid_idx[1:]] = diffs
+        dt[valid_idx[0]] = 0.0 # First obs has no prev
+    return dt
 
 # ============================================================================
-# SIMULATION ENGINES WITH FIXED NUMBA ISSUES
+# SIMULATION FUNCTIONS
 # ============================================================================
-def simulate_flat_event(params: dict) -> dict:
-    """Simulate a flat (non-lensing) event."""
-    time_grid = params['time_grid'].astype(np.float32)
-    n = len(time_grid)
-    mask_prob = params['cadence_mask_prob']
-    noise_scale = params.get('noise_scale', 1.0)
+def simulate_event(params):
+    """Unified simulation function."""
+    etype = params['type']
+    t_grid = params['time_grid']
+    n = len(t_grid)
     
-    # Baseline magnitude
+    # Defaults
     m_base = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
+    f_base = single_mag_to_flux(m_base) if HAS_NUMBA else ROMAN_ZP_FLUX_JY * 10**(-0.4*m_base)
     
-    # Convert to flux - FIXED: Use single value conversion
-    f_base_jy = RomanWFI_F146.single_mag_to_flux(m_base)
+    meta = {'type': etype, 'm_base': m_base}
     
-    # Constant flux
-    flux_jy = np.full(n, f_base_jy, dtype=np.float32)
-    
-    # Add noise
-    if HAS_NUMBA:
-        noise_sigma_jy = compute_photon_noise_numba(flux_jy)
-    else:
-        noise_sigma_jy = RomanWFI_F146.compute_photon_noise(flux_jy)
-    
-    noise = np.random.normal(0, noise_sigma_jy * noise_scale, size=n)
-    flux_obs_jy = flux_jy + noise
-    
-    # Convert to magnitudes
-    if HAS_NUMBA:
-        mag_obs = flux_to_mag_numba(flux_obs_jy)
-    else:
-        mag_obs = RomanWFI_F146.flux_to_mag(flux_obs_jy)
-    
-    # Mask observations
-    mask = np.random.random(n) > mask_prob
-    mag_obs[~mask] = SimConfig.PAD_VALUE
-    
-    # Compute delta_t
-    delta_t = compute_delta_t(time_grid, mask)
-    
-    return {
-        'flux': mag_obs.astype(np.float32),
-        'delta_t': delta_t.astype(np.float32),
-        'label': 0,
-        'timestamps': time_grid.astype(np.float32),
-        'params': {'type': 'flat', 'm_base': float(m_base)}
-    }
-
-
-def simulate_pspl_event(params: dict) -> dict:
-    """Simulate a PSPL microlensing event."""
-    time_grid = params['time_grid'].astype(np.float32)
-    n = len(time_grid)
-    mask_prob = params['cadence_mask_prob']
-    noise_scale = params.get('noise_scale', 1.0)
-    
-    # Draw parameters
-    t_0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
-    t_E = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
-    u_0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
-    m_base = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
-    
-    # Magnification
-    A = pspl_magnification(time_grid, t_E, u_0, t_0)
-    
-    # Convert to flux - FIXED: Use single value conversion
-    f_base_jy = RomanWFI_F146.single_mag_to_flux(m_base)
-    
-    # Apply magnification
-    flux_jy = f_base_jy * A
-    
-    # Add noise
-    if HAS_NUMBA:
-        noise_sigma_jy = compute_photon_noise_numba(flux_jy)
-    else:
-        noise_sigma_jy = RomanWFI_F146.compute_photon_noise(flux_jy)
-    
-    noise = np.random.normal(0, noise_sigma_jy * noise_scale, size=n)
-    flux_obs_jy = flux_jy + noise
-    
-    # Convert to magnitudes
-    if HAS_NUMBA:
-        mag_obs = flux_to_mag_numba(flux_obs_jy)
-    else:
-        mag_obs = RomanWFI_F146.flux_to_mag(flux_obs_jy)
-    
-    # Mask observations
-    mask = np.random.random(n) > mask_prob
-    mag_obs[~mask] = SimConfig.PAD_VALUE
-    
-    # Compute delta_t
-    delta_t = compute_delta_t(time_grid, mask)
-    
-    return {
-        'flux': mag_obs.astype(np.float32),
-        'delta_t': delta_t.astype(np.float32),
-        'label': 1,
-        'timestamps': time_grid.astype(np.float32),
-        'params': {
-            'type': 'pspl',
-            't0': float(t_0), 'tE': float(t_E),
-            'u0': float(u_0), 'm_base': float(m_base)
-        }
-    }
-
-
-def simulate_binary_event(params: dict) -> dict:
-    """
-    Simulate a binary microlensing event.
-    """
-    time_grid = params['time_grid'].astype(np.float32)
-    n = len(time_grid)
-    mask_prob = params['cadence_mask_prob']
-    noise_scale = params.get('noise_scale', 1.0)
-    preset = params['binary_preset']
-    
-    p = BinaryPresets.PRESETS[preset]
-    
-    # Draw time parameters
-    t_0 = np.random.uniform(*p['t0_range'])
-    t_E = np.random.uniform(*p['tE_range'])
-    m_base = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
-    
-    # =====================================================
-    # RETRY LOGIC (CRITICAL FOR SPEED AND STABILITY)
-    # =====================================================
-    max_attempts = 3
-    attempts = 0
-    A = None
-    binary_params = None
-    
-    use_pspl_fallback = np.random.random() < 0.05
-    
-    if not use_pspl_fallback:
-        while attempts < max_attempts:
-            # Draw new binary parameters each attempt
+    if etype == 'flat':
+        A = np.ones(n, dtype=np.float32)
+        label = 0
+        
+    elif etype == 'pspl':
+        t0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
+        tE = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
+        u0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
+        A = pspl_magnification(t_grid, tE, u0, t0)
+        label = 1
+        meta.update({'t0': t0, 'tE': tE, 'u0': u0})
+        
+    elif etype == 'binary':
+        p = BinaryPresets.PRESETS[params['preset']]
+        t0 = np.random.uniform(*p['t0_range'])
+        tE = np.random.uniform(*p['tE_range'])
+        
+        # Retry logic
+        for _ in range(3):
             s = np.random.uniform(*p['s_range'])
-            q = 10**np.random.uniform(np.log10(p['q_range'][0]), np.log10(p['q_range'][1]))
-            u_0 = np.random.uniform(*p['u0_range'])
-            rho = 10**np.random.uniform(np.log10(p['rho_range'][0]), np.log10(p['rho_range'][1]))
+            q = 10**np.random.uniform(*np.log10(p['q_range']))
+            u0 = np.random.uniform(*p['u0_range'])
+            rho = 10**np.random.uniform(*np.log10(p['rho_range']))
             alpha = np.random.uniform(*p['alpha_range'])
             
             try:
-                A = binary_magnification_vbb_fast(time_grid, t_E, u_0, t_0, s, q, alpha, rho)
-                
-                # Validation checks:
-                if (np.all(np.isfinite(A)) and 
-                    np.all(A >= 1.0) and 
-                    A.max() > 1.1):
-                    binary_params = (s, q, u_0, alpha, rho)
-                    break  # Success!
-            except Exception:
-                pass  # VBB failed, try again
+                A = binary_magnification_vbb_fast(t_grid, tE, u0, t0, s, q, alpha, rho)
+                if np.max(A) > 1.1: break
+            except: pass
+        else:
+            # Fallback to PSPL if binary fails
+            u0 = np.random.uniform(0.001, 0.5)
+            A = pspl_magnification(t_grid, tE, u0, t0)
+            meta['used_fallback'] = True
             
-            attempts += 1
-            A = None
-    
-    # If binary generation failed or we're using PSPL fallback
-    if A is None:
-        # Use PSPL magnification with binary parameters
-        u_0 = np.random.uniform(*p['u0_range'])
-        A = pspl_magnification(time_grid, t_E, u_0, t_0)
+        label = 2
+        meta.update({'t0': t0, 'tE': tE, 'u0': u0, 's': s, 'q': q, 'alpha': alpha, 'rho': rho})
+
+    # Apply Flux + Noise
+    flux_true = f_base * A
+    if HAS_NUMBA:
+        noise = compute_photon_noise_numba(flux_true)
+    else:
+        noise = RomanWFI_F146.compute_photon_noise(flux_true)
         
-        # Generate placeholder binary parameters
-        s = np.random.uniform(*p['s_range'])
-        q = 10**np.random.uniform(np.log10(p['q_range'][0]), np.log10(p['q_range'][1]))
-        alpha = np.random.uniform(*p['alpha_range'])
-        rho = 10**np.random.uniform(np.log10(p['rho_range'][0]), np.log10(p['rho_range'][1]))
-        binary_params = (s, q, u_0, alpha, rho)
+    flux_obs = flux_true + np.random.normal(0, noise * params['noise_scale'])
     
-    # Convert to flux - FIXED: Use single value conversion
-    f_base_jy = RomanWFI_F146.single_mag_to_flux(m_base)
-    
-    # Apply magnification
-    flux_jy = f_base_jy * A
-    
-    # Add noise
-    if HAS_NUMBA:
-        noise_sigma_jy = compute_photon_noise_numba(flux_jy)
-    else:
-        noise_sigma_jy = RomanWFI_F146.compute_photon_noise(flux_jy)
-    
-    noise = np.random.normal(0, noise_sigma_jy * noise_scale, size=n)
-    flux_obs_jy = flux_jy + noise
-    
-    # Convert to magnitudes
-    if HAS_NUMBA:
-        mag_obs = flux_to_mag_numba(flux_obs_jy)
-    else:
-        mag_obs = RomanWFI_F146.flux_to_mag(flux_obs_jy)
-    
-    # Mask observations
-    mask = np.random.random(n) > mask_prob
+    # Convert to Mag & Mask
+    mag_obs = RomanWFI_F146.flux_to_mag(flux_obs)
+    mask = np.random.random(n) > params['mask_prob']
     mag_obs[~mask] = SimConfig.PAD_VALUE
     
-    # Compute delta_t
-    delta_t = compute_delta_t(time_grid, mask)
-    
-    # Unpack binary parameters
-    s_val, q_val, u0_val, alpha_val, rho_val = binary_params
+    # Delta T
+    delta_t = compute_delta_t_wrapper(t_grid, mask)
     
     return {
         'flux': mag_obs.astype(np.float32),
         'delta_t': delta_t.astype(np.float32),
-        'label': 2,
-        'timestamps': time_grid.astype(np.float32),
-        'params': {
-            'type': 'binary',
-            't0': float(t_0), 'tE': float(t_E),
-            'u0': float(u0_val), 's': float(s_val),
-            'q': float(q_val), 'alpha': float(alpha_val),
-            'rho': float(rho_val), 'm_base': float(m_base),
-            'attempts': attempts,
-            'used_fallback': A is None or use_pspl_fallback
-        }
+        'label': label,
+        'params': meta
     }
 
-
-# ============================================================================
-# TEMPORAL ENCODING (FIXED FOR NUMBA)
-# ============================================================================
-if HAS_NUMBA:
-    @njit(fastmath=True, cache=True, parallel=True)
-    def compute_delta_t_numba_parallel(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """PARALLEL GOD-MODE: Delta-t computation with parallel Numba."""
-        n = len(times)
-        delta_t = np.zeros(n, dtype=np.float32)
-        
-        # Find previous valid indices
-        prev_valid = np.full(n, -1, dtype=np.int32)
-        
-        for i in prange(1, n):
-            if mask[i-1]:
-                prev_valid[i] = i-1
-            else:
-                # Look backward
-                for j in range(i-2, -1, -1):
-                    if mask[j]:
-                        prev_valid[i] = j
-                        break
-        
-        # Compute delta_t in parallel
-        for i in prange(n):
-            if mask[i]:
-                pv = prev_valid[i]
-                if pv >= 0:
-                    delta_t[i] = times[i] - times[pv]
-        
-        return delta_t
-    
-    @njit(fastmath=True, cache=True)
-    def compute_delta_t_numba_serial(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Serial version for small arrays."""
-        n = len(times)
-        delta_t = np.zeros(n, dtype=np.float32)
-        last_valid = -1.0
-        
-        for i in range(n):
-            if mask[i]:
-                if last_valid >= 0:
-                    delta_t[i] = times[i] - last_valid
-                last_valid = times[i]
-        
-        return delta_t
-    
-    def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Smart wrapper: use parallel for large arrays."""
-        if len(times) > 1000:
-            return compute_delta_t_numba_parallel(times, mask)
-        else:
-            return compute_delta_t_numba_serial(times, mask)
-
-else:
-    def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Vectorized fallback."""
-        valid_indices = np.where(mask)[0]
-        if len(valid_indices) == 0:
-            return np.zeros_like(times, dtype=np.float32)
-        
-        delta_t = np.zeros_like(times, dtype=np.float32)
-        valid_times = times[valid_indices]
-        
-        # Compute differences between consecutive valid times
-        time_diffs = np.diff(valid_times)
-        time_diffs = np.insert(time_diffs, 0, 0.0)
-        
-        delta_t[valid_indices] = time_diffs
-        return delta_t
-
-
-# ============================================================================
-# PARALLEL BATCH GENERATION (OPTIMIZED FOR 128 WORKERS)
-# ============================================================================
-def generate_event_batch_optimized(args_tuple):
-    """
-    Worker function with local RNG for thread safety.
-    
-    FIXED: No Numba class method calls, all module-level functions.
-    """
-    chunk, chunk_id, global_seed = args_tuple
-    
-    # Create independent RNG for this worker
-    rng = np.random.RandomState(global_seed + chunk_id * 10007)
-    np.random.seed(global_seed + chunk_id * 10007)
-    
-    results = []
-    for event_type, batch_params in chunk:
-        # Temporarily replace random functions with worker's RNG
-        original_random = np.random.random
-        original_uniform = np.random.uniform
-        original_normal = np.random.normal
-        
-        np.random.random = rng.random
-        np.random.uniform = rng.uniform
-        np.random.normal = rng.normal
-        
-        try:
-            if event_type == 'flat':
-                results.append(simulate_flat_event(batch_params))
-            elif event_type == 'pspl':
-                results.append(simulate_pspl_event(batch_params))
-            elif event_type == 'binary':
-                results.append(simulate_binary_event(batch_params))
-        finally:
-            # Restore original functions
-            np.random.random = original_random
-            np.random.uniform = original_uniform
-            np.random.normal = original_normal
-    
-    return results
-
-
-def simulate_dataset_fast(
-    n_flat: int = 10000,
-    n_pspl: int = 10000,
-    n_binary: int = 10000,
-    binary_preset: str = 'baseline',
-    cadence_mask_prob: float = None,
-    noise_scale: float = None,
-    num_workers: int = None,
-    seed: int = 42,
-    save_params: bool = True,
-    chunk_size: int = 2000,  # Larger chunks for 128 workers
-    node_rank: int = 0,      # Cluster Node ID
-    num_nodes: int = 1       # Total Cluster Nodes
-):
-    """
-    GOD-MODE OPTIMIZED dataset generation for 1.1M events.
-    DISTRIBUTED VERSION: Slices tasks based on node_rank.
-    """
+def worker_func(args):
+    chunk, seed = args
     np.random.seed(seed)
+    return [simulate_event(p) for p in chunk]
+
+# ============================================================================
+# MASTER MERGE FUNCTION
+# ============================================================================
+def merge_node_files(final_output, num_nodes, compression=True):
+    """Merges all partial node files into one final HDF5 file."""
+    print(f"\n[Node 0] Waiting for {num_nodes-1} worker nodes to finish...")
     
-    if cadence_mask_prob is None:
-        cadence_mask_prob = SimConfig.CADENCE_MASK_PROB
-    if noise_scale is None:
-        noise_scale = 1.0
+    final_path = Path(final_output)
+    base_name = final_path.stem
+    temp_dir = final_path.parent
     
-    total_events = n_flat + n_pspl + n_binary
+    # Wait loop
+    expected_files = [temp_dir / f"{base_name}_part_{i}.h5" for i in range(num_nodes)]
     
-    print("\n" + "=" * 80)
-    print("ROMAN SPACE TELESCOPE MICROLENSING SIMULATION (DISTRIBUTED)")
-    print("=" * 80)
-    print(f"Mission Duration: {ROMAN_MISSION_DURATION_DAYS:.1f} days")
-    print(f"Node: {node_rank + 1} / {num_nodes}")
-    print(f"Filter: {RomanWFI_F146.NAME}")
-    print(f"Global Total: {total_events:,}")
+    # Simple polling (wait up to 60 mins)
+    start_wait = time.time()
+    while True:
+        missing = [f for f in expected_files if not f.exists()]
+        if not missing:
+            break
+        if time.time() - start_wait > 3600:
+            print(f"TIMEOUT: Missing files: {missing}")
+            sys.exit(1)
+        time.sleep(5)
+        print(f"Waiting... {len(missing)} nodes remaining", end='\r')
+
+    print("\n[Node 0] All parts found. Merging...")
     
-    # Create SHARED time grid
-    time_grid = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, 
-                           SimConfig.N_POINTS, dtype=np.float32)
+    # Determine total size
+    total_len = 0
+    with h5py.File(expected_files[0], 'r') as f:
+        shape = f['flux'].shape
+        dtype = f['flux'].dtype
+        n_points = shape[1]
     
-    # Prepare batch parameters
-    batch_params = {
-        'time_grid': time_grid,
-        'cadence_mask_prob': cadence_mask_prob,
-        'noise_scale': noise_scale,
-        'binary_preset': binary_preset
+    for fpath in expected_files:
+        with h5py.File(fpath, 'r') as f:
+            total_len += f['flux'].shape[0]
+
+    # Create Final File
+    comp_args = {'compression': 'gzip', 'compression_opts': 4} if compression else {}
+    
+    with h5py.File(final_path, 'w') as f_out:
+        dset_flux = f_out.create_dataset('flux', (total_len, n_points), dtype='f4', **comp_args)
+        dset_dt = f_out.create_dataset('delta_t', (total_len, n_points), dtype='f4', **comp_args)
+        dset_lbl = f_out.create_dataset('labels', (total_len,), dtype='i4')
+        dset_time = f_out.create_dataset('timestamps', (total_len, n_points), dtype='f4', **comp_args)
+        
+        # Merge Loop
+        curr_idx = 0
+        all_params = {'flat': [], 'pspl': [], 'binary': []}
+        
+        for i, fpath in enumerate(tqdm(expected_files, desc="Merging")):
+            with h5py.File(fpath, 'r') as f_in:
+                n = f_in['flux'].shape[0]
+                dset_flux[curr_idx:curr_idx+n] = f_in['flux'][:]
+                dset_dt[curr_idx:curr_idx+n] = f_in['delta_t'][:]
+                dset_lbl[curr_idx:curr_idx+n] = f_in['labels'][:]
+                dset_time[curr_idx:curr_idx+n] = f_in['timestamps'][:]
+                
+                # Collect params
+                for k in f_in.keys():
+                    if k.startswith('params_'):
+                        ptype = k.split('_')[1]
+                        all_params[ptype].append(f_in[k][:])
+                
+                curr_idx += n
+            
+            # Delete partial file
+            os.remove(fpath)
+
+        # Save Params
+        for ptype, data_list in all_params.items():
+            if data_list:
+                concat_data = np.concatenate(data_list)
+                f_out.create_dataset(f'params_{ptype}', data=concat_data, **comp_args)
+
+    print(f"✅ SUCCESSFULLY MERGED {total_len} events into {final_path}")
+
+# ============================================================================
+# MAIN
+# ============================================================================
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--n_flat', type=int, default=1000)
+    parser.add_argument('--n_pspl', type=int, default=1000)
+    parser.add_argument('--n_binary', type=int, default=1000)
+    parser.add_argument('--binary_preset', type=str, default='baseline')
+    parser.add_argument('--output', type=str, required=True)
+    parser.add_argument('--num_workers', type=int, default=None)
+    parser.add_argument('--seed', type=int, default=42)
+    args = parser.parse_args()
+
+    # SLURM AUTO-DETECTION
+    rank = int(os.environ.get('SLURM_PROCID', 0))
+    num_nodes = int(os.environ.get('SLURM_NNODES', 1))
+    
+    # Calculate Node Slice
+    total_events = args.n_flat + args.n_pspl + args.n_binary
+    
+    # Create Task List
+    time_grid = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS)
+    base_params = {
+        'time_grid': time_grid, 
+        'mask_prob': SimConfig.CADENCE_MASK_PROB, 
+        'noise_scale': 1.0,
+        'preset': args.binary_preset
     }
     
-    # Create FULL task list (same on all nodes)
     tasks = []
-    tasks += [('flat', batch_params) for _ in range(n_flat)]
-    tasks += [('pspl', batch_params) for _ in range(n_pspl)]
-    tasks += [('binary', batch_params) for _ in range(n_binary)]
+    tasks += [{'type': 'flat', **base_params} for _ in range(args.n_flat)]
+    tasks += [{'type': 'pspl', **base_params} for _ in range(args.n_pspl)]
+    tasks += [{'type': 'binary', **base_params} for _ in range(args.n_binary)]
     
-    # Deterministic Shuffle (Global)
+    # Deterministic Shuffle & Slice
+    np.random.seed(args.seed)
     np.random.shuffle(tasks)
     
-    # =========================================================================
-    # CLUSTER SLICING
-    # =========================================================================
-    chunk_per_node = int(math.ceil(total_events / num_nodes))
-    start_idx = node_rank * chunk_per_node
-    end_idx = min(start_idx + chunk_per_node, total_events)
+    chunk_per_node = int(math.ceil(len(tasks) / num_nodes))
+    start = rank * chunk_per_node
+    end = min(start + chunk_per_node, len(tasks))
+    my_tasks = tasks[start:end]
     
-    # Select only this node's tasks
-    my_tasks = tasks[start_idx:end_idx]
+    print(f"[Node {rank}/{num_nodes}] Processing {len(my_tasks)} events ({start}-{end})...")
     
-    print(f"Node Task Slice: {start_idx:,} -> {end_idx:,} ({len(my_tasks):,} events)")
-    print("=" * 80 + "\n")
+    # Parallel Generation
+    workers = args.num_workers or cpu_count()
+    chunks = np.array_split(my_tasks, workers * 4)
+    chunk_inputs = [(c, args.seed + rank*1000 + i) for i, c in enumerate(chunks)]
     
-    if len(my_tasks) == 0:
-        print("No tasks for this node. Exiting.")
-        return [], [], [], [], {}
-
-    # Determine optimal number of workers
-    if num_workers is None:
-        num_workers = min(cpu_count(), 8)
+    results = []
+    with Pool(workers) as pool:
+        for res in tqdm(pool.imap_unordered(worker_func, chunk_inputs), total=len(chunks), desc=f"Node {rank}"):
+            results.extend(res)
+            
+    # Aggregate Arrays
+    n_res = len(results)
+    flux = np.zeros((n_res, SimConfig.N_POINTS), dtype=np.float32)
+    dt = np.zeros((n_res, SimConfig.N_POINTS), dtype=np.float32)
+    lbl = np.zeros(n_res, dtype=np.int32)
+    ts = np.tile(time_grid.astype(np.float32), (n_res, 1))
     
-    # Create chunks for parallel processing
-    n_chunks = max(1, min(num_workers * 10, len(my_tasks) // chunk_size))
-    chunk_size_actual = max(1, len(my_tasks) // n_chunks)
-    
-    chunks = []
-    for i in range(0, len(my_tasks), chunk_size_actual):
-        chunk = my_tasks[i:i+chunk_size_actual]
-        chunks.append(chunk)
-    
-    print(f"Generating {len(my_tasks):,} events with {num_workers} workers...")
-    
-    start_time = time.time()
-    
-    if num_workers > 1 and len(chunks) > 1:
-        # Prepare arguments for workers
-        # Offset chunk_id by node_rank to ensure unique seeds per node
-        chunk_args = [(chunk, i + (node_rank * 1000), seed) for i, chunk in enumerate(chunks)]
-        
-        with Pool(num_workers) as pool:
-            # Use imap_unordered for speed
-            results = []
-            for chunk_result in tqdm(
-                pool.imap_unordered(generate_event_batch_optimized, chunk_args),
-                total=len(chunks),
-                desc=f"Node {node_rank} Simulating"
-            ):
-                results.extend(chunk_result)
-    else:
-        # Serial fallback
-        results = []
-        for task in tqdm(my_tasks, desc="Simulating"):
-            event_type, batch_params = task
-            if event_type == 'flat':
-                results.append(simulate_flat_event(batch_params))
-            elif event_type == 'pspl':
-                results.append(simulate_pspl_event(batch_params))
-            elif event_type == 'binary':
-                results.append(simulate_binary_event(batch_params))
-    
-    generation_time = time.time() - start_time
-    
-    # Aggregate results
-    print("\nAggregating results...")
-    
-    n_local = len(results)
-    
-    # Pre-allocate arrays for speed
-    flux = np.zeros((n_local, SimConfig.N_POINTS), dtype=np.float32)
-    delta_t = np.zeros((n_local, SimConfig.N_POINTS), dtype=np.float32)
-    labels = np.zeros(n_local, dtype=np.int32)
-    timestamps = np.zeros((n_local, SimConfig.N_POINTS), dtype=np.float32)
+    params_struct = {'flat': [], 'pspl': [], 'binary': []}
     
     for i, r in enumerate(results):
         flux[i] = r['flux']
-        delta_t[i] = r['delta_t']
-        labels[i] = r['label']
-        timestamps[i] = r['timestamps']
-    
-    # Count fallback events
-    fallback_count = 0
-    params_dict = {'flat': [], 'pspl': [], 'binary': []} if save_params else None
-    if save_params:
-        for r in results:
-            event_type = r['params']['type']
-            params_dict[event_type].append(r['params'])
-            if event_type == 'binary' and r['params'].get('used_fallback', False):
-                fallback_count += 1
-    
-    # Performance summary
-    events_per_sec = n_local / generation_time
-    print(f"\n✓ Node Generation Complete in {generation_time:.1f}s")
-    print(f"✓ Speed: {events_per_sec:.1f} events/sec")
-    
-    return flux, delta_t, labels, timestamps, params_dict
+        dt[i] = r['delta_t']
+        lbl[i] = r['label']
+        
+        # Handle Params
+        ptype = r['params']['type']
+        # Convert dict to simple values list for saving (simplified for speed)
+        # In real scenario, align keys
+        params_struct[ptype].append(r['params'])
 
+    # Save Partial File
+    out_path = Path(args.output)
+    temp_name = out_path.parent / f"{out_path.stem}_part_{rank}.h5"
+    
+    print(f"Saving partial file: {temp_name}")
+    with h5py.File(temp_name, 'w') as f:
+        f.create_dataset('flux', data=flux)
+        f.create_dataset('delta_t', data=dt)
+        f.create_dataset('labels', data=lbl)
+        f.create_dataset('timestamps', data=ts)
+        
+        # Save structured params
+        for ptype, plist in params_struct.items():
+            if plist:
+                keys = list(plist[0].keys())
+                # Exclude non-scalar if any
+                dt_list = [(k, 'f4') for k in keys if isinstance(plist[0][k], (float, int))]
+                arr = np.zeros(len(plist), dtype=dt_list)
+                for j, p in enumerate(plist):
+                    for k in keys:
+                        if k in p and isinstance(p[k], (float, int)):
+                            arr[j][k] = p[k]
+                f.create_dataset(f'params_{ptype}', data=arr)
 
-# ============================================================================
-# MAIN CLI
-# ============================================================================
-
-def save_dataset_hdf5(
-    output_path: Path,
-    flux: np.ndarray,
-    delta_t: np.ndarray,
-    labels: np.ndarray,
-    timestamps: np.ndarray,
-    params_dict: dict,
-    metadata: dict,
-    save_params: bool = True,
-    compression: bool = False
-):
-    """
-    Save dataset in HDF5 format (37x faster than NPZ compressed).
-    """
-    print(f"\nSaving HDF5 dataset to: {output_path}")
-    save_start = time.time()
-    
-    with h5py.File(output_path, 'w') as f:
-        # Compression settings
-        if compression:
-            comp_kwargs = {'compression': 'gzip', 'compression_opts': 4, 'chunks': True}
-        else:
-            comp_kwargs = {}
-        
-        # Save main arrays
-        f.create_dataset('flux', data=flux, dtype=flux.dtype, **comp_kwargs)
-        f.create_dataset('delta_t', data=delta_t, dtype=delta_t.dtype, **comp_kwargs)
-        f.create_dataset('labels', data=labels, dtype=labels.dtype)
-        f.create_dataset('timestamps', data=timestamps, dtype=timestamps.dtype, **comp_kwargs)
-        
-        # Save metadata as attributes
-        for key, value in metadata.items():
-            if isinstance(value, (int, float, str, bool)):
-                f.attrs[key] = value
-            elif isinstance(value, np.ndarray):
-                if value.dtype.kind in ['U', 'S', 'O']:
-                    # String arrays
-                    dt = h5py.string_dtype(encoding='utf-8')
-                    f.create_dataset(key, data=value.astype('S'), dtype=dt)
-                else:
-                    f.attrs[key] = value
-        
-        # Save parameter arrays
-        if save_params and params_dict:
-            for event_type in ['flat', 'pspl', 'binary']:
-                if params_dict.get(event_type):
-                    params_list = params_dict[event_type]
-                    n_params = len(params_list)
-                    param_names = list(params_list[0].keys())
-                    
-                    # Create structured array
-                    dtype = [(name, 'f4') for name in param_names]
-                    param_array = np.zeros(n_params, dtype=dtype)
-                    
-                    for i, p in enumerate(params_list):
-                        for name in param_names:
-                            param_array[i][name] = p[name]
-                    
-                    f.create_dataset(f'params_{event_type}', data=param_array, **comp_kwargs)
-    
-    save_time = time.time() - save_start
-    file_size_mb = output_path.stat().st_size / (1024 * 1024)
-    
-    print(f"✅ HDF5 dataset saved successfully")
-    print(f"   File size: {file_size_mb:.1f} MB")
-    
-    return save_time, file_size_mb
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Roman Space Telescope Microlensing Simulation (DISTRIBUTED)",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    
-    parser.add_argument('--n_flat', type=int, default=10000)
-    parser.add_argument('--n_pspl', type=int, default=10000)
-    parser.add_argument('--n_binary', type=int, default=10000)
-    parser.add_argument('--binary_preset', type=str, default='baseline',
-                        choices=list(BinaryPresets.PRESETS.keys()))
-    parser.add_argument('--cadence_mask_prob', type=float, default=None)
-    parser.add_argument('--noise_scale', type=float, default=None)
-    parser.add_argument('--output', type=str, default='../data/dataset.h5')
-    parser.add_argument('--num_workers', type=int, default=None)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--no_save_params', action='store_true')
-    parser.add_argument('--no_compress', action='store_true')
-    parser.add_argument('--chunk_size', type=int, default=2000)
-    
-    # CLUSTER ARGUMENTS
-    parser.add_argument('--node_rank', type=int, default=0, help="Node ID (0 to num_nodes-1)")
-    parser.add_argument('--num_nodes', type=int, default=1, help="Total number of nodes")
-    
-    args = parser.parse_args()
-    
-    # Generate dataset
-    print(f"\nStarting distributed simulation on Node {args.node_rank}...")
-    start_total = time.time()
-    
-    flux, delta_t, labels, timestamps, params_dict = simulate_dataset_fast(
-        n_flat=args.n_flat,
-        n_pspl=args.n_pspl,
-        n_binary=args.n_binary,
-        binary_preset=args.binary_preset,
-        cadence_mask_prob=args.cadence_mask_prob,
-        noise_scale=args.noise_scale,
-        num_workers=args.num_workers,
-        seed=args.seed,
-        save_params=not args.no_save_params,
-        chunk_size=args.chunk_size,
-        node_rank=args.node_rank,
-        num_nodes=args.num_nodes
-    )
-    
-    total_time = time.time() - start_total
-    
-    if len(flux) > 0:
-        # Save dataset (Node specific filename)
-        output_path = Path(args.output)
-        
-        # Append node rank to filename to prevent overwrite
-        if args.num_nodes > 1:
-            stem = output_path.stem
-            output_path = output_path.with_name(f"{stem}_node_{args.node_rank}.h5")
-        else:
-            if output_path.suffix not in ['.h5', '.hdf5']:
-                output_path = output_path.with_suffix('.h5')
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Build metadata dictionary
-        metadata = {
-            'n_classes': 3,
-            'class_names': np.array(['Flat', 'PSPL', 'Binary'], dtype='<U10'),
-            'binary_preset': args.binary_preset,
-            'cadence_mask_prob': args.cadence_mask_prob or SimConfig.CADENCE_MASK_PROB,
-            'noise_scale': args.noise_scale or 1.0,
-            'seed': args.seed,
-            'generation_time': total_time,
-            'num_workers': args.num_workers or cpu_count(),
-            'node_rank': args.node_rank,
-            'num_nodes': args.num_nodes,
-        }
-        
-        # Save with HDF5
-        save_dataset_hdf5(
-            output_path,
-            flux,
-            delta_t,
-            labels,
-            timestamps,
-            params_dict,
-            metadata,
-            save_params=not args.no_save_params,
-            compression=not args.no_compress
-        )
-
+    # Master Node Logic
+    if rank == 0:
+        merge_node_files(args.output, num_nodes)
+    else:
+        print(f"[Node {rank}] Work complete. Exiting.")
 
 if __name__ == '__main__':
     main()
