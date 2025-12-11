@@ -88,7 +88,7 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("=" * 80)
-        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE (Refactored)")
+        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE (Normalized)")
         print("=" * 80)
         print(f"Experiment: {experiment_name}")
         print(f"Model Path: {self.model_path}")
@@ -103,7 +103,6 @@ class ComprehensiveEvaluator:
         
         # 4. Run Core Inference
         print("\n[Inference] Generating predictions...")
-        # We store sequence probs separately to avoid concatenation issues with massive arrays
         self.probs, self.preds, self.confs, self.seq_probs_batches = self._run_inference()
         
         # 5. Compute Metrics
@@ -125,7 +124,6 @@ class ComprehensiveEvaluator:
             else:
                 raise FileNotFoundError(f"No experiment found matching '{exp_name}'")
             
-        # Get most recent folder
         best_exp = sorted(candidates, key=lambda x: x.stat().st_mtime)[-1]
         model_file = best_exp / "best_model.pt"
         
@@ -169,13 +167,13 @@ class ComprehensiveEvaluator:
         else:
             delta_t = data['delta_t']
             
-        # Handle Timestamps safely (1D vs 2D)
+        # Handle Timestamps
         if 'timestamps' in data:
             raw_ts = data['timestamps']
         else:
-            # Fallback creation
             raw_ts = np.linspace(0, 100, flux.shape[1])
             
+        # Load params if available
         params = {}
         for key in ['params_flat', 'params_pspl', 'params_binary']:
             short_key = key.replace('params_', '')
@@ -187,32 +185,68 @@ class ComprehensiveEvaluator:
                 else:
                     params[short_key] = data[key]
 
-        # Subsampling Logic
+        # Normalization (CRITICAL STEP)
+        print("Normalizing flux data...")
+        flux = self._normalize_flux(flux)
+
+        # Subsampling
         if self.n_samples and self.n_samples < len(flux):
             print(f"Subsampling {len(flux)} -> {self.n_samples} events...")
             idx = np.random.choice(len(flux), self.n_samples, replace=False)
             flux, delta_t, y = flux[idx], delta_t[idx], y[idx]
             
-            # Smart Timestamp Slicing
             if raw_ts.ndim == 1:
-                # If shared 1D, just repeat it for the new subset size
                 timestamps = np.tile(raw_ts, (len(flux), 1))
             else:
-                # If 2D (per event), slice it
                 timestamps = raw_ts[idx]
                 
             print("Note: Physical limit checks will use population stats due to subsampling.")
         else:
-            # No subsampling
             if raw_ts.ndim == 1:
                 timestamps = np.tile(raw_ts, (len(flux), 1))
             else:
                 timestamps = raw_ts
             
         return flux, delta_t, y, params, timestamps
+    
+    def _normalize_flux(self, flux: np.ndarray) -> np.ndarray:
+        """Applies Median/IQR normalization to match training data."""
+        # Calculate stats on a subset for speed, similar to train.py
+        subset_size = min(len(flux), 10000)
+        # Flatten to calculate global stats, ignoring zeros (padding)
+        sample_vals = flux[:subset_size].flatten()
+        sample_vals = sample_vals[sample_vals != 0]
+        
+        if len(sample_vals) == 0:
+            return flux # Should not happen
+
+        median = np.median(sample_vals)
+        q75, q25 = np.percentile(sample_vals, [75, 25])
+        iqr = q75 - q25
+        if iqr < 1e-6:
+            iqr = 1.0
+            
+        print(f"  > Norm Stats | Median: {median:.4f} | IQR: {iqr:.4f}")
+        
+        # Apply to full dataset
+        # We process in chunks to save memory if dataset is huge
+        norm_flux = np.zeros_like(flux, dtype=np.float32)
+        chunk_size = 50000
+        
+        for i in range(0, len(flux), chunk_size):
+            end = min(i + chunk_size, len(flux))
+            chunk = flux[i:end]
+            # Zero is padding, preserve it
+            mask = (chunk != 0)
+            chunk_norm = np.where(mask, (chunk - median) / iqr, 0.0)
+            norm_flux[i:end] = chunk_norm
+            
+        return norm_flux
 
     def _compute_lengths(self):
-        return np.maximum((self.flux != 0).sum(axis=1), 1)
+        # Compute lengths based on non-zero values (assumes padding is 0.0)
+        # Using a small epsilon to be safe with floats
+        return np.maximum((np.abs(self.flux) > 1e-6).sum(axis=1), 1)
 
     def _run_inference(self):
         all_probs = []
@@ -289,6 +323,7 @@ class ComprehensiveEvaluator:
 
     def plot_confusion_matrix(self):
         cm = self.metrics['cm']
+        # Normalize with safety
         cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
         
         plt.figure(figsize=(8, 7))
@@ -542,6 +577,9 @@ class ComprehensiveEvaluator:
             
         print(f"\n[Done] Evaluation complete. Results at: {self.output_dir}")
 
+# =============================================================================
+# CLI
+# =============================================================================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="God Mode Evaluation Suite")
     
