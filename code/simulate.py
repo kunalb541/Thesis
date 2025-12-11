@@ -131,7 +131,6 @@ class RomanWFI_F146:
     @staticmethod
     def compute_photon_noise(flux_jy):
         if HAS_NUMBA: return compute_photon_noise_numba(flux_jy)
-        # Fallback implementation omitted for brevity, assuming Numba usually present
         return np.zeros_like(flux_jy) 
 
 class SimConfig:
@@ -156,6 +155,15 @@ class BinaryPresets:
         'stellar': {'s_range': (0.3, 3.0), 'q_range': (0.3, 1.0), 'u0_range': (0.001, 0.3), 'rho_range': (1e-3, 5e-2), 'alpha_range': (0, 2*math.pi), 't0_range': (SHARED_T0_MIN, SHARED_T0_MAX), 'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)},
         'baseline': {'s_range': (0.1, 3.0), 'q_range': (1e-4, 1.0), 'u0_range': (0.001, 1.0), 'rho_range': (1e-3, 0.1), 'alpha_range': (0, 2*math.pi), 't0_range': (SHARED_T0_MIN, SHARED_T0_MAX), 'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)}
     }
+
+class PSPLParams:
+    """Defined to support PSPL generation in simulate_event"""
+    T0_MIN = BinaryPresets.SHARED_T0_MIN
+    T0_MAX = BinaryPresets.SHARED_T0_MAX
+    TE_MIN = BinaryPresets.SHARED_TE_MIN
+    TE_MAX = BinaryPresets.SHARED_TE_MAX
+    U0_MIN = 0.001
+    U0_MAX = 1.0
 
 # ============================================================================
 # MAGNIFICATION WRAPPERS
@@ -278,85 +286,6 @@ def worker_func(args):
     return [simulate_event(p) for p in chunk]
 
 # ============================================================================
-# MASTER MERGE FUNCTION
-# ============================================================================
-def merge_node_files(final_output, num_nodes, compression=True):
-    """Merges all partial node files into one final HDF5 file."""
-    print(f"\n[Node 0] Waiting for {num_nodes-1} worker nodes to finish...")
-    
-    final_path = Path(final_output)
-    base_name = final_path.stem
-    temp_dir = final_path.parent
-    
-    # Wait loop
-    expected_files = [temp_dir / f"{base_name}_part_{i}.h5" for i in range(num_nodes)]
-    
-    # Simple polling (wait up to 60 mins)
-    start_wait = time.time()
-    while True:
-        missing = [f for f in expected_files if not f.exists()]
-        if not missing:
-            break
-        if time.time() - start_wait > 3600:
-            print(f"TIMEOUT: Missing files: {missing}")
-            sys.exit(1)
-        time.sleep(5)
-        print(f"Waiting... {len(missing)} nodes remaining", end='\r')
-
-    print("\n[Node 0] All parts found. Merging...")
-    
-    # Determine total size
-    total_len = 0
-    with h5py.File(expected_files[0], 'r') as f:
-        shape = f['flux'].shape
-        dtype = f['flux'].dtype
-        n_points = shape[1]
-    
-    for fpath in expected_files:
-        with h5py.File(fpath, 'r') as f:
-            total_len += f['flux'].shape[0]
-
-    # Create Final File
-    comp_args = {'compression': 'gzip', 'compression_opts': 4} if compression else {}
-    
-    with h5py.File(final_path, 'w') as f_out:
-        dset_flux = f_out.create_dataset('flux', (total_len, n_points), dtype='f4', **comp_args)
-        dset_dt = f_out.create_dataset('delta_t', (total_len, n_points), dtype='f4', **comp_args)
-        dset_lbl = f_out.create_dataset('labels', (total_len,), dtype='i4')
-        dset_time = f_out.create_dataset('timestamps', (total_len, n_points), dtype='f4', **comp_args)
-        
-        # Merge Loop
-        curr_idx = 0
-        all_params = {'flat': [], 'pspl': [], 'binary': []}
-        
-        for i, fpath in enumerate(tqdm(expected_files, desc="Merging")):
-            with h5py.File(fpath, 'r') as f_in:
-                n = f_in['flux'].shape[0]
-                dset_flux[curr_idx:curr_idx+n] = f_in['flux'][:]
-                dset_dt[curr_idx:curr_idx+n] = f_in['delta_t'][:]
-                dset_lbl[curr_idx:curr_idx+n] = f_in['labels'][:]
-                dset_time[curr_idx:curr_idx+n] = f_in['timestamps'][:]
-                
-                # Collect params
-                for k in f_in.keys():
-                    if k.startswith('params_'):
-                        ptype = k.split('_')[1]
-                        all_params[ptype].append(f_in[k][:])
-                
-                curr_idx += n
-            
-            # Delete partial file
-            os.remove(fpath)
-
-        # Save Params
-        for ptype, data_list in all_params.items():
-            if data_list:
-                concat_data = np.concatenate(data_list)
-                f_out.create_dataset(f'params_{ptype}', data=concat_data, **comp_args)
-
-    print(f"✅ SUCCESSFULLY MERGED {total_len} events into {final_path}")
-
-# ============================================================================
 # MAIN
 # ============================================================================
 def main():
@@ -370,13 +299,10 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
-    # SLURM AUTO-DETECTION
-    rank = int(os.environ.get('SLURM_PROCID', 0))
-    num_nodes = int(os.environ.get('SLURM_NNODES', 1))
-    
-    # Calculate Node Slice
-    total_events = args.n_flat + args.n_pspl + args.n_binary
-    
+    # Create output directory if it doesn't exist
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Create Task List
     time_grid = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS)
     base_params = {
@@ -391,28 +317,29 @@ def main():
     tasks += [{'type': 'pspl', **base_params} for _ in range(args.n_pspl)]
     tasks += [{'type': 'binary', **base_params} for _ in range(args.n_binary)]
     
-    # Deterministic Shuffle & Slice
+    total_events = len(tasks)
+    print(f"Generating {total_events} events (Preset: {args.binary_preset})...")
+
+    # Deterministic Shuffle
     np.random.seed(args.seed)
     np.random.shuffle(tasks)
     
-    chunk_per_node = int(math.ceil(len(tasks) / num_nodes))
-    start = rank * chunk_per_node
-    end = min(start + chunk_per_node, len(tasks))
-    my_tasks = tasks[start:end]
-    
-    print(f"[Node {rank}/{num_nodes}] Processing {len(my_tasks)} events ({start}-{end})...")
-    
     # Parallel Generation
     workers = args.num_workers or cpu_count()
-    chunks = np.array_split(my_tasks, workers * 4)
-    chunk_inputs = [(c, args.seed + rank*1000 + i) for i, c in enumerate(chunks)]
+    print(f"Using {workers} workers.")
+    
+    # Split into chunks for the pool
+    n_chunks = workers * 4
+    chunks = np.array_split(tasks, n_chunks)
+    chunk_inputs = [(c, args.seed + i) for i, c in enumerate(chunks)]
     
     results = []
     with Pool(workers) as pool:
-        for res in tqdm(pool.imap_unordered(worker_func, chunk_inputs), total=len(chunks), desc=f"Node {rank}"):
+        for res in tqdm(pool.imap_unordered(worker_func, chunk_inputs), total=len(chunks)):
             results.extend(res)
             
     # Aggregate Arrays
+    print("Aggregating results...")
     n_res = len(results)
     flux = np.zeros((n_res, SimConfig.N_POINTS), dtype=np.float32)
     dt = np.zeros((n_res, SimConfig.N_POINTS), dtype=np.float32)
@@ -428,39 +355,32 @@ def main():
         
         # Handle Params
         ptype = r['params']['type']
-        # Convert dict to simple values list for saving (simplified for speed)
-        # In real scenario, align keys
         params_struct[ptype].append(r['params'])
 
-    # Save Partial File
-    out_path = Path(args.output)
-    temp_name = out_path.parent / f"{out_path.stem}_part_{rank}.h5"
+    # Save Final File
+    print(f"Saving to {out_path}...")
+    comp_args = {'compression': 'gzip', 'compression_opts': 4}
     
-    print(f"Saving partial file: {temp_name}")
-    with h5py.File(temp_name, 'w') as f:
-        f.create_dataset('flux', data=flux)
-        f.create_dataset('delta_t', data=dt)
+    with h5py.File(out_path, 'w') as f:
+        f.create_dataset('flux', data=flux, **comp_args)
+        f.create_dataset('delta_t', data=dt, **comp_args)
         f.create_dataset('labels', data=lbl)
-        f.create_dataset('timestamps', data=ts)
+        f.create_dataset('timestamps', data=ts, **comp_args)
         
         # Save structured params
         for ptype, plist in params_struct.items():
             if plist:
                 keys = list(plist[0].keys())
                 # Exclude non-scalar if any
-                dt_list = [(k, 'f4') for k in keys if isinstance(plist[0][k], (float, int))]
+                dt_list = [(k, 'f4') for k in keys if isinstance(plist[0][k], (float, int, np.number))]
                 arr = np.zeros(len(plist), dtype=dt_list)
                 for j, p in enumerate(plist):
                     for k in keys:
-                        if k in p and isinstance(p[k], (float, int)):
+                        if k in p and isinstance(p[k], (float, int, np.number)):
                             arr[j][k] = p[k]
-                f.create_dataset(f'params_{ptype}', data=arr)
+                f.create_dataset(f'params_{ptype}', data=arr, **comp_args)
 
-    # Master Node Logic
-    if rank == 0:
-        merge_node_files(args.output, num_nodes)
-    else:
-        print(f"[Node {rank}] Work complete. Exiting.")
+    print(f"✅ SUCCESSFULLY SAVED {n_res} events.")
 
 if __name__ == '__main__':
     main()
