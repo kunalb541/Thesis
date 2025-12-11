@@ -719,41 +719,51 @@ class RomanEvaluator:
         plt.savefig(self.output_dir / f'evolution_{cls_name}_{idx}.png')
         plt.close()
 
-    def run(self):
+
     def verify_causal_inference(self):
         """
         ✅ GOD MODE: Verify that model maintains causality in streaming mode.
-        
         Tests that predictions at timestep T only depend on observations <= T.
         """
-        print("
-Verifying causal inference...")
+        print("\nVerifying causal inference...")
         
         # Take a random sample
         idx = np.random.randint(len(self.flux))
-        flux_full = torch.tensor(self.flux[idx:idx+1], dtype=torch.float32, device=self.device)
-        delta_t_full = torch.tensor(self.delta_t[idx:idx+1], dtype=torch.float32, device=self.device)
+        
+        # Prepare tensors correctly
+        f_full = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
+        d_full = torch.tensor(self.delta_t[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
         length = self.lengths[idx]
         
         # Full sequence prediction
         with torch.no_grad():
-            out_full = self.model(flux_full, delta_t_full, 
-                                 lengths=torch.tensor([length]), 
-                                 return_all_timesteps=True)
-            probs_full = out_full['probs_seq'][0, :length].cpu().numpy()
+            l_tensor = torch.tensor([length], dtype=torch.long, device=self.device)
+            out_full = self.model(f_full, d_full, lengths=l_tensor, return_all_timesteps=True)
+            
+            # Handle dictionary output safely
+            if 'probs_seq' in out_full:
+                probs_full = out_full['probs_seq'][0, :length].cpu().numpy()
+            else:
+                probs_full = torch.softmax(out_full['logits_seq'][0, :length], dim=-1).cpu().numpy()
         
-        # Verify causality by truncating
-        for t in range(10, length, length // 10):
-            flux_trunc = flux_full[:, :t]
-            delta_t_trunc = delta_t_full[:, :t]
+        # Verify causality by truncating (stride for speed)
+        step_size = max(1, length // 10)
+        
+        for t in range(10, length, step_size):
+            f_trunc = f_full[:, :t]
+            d_trunc = d_full[:, :t]
+            l_trunc = torch.tensor([t], dtype=torch.long, device=self.device)
             
             with torch.no_grad():
-                out_trunc = self.model(flux_trunc, delta_t_trunc,
-                                      lengths=torch.tensor([t]),
-                                      return_all_timesteps=True)
-                probs_trunc = out_trunc['probs_seq'][0, -1].cpu().numpy()
+                out_trunc = self.model(f_trunc, d_trunc, lengths=l_trunc, return_all_timesteps=True)
+                
+                if 'probs_seq' in out_trunc:
+                    probs_trunc = out_trunc['probs_seq'][0, -1].cpu().numpy()
+                else:
+                    probs_trunc = torch.softmax(out_trunc['logits_seq'][0, -1], dim=-1).cpu().numpy()
             
-            # Should match the t-th timestep from full
+            # The prediction at the last step of the truncated sequence (t-1)
+            # must match the prediction at step t-1 of the full sequence.
             diff = np.abs(probs_trunc - probs_full[t-1]).max()
             
             if diff > 1e-5:
@@ -763,22 +773,30 @@ Verifying causal inference...")
         print("  ✅ Causality verified: Predictions are properly causal")
         return True
 
-    
+    def run(self):
         """Run full evaluation suite."""
         print("\n" + "=" * 80)
         print("RUNNING EVALUATION SUITE")
         print("=" * 80)
         
+        # 1. Verify causality (Critical for Roman Science)
+        if self.run_early_detection: 
+             if not self.verify_causal_inference():
+                 print("CRITICAL: Causality check failed. Aborting evaluation.")
+                 return
+
+        # 2. Standard Plots
         self.plot_confusion_matrix()
         self.plot_roc_curve()
         self.plot_calibration()
         self.analyze_physical_limits()
         self.diagnose_temporal_bias()
         
+        # 3. Evolution Plots
         if self.n_evolution_per_type > 0:
             self.plot_evolution_examples()
         
-        # Save summary
+        # 4. Save Summary
         summary = {
             'metrics': {k: float(v) for k, v in self.metrics.items()},
             'model_config': {k: v for k, v in self.config.__dict__.items()},
@@ -789,7 +807,7 @@ Verifying causal inference...")
         with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
             json.dump(summary, f, indent=2)
         
-        # Print classification report
+        # 5. Print Classification Report
         print("\n" + "=" * 80)
         print("CLASSIFICATION REPORT")
         print("=" * 80)
