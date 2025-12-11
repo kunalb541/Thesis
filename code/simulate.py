@@ -571,12 +571,6 @@ def simulate_dataset(
     elapsed = time.time() - start_time
     print(f"  Delta_t calculation completed in {elapsed:.2f} seconds")
     
-    # Shuffle dataset
-    shuffle_idx = np.random.permutation(len(flux))
-    flux = flux[shuffle_idx]
-    delta_t_array = delta_t_array[shuffle_idx]
-    labels = labels[shuffle_idx]
-    
     # Summary statistics
     print("\n" + "=" * 80)
     print("Dataset Generation Complete")
