@@ -8,17 +8,6 @@ import warnings
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Literal, Any, Union
 
-
-# =============================================================================
-# ROMAN SPACE TELESCOPE READINESS VERIFICATION
-# =============================================================================
-# ✅ Causality: All convolutions use left-padding only (lines 234, 243, 288)
-# ✅ No look-ahead: TimeDistributed architecture ensures sequential processing
-# ✅ State management: Model is stateless - no hidden state carried between samples
-# ✅ DDP-ready: All buffers registered, all ops differentiable
-# ✅ Memory efficient: Gradient checkpointing available for 40-GPU scaling
-# =============================================================================
-
 # =============================================================================
 # LOGGING CONFIGURATION
 # =============================================================================
