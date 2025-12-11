@@ -659,10 +659,9 @@ class RomanEvaluator:
 
     def _plot_single_evolution(self, idx: int, cls_name: str, cls_idx: int):
         """Plot single event evolution."""
-        # Rerun model with timestep outputs
-        f = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0), device=self.device)
-        d = torch.tensor(self.delta_t[idx], dtype=torch.float32, device=self.device).unsqueeze(0), device=self.device)
-        l = torch.tensor([self.lengths[idx]], dtype=torch.long, device=self.device), device=self.device)
+        f = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
+        d = torch.tensor(self.delta_t[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
+        l = torch.tensor([self.lengths[idx]], dtype=torch.long, device=self.device)
         
         with torch.no_grad():
             output = self.model(f, d, lengths=l, return_all_timesteps=True)
@@ -821,13 +820,15 @@ if __name__ == '__main__':
                        help="Batch size for inference")
     parser.add_argument('--n_samples', type=int, default=None,
                        help="Subsample test set for speed")
+                       
     parser.add_argument('--device', default='cuda',
                        help="Device: cuda or cpu")
-    
+                       
     parser.add_argument('--n_evolution_per_type', type=int, default=5,
-    parser.add_argument('--early_detection', action='store_true', help='Run early detection analysis')
-
                        help="Number of evolution plots per class")
+    
+    parser.add_argument('--early_detection', action='store_true', 
+                       help='Run early detection analysis')
     
     args = parser.parse_args()
     
