@@ -25,6 +25,18 @@ from sklearn.metrics import (
 
 warnings.filterwarnings("ignore")
 
+def load_compat(path):
+    """Hybrid loader for NPZ and HDF5."""
+    import h5py
+    import numpy as np
+    path = str(path)
+    if path.endswith('.h5') or path.endswith('.hdf5'):
+        with h5py.File(path, 'r') as f:
+            # Load all datasets into memory to mimic np.load dictionary behavior
+            return {k: f[k][:] for k in f.keys()}
+    return np.load(path, allow_pickle=True)
+
+
 # =============================================================================
 # IMPORT MODEL
 # =============================================================================
@@ -43,16 +55,7 @@ except ImportError as e:
     print("Make sure model.py is in the same directory.")
     sys.exit(1)
     
-def load_compat(path):
-    """Hybrid loader for NPZ and HDF5."""
-    import h5py
-    import numpy as np
-    path = str(path)
-    if path.endswith('.h5') or path.endswith('.hdf5'):
-        with h5py.File(path, 'r') as f:
-            # Load all datasets into memory to mimic np.load dictionary behavior
-            return {k: f[k][:] for k in f.keys()}
-    return np.load(path, allow_pickle=True)
+
     
 # =============================================================================
 # PLOTTING CONFIGURATION
@@ -773,6 +776,59 @@ class RomanEvaluator:
         print("  ✅ Causality verified: Predictions are properly causal")
         return True
 
+    def verify_causal_inference(self):
+        """
+        ✅ GOD MODE: Verify that model maintains causality in streaming mode.
+        Tests that predictions at timestep T only depend on observations <= T.
+        """
+        print("\nVerifying causal inference...")
+        
+        # Take a random sample
+        idx = np.random.randint(len(self.flux))
+        
+        # Prepare tensors correctly
+        f_full = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
+        d_full = torch.tensor(self.delta_t[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
+        length = self.lengths[idx]
+        
+        # Full sequence prediction
+        with torch.no_grad():
+            l_tensor = torch.tensor([length], dtype=torch.long, device=self.device)
+            out_full = self.model(f_full, d_full, lengths=l_tensor, return_all_timesteps=True)
+            
+            # Handle dictionary output safely
+            if 'probs_seq' in out_full:
+                probs_full = out_full['probs_seq'][0, :length].cpu().numpy()
+            else:
+                probs_full = torch.softmax(out_full['logits_seq'][0, :length], dim=-1).cpu().numpy()
+        
+        # Verify causality by truncating (stride for speed)
+        step_size = max(1, length // 10)
+        
+        for t in range(10, length, step_size):
+            f_trunc = f_full[:, :t]
+            d_trunc = d_full[:, :t]
+            l_trunc = torch.tensor([t], dtype=torch.long, device=self.device)
+            
+            with torch.no_grad():
+                out_trunc = self.model(f_trunc, d_trunc, lengths=l_trunc, return_all_timesteps=True)
+                
+                if 'probs_seq' in out_trunc:
+                    probs_trunc = out_trunc['probs_seq'][0, -1].cpu().numpy()
+                else:
+                    probs_trunc = torch.softmax(out_trunc['logits_seq'][0, -1], dim=-1).cpu().numpy()
+            
+            # The prediction at the last step of the truncated sequence (t-1)
+            # must match the prediction at step t-1 of the full sequence.
+            diff = np.abs(probs_trunc - probs_full[t-1]).max()
+            
+            if diff > 1e-5:
+                print(f"  ⚠️  CAUSALITY VIOLATION at t={t}: max diff={diff:.6f}")
+                return False
+        
+        print("  ✅ Causality verified: Predictions are properly causal")
+        return True
+
     def run(self):
         """Run full evaluation suite."""
         print("\n" + "=" * 80)
@@ -842,11 +898,11 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='cuda',
                        help="Device: cuda or cpu")
                        
-    parser.add_argument('--n_evolution_per_type', type=int, default=5,
-                       help="Number of evolution plots per class")
-    
     parser.add_argument('--early_detection', action='store_true', 
                        help='Run early detection analysis')
+    
+    parser.add_argument('--n_evolution_per_type', type=int, default=5,
+                       help="Number of evolution plots per class")
     
     args = parser.parse_args()
     

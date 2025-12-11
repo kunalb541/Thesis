@@ -46,6 +46,9 @@ def load_compat(path):
             return {k: f[k][:] for k in f.keys()}
     return np.load(path, allow_pickle=True)
 
+
+
+
 # =============================================================================
 # TRAINING CONFIGURATION
 # =============================================================================
@@ -308,7 +311,7 @@ def train_epoch(
         labels = labels.to(device, non_blocking=True)
         
         # Forward pass with AMP
-        with torch.cuda.amp.autocast(enabled=config.use_amp, dtype=torch.bfloat16):
+        with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
             output = model(flux, delta_t, lengths=lengths)
             
             if config.hierarchical:
@@ -384,7 +387,7 @@ def evaluate(
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             
-            with torch.cuda.amp.autocast(enabled=config.use_amp, dtype=torch.bfloat16):
+            with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
                 output = model(flux, delta_t, lengths=lengths)
                 
                 if config.hierarchical:
@@ -525,6 +528,10 @@ def main():
     delta_t = data['delta_t']
     labels = data['labels']
     
+    # GOD MODE: Validate batch size for DDP
+    if is_ddp and args.batch_size * world_size > len(flux):
+        logger.warning(f"Batch size too large: {args.batch_size} * {world_size} GPUs > {len(flux)} samples")
+    
     # Split data
     flux_train, flux_val, delta_t_train, delta_t_val, labels_train, labels_val = train_test_split(
         flux, delta_t, labels, test_size=0.2, random_state=SEED, stratify=labels
@@ -588,12 +595,15 @@ def main():
     
     # Wrap in DDP
     if is_ddp:
+        # GOD MODE: broadcast_buffers defaults to True
+        # Set to False if model has complex non-learnable buffers for efficiency
         model = DDP(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
             gradient_as_bucket_view=True,
-            find_unused_parameters=False
+            find_unused_parameters=False,
+            broadcast_buffers=True  # Set False for efficiency if buffers are deterministic
         )
     
     # Compile model
@@ -610,9 +620,9 @@ def main():
         betas=(0.9, 0.999)
     )
     
-    # GOD MODE FIX: Proper FP16 detection
-    use_fp16 = False  # Using BF16, not FP16
-    scaler =  None
+    # GOD MODE: BF16 doesn't need GradScaler (only FP16 does)
+    # We use torch.bfloat16 which has wider dynamic range
+    scaler = None  # No gradient scaling needed for BF16
     
     # Learning rate scheduler
     def lr_lambda(epoch):

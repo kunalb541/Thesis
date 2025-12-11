@@ -22,11 +22,8 @@ from typing import Dict, Optional, Tuple, Literal, Any, Union
 # =============================================================================
 # LOGGING CONFIGURATION
 # =============================================================================
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%H:%M:%S"
-)
+# Logging configuration moved to train.py for DDP compatibility
+# Module-level basicConfig interferes with rank-0 logging strategy
 logger = logging.getLogger("ROMAN_MODEL")
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -81,6 +78,12 @@ class ModelConfig:
         """Validate configuration."""
         if self.d_model % 2 != 0:
             raise ValueError(f"d_model must be divisible by 2, got {self.d_model}")
+        if self.d_model <= 0:
+            raise ValueError(f"d_model must be positive, got {self.d_model}")
+        if self.d_model > 2048:
+            raise ValueError(f"d_model exceeds reasonable bound (2048), got {self.d_model}")
+        if self.n_layers <= 0:
+            raise ValueError(f"n_layers must be positive, got {self.n_layers}")
 
 
 # =============================================================================
@@ -115,6 +118,8 @@ class RobustSinusoidalEncoding(nn.Module):
             (B, T, d_model) positional encodings
         """
         # FIXED: Use clamp instead of adding tiny epsilon to avoid discontinuity
+        # DESIGN NOTE (Thesis): First timestep receives delta_t=0, clamped to 1e-3
+        # This ensures stable sinusoidal encoding without introducing artificial jumps
         dt = torch.clamp(delta_t.abs().unsqueeze(-1), min=1e-3)
         
         # Log-scale time for better distribution
@@ -239,12 +244,12 @@ class CausalConvFeatureExtractor(nn.Module):
             (B, T, C) tensor with same temporal dimension
         """
         # Convert to channel-first format
-        x = x.permute(0, 2, 1)  # (B, C, T)
+        x = x.permute(0, 2, 1).contiguous()  # (B, C, T) - explicit contiguity for kernel efficiency
         
         # First conv block with causal padding
         x = F.pad(x, (2, 0))  # Pad left only (causal)
         x = self.conv1(x)
-        x = x.permute(0, 2, 1)  # Back to (B, T, C)
+        x = x.permute(0, 2, 1).contiguous()  # Back to (B, T, C) - maintain contiguity
         x = self.norm1(x)
         x = self.act(x)
         x = self.dropout(x)
@@ -513,7 +518,7 @@ class RomanMicrolensingGRU(nn.Module):
         device = flux.device
         use_amp = self.config.use_amp and device.type == 'cuda'
         
-        with torch.autocast(device_type=device.type, dtype=self.amp_dtype, enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, dtype=self.amp_dtype, enabled=use_amp):
             B, T = flux.shape
             
             # Create mask from lengths
