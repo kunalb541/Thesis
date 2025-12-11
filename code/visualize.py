@@ -81,6 +81,31 @@ class RomanVisualizer:
         # Load data
         self.flux, self.delta_t, self.labels, self.lengths = self._load_data(data_path)
         
+        # =====================================================================
+        # CRITICAL FIX: APPLY NORMALIZATION FROM CHECKPOINT
+        # =====================================================================
+        # The model was trained on normalized data (approx mean=0, std=1).
+        # We must apply the EXACT same statistics to the visualization data.
+        if 'normalization_stats' in self.checkpoint:
+            stats = self.checkpoint['normalization_stats']
+            print(f"Applying normalization from checkpoint: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
+            
+            # Create mask for valid data (non-zero, non-nan)
+            mask = (self.flux != 0) & (~np.isnan(self.flux))
+            
+            # Apply (Flux - Median) / IQR
+            # This matches the logic in train.py exactly
+            self.flux = np.where(
+                mask, 
+                (self.flux - stats['median']) / stats['iqr'], 
+                0.0
+            )
+        else:
+            print("⚠️ WARNING: No normalization stats found in checkpoint.")
+            print("   Visualizations will likely be incorrect (garbage in -> garbage out).")
+            print("   Ensure you are using a checkpoint trained with the latest train.py.")
+        # =====================================================================
+        
         # Hook for feature extraction
         self.hook_handle = None
         self.hook_output = {}
@@ -159,6 +184,7 @@ class RomanVisualizer:
     
     def _compute_normalization_stats(self, flux: np.ndarray) -> dict:
         """Compute normalization statistics matching train.py."""
+        # Kept for compatibility, though we prioritize checkpoint stats
         subset = flux[:10000].flatten()
         subset = subset[subset != 0]
         
@@ -242,6 +268,7 @@ class RomanVisualizer:
         
         # 1. Flux time series
         ax1 = fig.add_subplot(gs[0, :])
+        # Plot only valid part
         ax1.plot(self.flux[idx][:T], c='k', alpha=0.7, linewidth=1.5, label='Normalized Flux')
         ax1.set_ylabel('Normalized Flux')
         ax1.set_title(f"Event {idx} | True Class: {CLASS_NAMES[self.labels[idx]]}")
@@ -437,7 +464,7 @@ def main():
     parser.add_argument('--experiment_name', required=True,
                        help="Name of experiment (searches for model automatically)")
     parser.add_argument('--data', required=True,
-                       help="Path to test data (.npz)")
+                       help="Path to test data (.npz or .h5)")
     parser.add_argument('--output_dir', required=True,
                        help="Output directory for plots")
     
