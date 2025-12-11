@@ -376,24 +376,6 @@ class StackedGRU(nn.Module):
 # MAIN MODEL
 # =============================================================================
 class RomanMicrolensingGRU(nn.Module):
-"""
-    Roman Space Telescope Microlensing Classifier with GRU-MLP Hybrid Architecture.
-    
-    ✅ CAUSALITY GUARANTEED: All temporal processing is strictly causal
-    ✅ DDP-OPTIMIZED: Efficient 40-GPU training with minimal communication
-    ✅ THESIS-GRADE: Production-ready code with full type safety
-    
-    Architecture:
-        1. Embedding: Flux + Temporal encoding
-        2. Feature Extraction: MLP or CausalConv
-        3. Temporal Processing: Multi-layer GRU
-        4. Pooling: Attention-based or last-step
-        5. Classification: Hierarchical (Flat vs PSPL vs Binary)
-    
-    Args:
-        config: ModelConfig with all hyperparameters
-        dtype: torch.float32 or torch.bfloat16
-    """
     """
     Causal GRU classifier for Roman Space Telescope microlensing events.
     
@@ -412,7 +394,7 @@ class RomanMicrolensingGRU(nn.Module):
         - Hierarchical: Two-stage classification (optional)
     """
     
-    def __init__(self, config: GRUConfig, dtype: torch.dtype = torch.float32):
+    def __init__(self, config: ModelConfig, dtype: torch.dtype = torch.float32):
         super().__init__()
         self.config = config
         self.amp_dtype = dtype
