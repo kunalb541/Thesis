@@ -79,6 +79,7 @@ class ComprehensiveEvaluator:
         
         # 2. Setup Output Directory
         if output_dir is None:
+            # Create a specific evaluation folder inside the experiment folder
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             data_name = Path(data_path).stem
             self.output_dir = self.exp_dir / f'eval_{data_name}_{timestamp}'
@@ -88,7 +89,7 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("=" * 80)
-        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE (Normalized)")
+        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE (Scientific Grade)")
         print("=" * 80)
         print(f"Experiment: {experiment_name}")
         print(f"Model Path: {self.model_path}")
@@ -98,11 +99,20 @@ class ComprehensiveEvaluator:
         
         # 3. Initialize Model and Data
         self.model, self.config = self._load_model()
-        self.flux, self.delta_t, self.y, self.params, self.timestamps = self._load_data(data_path)
-        self.lengths = self._compute_lengths()
+        self.data_dict = self._load_data(data_path)
+        
+        # Unpack for ease of use
+        self.flux = self.data_dict['norm_flux']
+        self.raw_flux = self.data_dict['raw_flux']
+        self.delta_t = self.data_dict['delta_t']
+        self.y = self.data_dict['y']
+        self.lengths = self.data_dict['lengths']
+        self.timestamps = self.data_dict['timestamps']
+        self.params = self.data_dict['params']
         
         # 4. Run Core Inference
         print("\n[Inference] Generating predictions...")
+        # We store sequence probs separately to avoid concatenation issues with massive arrays
         self.probs, self.preds, self.confs, self.seq_probs_batches = self._run_inference()
         
         # 5. Compute Metrics
@@ -124,6 +134,7 @@ class ComprehensiveEvaluator:
             else:
                 raise FileNotFoundError(f"No experiment found matching '{exp_name}'")
             
+        # Get most recent folder
         best_exp = sorted(candidates, key=lambda x: x.stat().st_mtime)[-1]
         model_file = best_exp / "best_model.pt"
         
@@ -139,6 +150,7 @@ class ComprehensiveEvaluator:
     def _load_model(self):
         checkpoint = torch.load(self.model_path, map_location=self.device)
         
+        # Extract Config
         config_dict = checkpoint.get('config', {})
         valid_keys = ConfigClass().__init__.__code__.co_varnames
         clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
@@ -146,6 +158,7 @@ class ComprehensiveEvaluator:
         
         model = ModelClass(config).to(self.device)
         
+        # Extract State Dict
         state_dict = checkpoint.get('state_dict', checkpoint)
         clean_state = {k.replace('module.', ''): v for k, v in state_dict.items()}
         
@@ -156,6 +169,7 @@ class ComprehensiveEvaluator:
         return model, config
 
     def _load_data(self, path):
+        print(f"Loading data from {path}...")
         data = np.load(path, allow_pickle=True)
         
         flux = data['flux']
@@ -185,40 +199,59 @@ class ComprehensiveEvaluator:
                 else:
                     params[short_key] = data[key]
 
-        # Normalization (CRITICAL STEP)
+        # --- NORMALIZATION (CRITICAL FIX) ---
+        # We must normalize using statistics derived from the data itself to match training
         print("Normalizing flux data...")
-        flux = self._normalize_flux(flux)
+        raw_flux = flux.copy()
+        norm_flux = self._normalize_flux(flux)
 
-        # Subsampling
+        # Subsampling Logic
         if self.n_samples and self.n_samples < len(flux):
             print(f"Subsampling {len(flux)} -> {self.n_samples} events...")
             idx = np.random.choice(len(flux), self.n_samples, replace=False)
-            flux, delta_t, y = flux[idx], delta_t[idx], y[idx]
             
+            norm_flux = norm_flux[idx]
+            raw_flux = raw_flux[idx]
+            delta_t = delta_t[idx]
+            y = y[idx]
+            
+            # Smart Timestamp Slicing
             if raw_ts.ndim == 1:
-                timestamps = np.tile(raw_ts, (len(flux), 1))
+                timestamps = np.tile(raw_ts, (len(norm_flux), 1))
             else:
                 timestamps = raw_ts[idx]
                 
             print("Note: Physical limit checks will use population stats due to subsampling.")
         else:
             if raw_ts.ndim == 1:
-                timestamps = np.tile(raw_ts, (len(flux), 1))
+                timestamps = np.tile(raw_ts, (len(norm_flux), 1))
             else:
                 timestamps = raw_ts
+
+        # Compute lengths (valid non-padding steps)
+        # Using the raw flux for length calculation is safer if normalization makes things 0
+        lengths = np.maximum((raw_flux != 0).sum(axis=1), 1)
             
-        return flux, delta_t, y, params, timestamps
+        return {
+            'norm_flux': norm_flux,
+            'raw_flux': raw_flux,
+            'delta_t': delta_t,
+            'y': y,
+            'lengths': lengths,
+            'timestamps': timestamps,
+            'params': params
+        }
     
     def _normalize_flux(self, flux: np.ndarray) -> np.ndarray:
         """Applies Median/IQR normalization to match training data."""
-        # Calculate stats on a subset for speed, similar to train.py
+        # Calculate stats on a subset for speed
         subset_size = min(len(flux), 10000)
         # Flatten to calculate global stats, ignoring zeros (padding)
         sample_vals = flux[:subset_size].flatten()
         sample_vals = sample_vals[sample_vals != 0]
         
         if len(sample_vals) == 0:
-            return flux # Should not happen
+            return flux 
 
         median = np.median(sample_vals)
         q75, q25 = np.percentile(sample_vals, [75, 25])
@@ -229,24 +262,18 @@ class ComprehensiveEvaluator:
         print(f"  > Norm Stats | Median: {median:.4f} | IQR: {iqr:.4f}")
         
         # Apply to full dataset
-        # We process in chunks to save memory if dataset is huge
         norm_flux = np.zeros_like(flux, dtype=np.float32)
         chunk_size = 50000
         
+        # Process in chunks
         for i in range(0, len(flux), chunk_size):
             end = min(i + chunk_size, len(flux))
             chunk = flux[i:end]
-            # Zero is padding, preserve it
             mask = (chunk != 0)
             chunk_norm = np.where(mask, (chunk - median) / iqr, 0.0)
             norm_flux[i:end] = chunk_norm
             
         return norm_flux
-
-    def _compute_lengths(self):
-        # Compute lengths based on non-zero values (assumes padding is 0.0)
-        # Using a small epsilon to be safe with floats
-        return np.maximum((np.abs(self.flux) > 1e-6).sum(axis=1), 1)
 
     def _run_inference(self):
         all_probs = []
@@ -440,9 +467,12 @@ class ComprehensiveEvaluator:
             bin_preds = self.preds[bin_mask]
             bin_correct = (bin_preds == 2).astype(int)
             
-            min_len = min(len(u0_vals), len(bin_correct))
-            u0_vals = u0_vals[:min_len]
-            bin_correct = bin_correct[:min_len]
+            # Heuristic alignment check
+            if len(u0_vals) != len(bin_correct):
+                print("  Warning: Parameter count mismatch (Subsampling?). Attempting to align...")
+                min_len = min(len(u0_vals), len(bin_correct))
+                u0_vals = u0_vals[:min_len]
+                bin_correct = bin_correct[:min_len]
             
             bins = np.logspace(np.log10(1e-4), np.log10(1.0), 15)
             digitized = np.digitize(u0_vals, bins)
@@ -479,6 +509,12 @@ class ComprehensiveEvaluator:
             t0_pspl = [p['t_0'] for p in self.params['pspl']]
             t0_bin = [p['t_0'] for p in self.params['binary']]
             
+            # Truncate to match if subsampled (heuristic)
+            if self.n_samples:
+                limit = self.n_samples // 3 # Rough estimate
+                t0_pspl = t0_pspl[:limit]
+                t0_bin = t0_bin[:limit]
+
             plt.figure(figsize=(10, 6))
             plt.hist(t0_pspl, bins=30, alpha=0.5, density=True, label='PSPL t0')
             plt.hist(t0_bin, bins=30, alpha=0.5, density=True, label='Binary t0')
@@ -510,6 +546,9 @@ class ComprehensiveEvaluator:
                 self._plot_single_evolution(idx, cls)
 
     def _plot_single_evolution(self, idx, true_cls):
+        # 1. Get Prediction Sequence
+        # Since we stored batches, we need to find the specific sequence
+        # For simplicity, re-run inference on just this one item
         f = torch.tensor(self.flux[idx], dtype=torch.float32).unsqueeze(0).to(self.device)
         d = torch.tensor(self.delta_t[idx], dtype=torch.float32).unsqueeze(0).to(self.device)
         l = torch.tensor([self.lengths[idx]], dtype=torch.long).to(self.device)
@@ -521,19 +560,33 @@ class ComprehensiveEvaluator:
             
         T = self.lengths[idx]
         times = self.timestamps[idx][:T]
-        flux = self.flux[idx][:T]
+        raw_f = self.raw_flux[idx][:T] # Use RAW flux for plotting
         probs = probs[:T]
+        
+        # === MAGNITUDE CONVERSION (CRITICAL FIX) ===
+        # Handle zero/negative flux (noise)
+        valid_mask = raw_f > 0
+        mags = np.full_like(raw_f, 25.0) # Background limit
+        # m = -2.5 * log10(flux) + ZP
+        # Assuming ZP makes baseline ~20-21 (Roman W149)
+        # Using ZP=22 as generic standard
+        mags[valid_mask] = 22.0 - 2.5 * np.log10(raw_f[valid_mask])
         
         fig = plt.figure(figsize=(12, 10))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.5, 1], hspace=0.1)
         
+        # 1. Light Curve (Inverted Magnitude)
         ax0 = fig.add_subplot(gs[0])
-        ax0.scatter(times, flux, c='k', s=10, alpha=0.6, label='Flux')
-        ax0.set_ylabel('Flux')
+        # Mask Padding (strictly non-zero)
+        plot_mask = (raw_f != 0)
+        ax0.scatter(times[plot_mask], mags[plot_mask], c='k', s=10, alpha=0.6, label='W149 Magnitude')
+        ax0.invert_yaxis() # Brighter is Up
+        ax0.set_ylabel('Magnitude')
         ax0.set_title(f'Event {idx} Evolution (True: {true_cls})')
         ax0.legend()
         ax0.grid(True, alpha=0.3)
         
+        # 2. Probability
         ax1 = fig.add_subplot(gs[1], sharex=ax0)
         for i, cls in enumerate(['Flat', 'PSPL', 'Binary']):
             ax1.plot(times, probs[:, i], color=COLORS[i], lw=2, label=cls)
@@ -541,12 +594,13 @@ class ComprehensiveEvaluator:
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
         
+        # 3. Confidence
         ax2 = fig.add_subplot(gs[2], sharex=ax0)
         conf = probs.max(axis=1)
         ax2.plot(times, conf, color='purple', lw=2, label='Confidence')
         ax2.axhline(0.9, color='green', ls='--', label='Trigger')
         ax2.set_ylabel('Confidence')
-        ax2.set_xlabel('Time')
+        ax2.set_xlabel('Time (days)')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
