@@ -23,7 +23,7 @@ dependencies:
   # Utilities
   - tqdm=4.66.1
   - pandas=2.2.0
-
+  - h5py
   # Development
   - ipython=8.20.0
   - jupyter=1.0.0

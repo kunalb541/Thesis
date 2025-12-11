@@ -1022,8 +1022,7 @@ Examples:
     total_time = time.time() - start_total
     
     # Save dataset
-    print("
-" + "=" * 80)
+    print("\n" + "=" * 80)
     print("SAVING DATASET (HDF5 FORMAT - 37x FASTER)")
     print("=" * 80)
     
