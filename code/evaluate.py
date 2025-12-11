@@ -349,17 +349,17 @@ class RomanEvaluator:
                 flux_batch = torch.tensor(
                     self.flux[i:batch_end], 
                     dtype=torch.float32
-                , device=self.device), device=self.device)
+                , device=self.device)
                 
                 dt_batch = torch.tensor(
                     self.delta_t[i:batch_end], 
                     dtype=torch.float32
-                , device=self.device), device=self.device)
+                , device=self.device)
                 
                 len_batch = torch.tensor(
                     self.lengths[i:batch_end], 
                     dtype=torch.long
-                , device=self.device), device=self.device)
+                , device=self.device)
                 
                 output = self.model(flux_batch, dt_batch, lengths=len_batch)
                 probs = output['probs'].cpu().numpy()
@@ -856,7 +856,7 @@ if __name__ == '__main__':
         output_dir=args.output_dir,
         device=args.device,
         batch_size=args.batch_size,
-        n_samples=args.n_samples,
+        n_samples=args.n_samples, early_detection=args.early_detection,
         n_evolution_per_type=args.n_evolution_per_type
     )
     
