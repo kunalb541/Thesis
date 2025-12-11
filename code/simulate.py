@@ -294,7 +294,7 @@ def main():
         'preset': args.binary_preset
     }
     
-    # 1. Generate Task List (Flat List)
+    # 1. Generate Task List
     tasks = []
     tasks += [{'type': 'flat', **base_params} for _ in range(args.n_flat)]
     tasks += [{'type': 'pspl', **base_params} for _ in range(args.n_pspl)]
@@ -307,8 +307,7 @@ def main():
     np.random.seed(args.seed)
     np.random.shuffle(tasks)
     
-    # 3. Prepare Inputs (No Chunking, just list of args)
-    # We assign a unique seed to each event derived from the main seed and index
+    # 3. Prepare Inputs
     task_inputs = [(t, args.seed + i) for i, t in enumerate(tasks)]
     
     # 4. Multiprocessing Pool
@@ -316,16 +315,23 @@ def main():
     print(f"Using {workers} workers with simple dispatch (no manual chunking).")
     
     results = []
-    
-    # Use 'spawn' to prevent C++ extension issues
     ctx = multiprocessing.get_context('spawn')
     
     with ctx.Pool(workers) as pool:
-        # imap_unordered with chunksize handles batching internally for performance
-        # without requiring manual list splitting code.
         iterator = pool.imap_unordered(worker_wrapper, task_inputs, chunksize=1000)
         
-        for res in tqdm(iterator, total=total_events):
+        # =====================================================================
+        # OPTIMIZED TQDM CONFIGURATION FOR LOG FILES
+        # =====================================================================
+        IS_TTY = sys.stdout.isatty()
+        
+        for res in tqdm(iterator, 
+                        total=total_events,
+                        mininterval=5.0,        # Update log every 5 seconds (prevents buffer spam)
+                        smoothing=0.01,         # Very low smoothing for stable chunks
+                        ascii=not IS_TTY,       # Use # instead of blocks for log files
+                        ncols=80 if not IS_TTY else 100, # Fixed width for clean logs
+                        unit="evt"):
             results.append(res)
             
     # 5. Aggregate Results
