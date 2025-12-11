@@ -1,8 +1,0 @@
-{
-  "metrics": {
-    "acc": 0.45191,
-    "auc": 0.4519031573589817
-  },
-  "config": "GRUConfig(d_model=128, n_layers=3, dropout=0.2, window_size=7, max_seq_len=2000, n_classes=3, hierarchical=True, use_residual=True, use_layer_norm=True, feature_extraction='mlp', use_attention_pooling=True, use_amp=True, use_gradient_checkpointing=False, compile_model=False)",
-  "timestamp": "2025-12-11T01:14:34.558398"
-}
