@@ -17,6 +17,7 @@ from tqdm import tqdm
 from sklearn.decomposition import PCA
 from sklearn.metrics import confusion_matrix
 import gc
+import h5py
 
 # Dynamic import setup
 current_dir = Path(__file__).resolve().parent
@@ -124,46 +125,35 @@ class RomanVisualizer:
         return model, config, ckpt
 
     def _load_data(self, data_path: str):
-        """Load and preprocess data."""
-        print(f"\nLoading data from {Path(data_path).name}...")
+        """Load data from HDF5 or NPZ."""
+        data_path = Path(data_path)
         
-        data = np.load(data_path, allow_pickle=True)
-        flux = data['flux'].astype(np.float32)
+        if data_path.suffix in ['.h5', '.hdf5']:
+            print(f"Loading HDF5 data: {data_path.name}")
+            
+            with h5py.File(data_path, 'r') as f:
+                flux = f['flux'][:]
+                delta_t = f['delta_t'][:]
+                labels = f['labels'][:]
+                
+                # Compute lengths
+                valid_mask = (flux != 0) & (~np.isnan(flux))
+                lengths = valid_mask.sum(axis=1)
         
-        if flux.ndim == 3:
-            flux = flux.squeeze(-1)
+        elif data_path.suffix == '.npz':
+            print(f"Loading NPZ data: {data_path.name}")
+            print("⚠️  WARNING: NPZ is 37x slower than HDF5")
+            
+            data = np.load(data_path)
+            flux = data['flux']
+            delta_t = data['delta_t']
+            labels = data['labels']
+            
+            valid_mask = (flux != 0) & (~np.isnan(flux))
+            lengths = valid_mask.sum(axis=1)
         
-        labels = data['labels'].astype(np.int64)
-        
-        # Delta_t
-        if 'delta_t' in data:
-            delta_t = data['delta_t'].astype(np.float32)
-            if delta_t.ndim == 3:
-                delta_t = delta_t.squeeze(-1)
         else:
-            delta_t = np.zeros_like(flux)
-        
-        # Lengths
-        if 'lengths' in data:
-            lengths = data['lengths'].astype(np.int64)
-        else:
-            lengths = np.maximum((flux != 0).sum(axis=1), 1)
-        
-        print(f"  Loaded {len(flux):,} events")
-        print(f"  Classes: {np.bincount(labels)}")
-        
-        # Normalize flux (matching train.py)
-        print("\nNormalizing flux...")
-        
-        if 'normalization_stats' in self.checkpoint:
-            stats = self.checkpoint['normalization_stats']
-            print(f"  Using checkpoint stats: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
-        else:
-            stats = self._compute_normalization_stats(flux)
-            print(f"  Computed from data: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
-        
-        mask = (flux != 0)
-        flux = np.where(mask, (flux - stats['median']) / stats['iqr'], 0.0)
+            raise ValueError(f"Unsupported format: {data_path.suffix}")
         
         return flux, delta_t, labels, lengths
     

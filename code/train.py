@@ -18,11 +18,12 @@ from tqdm import tqdm
 from datetime import datetime
 import warnings
 import random
+import h5py
 
 try:
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
-    from model import RomanMicrolensingGRU, GRUConfig
+    from model import RomanMicrolensingGRU, ModelConfig
     
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -114,16 +115,37 @@ def setup_logging(rank: int, output_dir: Path):
     return logger
 
 
-def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
+def set_seed_everywhere(seed: int, rank: int = 0):
+    """
+    GOD MODE: Set all random seeds for perfect reproducibility.
     
-    # For complete reproducibility (may impact performance)
+    Args:
+        seed: Base random seed
+        rank: Process rank (for rank-specific seeds if needed)
+    """
+    import random
+    
+    # Python
+    random.seed(seed + rank)
+    
+    # NumPy
+    np.random.seed(seed + rank)
+    
+    # PyTorch CPU
+    torch.manual_seed(seed + rank)
+    
+    # PyTorch CUDA
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed + rank)
+        torch.cuda.manual_seed_all(seed + rank)
+    
+    # CuDNN
     torch.backends.cudnn.deterministic = False  # Keep False for performance
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = True  # Auto-tune kernels
+    
+    if rank == 0:
+        print(f"🎲 GOD MODE: All random seeds set to {seed}")
+
 
 
 # =============================================================================
@@ -562,6 +584,18 @@ def main():
         logger.info(f"World size: {world_size}")
         logger.info(f"Random seed: {args.seed}")
     
+    
+    # GOD MODE: Validate hyperparameters for DDP
+    if is_ddp:
+        if args.batch_size % world_size != 0:
+            if rank == 0:
+                logger.error(f"Batch size {args.batch_size} not divisible by world_size {world_size}")
+            sys.exit(1)
+        
+        effective_batch = args.batch_size // world_size
+        if rank == 0:
+            logger.info(f"DDP Mode: {world_size} GPUs × {effective_batch} batch = {args.batch_size} global batch")
+
     # Load data
     if rank == 0:
         logger.info(f"\nLoading data from {args.data}...")
@@ -592,10 +626,14 @@ def main():
             logger.warning("  Warning: Dataset may not have physical realism flag")
         
         if 'ab_zeropoint_jy' in data:
-            logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
+            # GOD MODE: Rank 0 logging
+            if rank == 0:
+                logger.info(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
         
         if 'mission_duration_days' in data:
-            logger.info(f"  Mission duration: {data['mission_duration_days']} days")
+            # GOD MODE: Rank 0 logging
+            if rank == 0:
+                logger.info(f"  Mission duration: {data['mission_duration_days']} days")
     
     # Compute normalization statistics
     if rank == 0:
@@ -666,7 +704,7 @@ def main():
     )
     
     # Create model
-    config = GRUConfig(
+    config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
         dropout=args.dropout,
@@ -692,7 +730,12 @@ def main():
     
     # Wrap with DDP
     if is_ddp:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(
+        model,
+        device_ids=[local_rank],
+        broadcast_buffers=False,  # GOD MODE: Reduce sync overhead
+        gradient_as_bucket_view=True  # GOD MODE: Memory efficiency
+    )
     
     # Compile model (PyTorch 2.0+)
     if args.compile and hasattr(torch, 'compile'):
@@ -781,7 +824,9 @@ def main():
                         config, stats, output_dir, is_best=True
                     )
                     
-                    logger.info(f"  New best accuracy: {best_acc:.4f}")
+                    # GOD MODE: Rank 0 logging
+                    if rank == 0:
+                        logger.info(f"  New best accuracy: {best_acc:.4f}")
                 else:
                     patience_counter += 1
                 
@@ -823,17 +868,29 @@ def main():
             return_predictions=True
         )
         
-        logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
-        logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
         
         # Confusion matrix
         cm = confusion_matrix(val_results['labels'], val_results['predictions'])
-        logger.info("\nConfusion Matrix:")
-        logger.info("                Predicted")
-        logger.info("             Flat  PSPL  Binary")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info("\nConfusion Matrix:")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info("                Predicted")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info("             Flat  PSPL  Binary")
         for i, row in enumerate(cm):
             class_name = ['Flat', 'PSPL', 'Binary'][i]
-            logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
+            # GOD MODE: Rank 0 logging
+            if rank == 0:
+                logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
         
         # Classification report
         class_names = ['Flat', 'PSPL', 'Binary']
@@ -843,8 +900,12 @@ def main():
             target_names=class_names,
             digits=4
         )
-        logger.info("\nClassification Report:")
-        logger.info(report)
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info("\nClassification Report:")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info(report)
         
         # Save metrics
         metrics = {
@@ -858,8 +919,12 @@ def main():
         with open(output_dir / 'final_metrics.json', 'w') as f:
             json.dump(metrics, f, indent=2, cls=NumpyEncoder)
         
-        logger.info(f"\nTraining complete. Results saved to {output_dir}")
-        logger.info("=" * 80)
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info(f"\nTraining complete. Results saved to {output_dir}")
+        # GOD MODE: Rank 0 logging
+        if rank == 0:
+            logger.info("=" * 80)
     
     # Cleanup
     if dist.is_initialized():

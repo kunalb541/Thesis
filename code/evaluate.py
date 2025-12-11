@@ -17,6 +17,7 @@ from tqdm import tqdm
 from scipy.stats import ks_2samp
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
+import h5py
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, roc_curve, confusion_matrix, classification_report
@@ -31,7 +32,7 @@ try:
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
     
-    from model import RomanMicrolensingGRU, GRUConfig
+    from model import RomanMicrolensingGRU, ModelConfig
     
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
