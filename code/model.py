@@ -56,7 +56,7 @@ class ModelConfig:
     hierarchical: bool = True
     use_residual: bool = True
     use_layer_norm: bool = True
-    feature_extraction: Literal["conv", "mlp"] = "mlp"
+    feature_extraction: Literal["conv", "mlp"] = "conv"
     use_attention_pooling: bool = True
     
     # Training options
