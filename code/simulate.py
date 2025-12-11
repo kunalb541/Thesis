@@ -274,7 +274,7 @@ def simulate_event(params):
 
 def worker_func(args):
     chunk, seed = args
-    # np.random.seed(seed)
+    np.random.seed(seed)
     return [simulate_event(p) for p in chunk]
 
 # ============================================================================
