@@ -284,9 +284,25 @@ def train_epoch(
         optimizer.zero_grad(set_to_none=True)
         out = model(flux, delta_t, lengths=lengths)
         
-        # Compute loss
+        # Compute loss (FIXED: Added auxiliary hierarchical losses)
         if config.hierarchical:
-            loss = F.nll_loss(out['logits'], labels, weight=class_weights)
+            # Main loss (joint probability)
+            loss_main = F.nll_loss(out['logits'], labels, weight=class_weights)
+            
+            # Auxiliary loss 1: Deviation detection (Flat vs Deviation)
+            dev_labels = (labels > 0).long()  # 0=Flat, 1=Deviation
+            loss_dev = F.cross_entropy(out['aux_dev'], dev_labels)
+            
+            # Auxiliary loss 2: Event type (PSPL vs Binary, only for deviation events)
+            dev_mask = labels > 0
+            if dev_mask.sum() > 0:
+                type_labels = (labels[dev_mask] - 1)  # 0=PSPL, 1=Binary
+                loss_type = F.cross_entropy(out['aux_type'][dev_mask], type_labels)
+            else:
+                loss_type = torch.tensor(0.0, device=device)
+            
+            # Combined loss with auxiliary weights
+            loss = loss_main + 0.3 * loss_dev + 0.3 * loss_type
         else:
             loss = F.cross_entropy(out['logits'], labels, weight=class_weights)
 
@@ -304,11 +320,11 @@ def train_epoch(
             correct += (out['probs'].argmax(dim=1) == labels).sum()
             total_samples += batch_size
 
-    # Synchronize across GPUs
+    # Synchronize across GPUs (FIXED: Batched all_reduce)
     if dist.is_initialized():
-        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        dist.all_reduce(correct, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
+        metrics_tensor = torch.stack([total_loss, correct, total_samples])
+        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+        total_loss, correct, total_samples = metrics_tensor
     
     avg_loss = float(total_loss / total_samples)
     accuracy = float(correct / total_samples)
@@ -336,9 +352,25 @@ def evaluate(model, loader, class_weights, device, rank, config, return_predicti
         
         out = model(flux, delta_t, lengths=lengths)
         
-        # Compute loss
+        # Compute loss (FIXED: Added auxiliary hierarchical losses)
         if config.hierarchical:
-            loss = F.nll_loss(out['logits'], labels, weight=class_weights)
+            # Main loss (joint probability)
+            loss_main = F.nll_loss(out['logits'], labels, weight=class_weights)
+            
+            # Auxiliary loss 1: Deviation detection (Flat vs Deviation)
+            dev_labels = (labels > 0).long()  # 0=Flat, 1=Deviation
+            loss_dev = F.cross_entropy(out['aux_dev'], dev_labels)
+            
+            # Auxiliary loss 2: Event type (PSPL vs Binary, only for deviation events)
+            dev_mask = labels > 0
+            if dev_mask.sum() > 0:
+                type_labels = (labels[dev_mask] - 1)  # 0=PSPL, 1=Binary
+                loss_type = F.cross_entropy(out['aux_type'][dev_mask], type_labels)
+            else:
+                loss_type = torch.tensor(0.0, device=device)
+            
+            # Combined loss with auxiliary weights
+            loss = loss_main + 0.3 * loss_dev + 0.3 * loss_type
         else:
             loss = F.cross_entropy(out['logits'], labels, weight=class_weights)
         
@@ -354,11 +386,11 @@ def evaluate(model, loader, class_weights, device, rank, config, return_predicti
             all_predictions.append(predictions.cpu())
             all_labels.append(labels.cpu())
 
-    # Synchronize across GPUs
+    # Synchronize across GPUs (FIXED: Batched all_reduce)
     if dist.is_initialized():
-        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        dist.all_reduce(correct, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
+        metrics_tensor = torch.stack([total_loss, correct, total_samples])
+        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+        total_loss, correct, total_samples = metrics_tensor
     
     avg_loss = float(total_loss / total_samples)
     accuracy = float(correct / total_samples)
@@ -676,7 +708,9 @@ def main():
         betas=(0.9, 0.999)
     )
     
-    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+    # FIXED: GradScaler only needed for FP16 (not BF16)
+    use_fp16 = (model.amp_dtype == torch.float16)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_fp16) if torch.cuda.is_available() else None
     
     # Learning rate scheduler with warmup
     def lr_lambda(epoch):

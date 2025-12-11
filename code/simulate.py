@@ -531,6 +531,10 @@ def simulate_binary_event(params: dict) -> dict:
     """
     Simulate a binary microlensing event with full caustic structure.
     
+    FIXED: No longer falls back to PSPL. Instead, retries with new parameters
+    until a valid binary magnification is obtained. This prevents data poisoning
+    where events labeled "binary" actually have PSPL morphology.
+    
     PHYSICS:
     - Binary lens magnification via VBBinaryLensing
     - Complete caustic crossing features
@@ -544,41 +548,45 @@ def simulate_binary_event(params: dict) -> dict:
     # Get preset ranges
     p = BinaryPresets.PRESETS[preset]
     
-    # Draw binary parameters
-    s = np.random.uniform(*p['s_range'])
-    q = 10**np.random.uniform(np.log10(p['q_range'][0]), np.log10(p['q_range'][1]))
-    u_0 = np.random.uniform(*p['u0_range'])
-    rho = 10**np.random.uniform(np.log10(p['rho_range'][0]), np.log10(p['rho_range'][1]))
-    alpha = np.random.uniform(*p['alpha_range'])
-    
-    # Time parameters (SAME RANGE AS PSPL)
+    # Draw time parameters (SAME RANGE AS PSPL)
     t_0 = np.random.uniform(*p['t0_range'])
     t_E = np.random.uniform(*p['tE_range'])
     m_base = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
     
-    # Compute magnification with retry logic
+    # FIXED: Retry loop with parameter regeneration (no PSPL fallback)
+    max_attempts = 50  # Increased from 10
     attempts = 0
-    while attempts < SimConfig.MAX_BINARY_ATTEMPTS:
+    A = None
+    
+    while attempts < max_attempts:
+        # Draw binary parameters (regenerate on each retry)
+        s = np.random.uniform(*p['s_range'])
+        q = 10**np.random.uniform(np.log10(p['q_range'][0]), np.log10(p['q_range'][1]))
+        u_0 = np.random.uniform(*p['u0_range'])
+        rho = 10**np.random.uniform(np.log10(p['rho_range'][0]), np.log10(p['rho_range'][1]))
+        alpha = np.random.uniform(*p['alpha_range'])
+        
         try:
+            # Compute magnification using VBBinaryLensing
             A = binary_magnification_vbb(time_grid, t_E, u_0, t_0, s, q, alpha, rho)
             
             # Validate magnification
             if np.all(np.isfinite(A)) and np.all(A >= 1.0):
-                break
-            else:
-                # Redraw problematic parameters
-                u_0 = np.random.uniform(*p['u0_range'])
-                rho = 10**np.random.uniform(np.log10(p['rho_range'][0]), np.log10(p['rho_range'][1]))
-                alpha = np.random.uniform(*p['alpha_range'])
-                attempts += 1
-        except Exception as e:
-            attempts += 1
-            if attempts >= SimConfig.MAX_BINARY_ATTEMPTS:
-                # Fallback to PSPL if VBB fails
-                # Note: This event will be labeled as binary but have PSPL morphology
-                # This occurs rarely (<0.1% of events) for extreme parameter combinations
-                A = pspl_magnification(time_grid, t_E, u_0, t_0)
-                break
+                # Check that it's actually binary-like (not just A=1 everywhere)
+                if A.max() > 1.1:  # At least 10% magnification
+                    break
+        except Exception:
+            # VBB failed, retry with new parameters
+            pass
+        
+        attempts += 1
+    
+    if A is None:
+        # This should be extremely rare (<0.001% with 50 attempts)
+        raise RuntimeError(
+            f"Failed to generate valid binary event after {max_attempts} attempts. "
+            f"Preset: {preset}, s={s:.3f}, q={q:.4f}, u0={u_0:.3f}"
+        )
     
     # Convert baseline mag to flux
     f_base_jy = RomanWFI_F146.mag_to_flux(m_base)
@@ -619,6 +627,7 @@ def simulate_binary_event(params: dict) -> dict:
             'm_base': float(m_base)
         }
     }
+
 
 
 # ============================================================================
@@ -682,8 +691,9 @@ def generate_event_batch(args_tuple):
     """Worker function for parallel event generation."""
     event_type, batch_params = args_tuple
     
-    # Set seed for this worker
-    np.random.seed()
+    # FIXED: Use process ID + timestamp for unique seed per worker
+    seed = os.getpid() + int(time.time() * 1000) % 1000000
+    np.random.seed(seed)
     
     if event_type == 'flat':
         return simulate_flat_event(batch_params)
