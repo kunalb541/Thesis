@@ -1,3 +1,18 @@
+"""
+Roman Space Telescope Microlensing Classifier Evaluation Suite
+
+Comprehensive evaluation framework for trained models including:
+- Standard classification metrics
+- ROC curves and calibration plots
+- Physical parameter analysis
+- Temporal bias diagnostics
+- Early detection simulations
+- Probability evolution visualization
+
+Author: Thesis Implementation
+Date: December 2024
+"""
+
 import os
 import sys
 import json
@@ -7,7 +22,7 @@ import argparse
 import numpy as np
 import matplotlib
 try:
-    matplotlib.use('Agg') # Essential for HPC/Server use
+    matplotlib.use('Agg')
 except Exception:
     pass
 import matplotlib.pyplot as plt
@@ -31,18 +46,7 @@ try:
     current_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(current_dir))
     
-    # Try importing the God Mode model first
-    try:
-        from model import GodModeCausalGRU, GRUConfig
-        ModelClass = GodModeCausalGRU
-        ConfigClass = GRUConfig
-        print(">> Imported GodModeCausalGRU successfully.")
-    except ImportError:
-        # Fallback to older class names if file hasn't been updated
-        from model import CausalHybridModel, CausalConfig
-        ModelClass = CausalHybridModel
-        ConfigClass = CausalConfig
-        print(">> Imported CausalHybridModel (Fallback).")
+    from model import RomanMicrolensingGRU, GRUConfig
     
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -50,36 +54,74 @@ try:
 except ImportError as e:
     print(f"\nCRITICAL ERROR: Could not import 'model.py'")
     print(f"Error: {e}\n")
+    print("Make sure model.py is in the same directory.")
     sys.exit(1)
 
 # =============================================================================
-# PLOTTING SETUP
+# PLOTTING CONFIGURATION
 # =============================================================================
 sns.set_style("whitegrid")
 sns.set_context("paper", font_scale=1.4)
 plt.rcParams['figure.dpi'] = 300
-COLORS = ['#95a5a6', '#e74c3c', '#3498db'] # Flat (Grey), PSPL (Red), Binary (Blue)
+COLORS = ['#95a5a6', '#e74c3c', '#3498db']  # Flat (Grey), PSPL (Red), Binary (Blue)
+CLASS_NAMES = ['Flat', 'PSPL', 'Binary']
+
+# Physical constants from simulate.py
+AB_ZEROPOINT_JY = 3631.0
+MISSION_DURATION_DAYS = 1826.25
+
 
 # =============================================================================
-# CORE EVALUATOR CLASS
+# COMPREHENSIVE EVALUATOR
 # =============================================================================
-class ComprehensiveEvaluator:
-    def __init__(self, experiment_name: str, data_path: str, output_dir: str = None, 
-                 device: str = 'cuda', batch_size: int = 128, n_samples: Optional[int] = None,
-                 early_detection: bool = False, n_evolution_per_type: int = 0):
-        
+class RomanEvaluator:
+    """
+    Comprehensive evaluation suite for Roman microlensing classifier.
+    
+    Capabilities:
+        - Standard metrics (accuracy, precision, recall, F1)
+        - ROC curves and AUC scores
+        - Confusion matrices
+        - Calibration plots
+        - Physical parameter analysis
+        - Temporal bias diagnostics
+        - Early detection analysis
+        - Probability evolution visualization
+    """
+    
+    def __init__(
+        self, 
+        experiment_name: str, 
+        data_path: str, 
+        output_dir: Optional[str] = None, 
+        device: str = 'cuda', 
+        batch_size: int = 128, 
+        n_samples: Optional[int] = None,
+        early_detection: bool = False, 
+        n_evolution_per_type: int = 0
+    ):
+        """
+        Args:
+            experiment_name: Name of experiment to evaluate
+            data_path: Path to test dataset (.npz)
+            output_dir: Optional custom output directory
+            device: 'cuda' or 'cpu'
+            batch_size: Batch size for inference
+            n_samples: Subsample test set (for speed)
+            early_detection: Run early detection analysis
+            n_evolution_per_type: Number of evolution plots per class
+        """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.batch_size = batch_size
         self.n_samples = n_samples
         self.run_early_detection = early_detection
         self.n_evolution_per_type = n_evolution_per_type
         
-        # 1. Locate and Load Model
+        # Locate and load model
         self.model_path, self.exp_dir = self._find_model(experiment_name)
         
-        # 2. Setup Output Directory
+        # Setup output directory
         if output_dir is None:
-            # Create a specific evaluation folder inside the experiment folder
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             data_name = Path(data_path).stem
             self.output_dir = self.exp_dir / f'eval_{data_name}_{timestamp}'
@@ -89,19 +131,19 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         print("=" * 80)
-        print("ROMAN SPACE TELESCOPE - EVALUATION SUITE (Scientific Grade)")
+        print("ROMAN SPACE TELESCOPE - COMPREHENSIVE EVALUATION")
         print("=" * 80)
-        print(f"Experiment: {experiment_name}")
-        print(f"Model Path: {self.model_path}")
-        print(f"Data Path:  {data_path}")
-        print(f"Output Dir: {self.output_dir}")
-        print(f"Device:     {self.device}")
+        print(f"Experiment:  {experiment_name}")
+        print(f"Model Path:  {self.model_path}")
+        print(f"Data Path:   {data_path}")
+        print(f"Output Dir:  {self.output_dir}")
+        print(f"Device:      {self.device}")
         
-        # 3. Initialize Model and Data
-        self.model, self.config = self._load_model()
+        # Load model and data
+        self.model, self.config, self.checkpoint = self._load_model()
         self.data_dict = self._load_data(data_path)
         
-        # Unpack for ease of use
+        # Extract for convenience
         self.flux = self.data_dict['norm_flux']
         self.raw_flux = self.data_dict['raw_flux']
         self.delta_t = self.data_dict['delta_t']
@@ -110,371 +152,394 @@ class ComprehensiveEvaluator:
         self.timestamps = self.data_dict['timestamps']
         self.params = self.data_dict['params']
         
-        # 4. Run Core Inference
-        print("\n[Inference] Generating predictions...")
-        # We store sequence probs separately to avoid concatenation issues with massive arrays
-        self.probs, self.preds, self.confs, self.seq_probs_batches = self._run_inference()
+        # Run inference
+        print("\nRunning inference on test set...")
+        self.probs, self.preds, self.confs = self._run_inference()
         
-        # 5. Compute Metrics
-        self.metrics = self._compute_base_metrics()
+        # Compute metrics
+        self.metrics = self._compute_metrics()
 
     def _find_model(self, exp_name: str) -> Tuple[Path, Path]:
-        """Find the best_model.pt for the given experiment name."""
+        """Find best_model.pt for experiment."""
         search_roots = [Path('../results'), Path('results'), Path('.')]
         candidates = []
-        clean_name = exp_name.replace('*', '')
         
         for root in search_roots:
             if root.exists():
-                candidates.extend(list(root.glob(f"*{clean_name}*")))
+                candidates.extend(list(root.glob(f"*{exp_name}*")))
         
         if not candidates:
             if Path(exp_name).exists():
                 candidates = [Path(exp_name)]
             else:
-                raise FileNotFoundError(f"No experiment found matching '{exp_name}'")
-            
-        # Get most recent folder
-        best_exp = sorted(candidates, key=lambda x: x.stat().st_mtime)[-1]
-        model_file = best_exp / "best_model.pt"
+                raise FileNotFoundError(
+                    f"No experiment found matching '{exp_name}'\n"
+                    f"Searched in: {search_roots}"
+                )
+        
+        # Get most recent
+        exp_dir = sorted(candidates, key=lambda x: x.stat().st_mtime)[-1]
+        model_file = exp_dir / "best_model.pt"
         
         if not model_file.exists():
-            pt_files = list(best_exp.glob("*.pt"))
+            pt_files = list(exp_dir.glob("*.pt"))
             if pt_files:
                 model_file = pt_files[0]
             else:
-                raise FileNotFoundError(f"No model file (.pt) found in {best_exp}")
-            
-        return model_file, best_exp
+                raise FileNotFoundError(f"No .pt file found in {exp_dir}")
+        
+        return model_file, exp_dir
 
     def _load_model(self):
+        """Load model from checkpoint."""
+        print(f"\nLoading model from {self.model_path.name}...")
+        
         checkpoint = torch.load(self.model_path, map_location=self.device)
         
-        # Extract Config
+        # Extract config
         config_dict = checkpoint.get('config', {})
-        valid_keys = ConfigClass().__init__.__code__.co_varnames
+        valid_keys = set(GRUConfig.__annotations__.keys())
         clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
-        config = ConfigClass(**clean_conf)
+        config = GRUConfig(**clean_conf)
         
-        model = ModelClass(config).to(self.device)
+        # Create model
+        model = RomanMicrolensingGRU(config, dtype=torch.float32).to(self.device)
         
-        # Extract State Dict
-        state_dict = checkpoint.get('state_dict', checkpoint)
+        # Load weights
+        state_dict = checkpoint.get('state_dict', checkpoint.get('model_state_dict', checkpoint))
         clean_state = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        
         model.load_state_dict(clean_state, strict=False)
         model.eval()
         
-        print(f"Model Loaded: {count_parameters(model):,} parameters")
-        return model, config
+        n_params = count_parameters(model)
+        print(f"  Model: RomanMicrolensingGRU")
+        print(f"  Parameters: {n_params:,}")
+        print(f"  Config: d_model={config.d_model}, n_layers={config.n_layers}")
+        
+        return model, config, checkpoint
 
     def _load_data(self, path):
-        print(f"Loading data from {path}...")
+        """Load and preprocess test data."""
+        print(f"\nLoading data from {path}...")
         data = np.load(path, allow_pickle=True)
         
-        flux = data['flux']
-        y = data['labels']
+        # Extract arrays
+        raw_flux = data['flux'].astype(np.float32)
+        if raw_flux.ndim == 3:
+            raw_flux = raw_flux.squeeze(-1)
         
-        if 'delta_t' not in data:
-            print("WARNING: 'delta_t' missing. Assuming constant cadence.")
-            delta_t = np.zeros_like(flux)
+        y = data['labels'].astype(np.int64)
+        
+        # Delta_t
+        if 'delta_t' in data:
+            delta_t = data['delta_t'].astype(np.float32)
+            if delta_t.ndim == 3:
+                delta_t = delta_t.squeeze(-1)
         else:
-            delta_t = data['delta_t']
-            
-        # Handle Timestamps
+            print("  Warning: delta_t missing, using zeros")
+            delta_t = np.zeros_like(raw_flux)
+        
+        # Timestamps
         if 'timestamps' in data:
-            raw_ts = data['timestamps']
+            timestamps = data['timestamps'].astype(np.float32)
+            if timestamps.ndim == 3:
+                timestamps = timestamps.squeeze(-1)
         else:
-            raw_ts = np.linspace(0, 100, flux.shape[1])
-            
-        # Load params if available
-        params = {}
-        for key in ['params_flat', 'params_pspl', 'params_binary']:
-            short_key = key.replace('params_', '')
-            if key in data:
-                if f"{key}_keys" in data:
-                    keys = data[f"{key}_keys"]
-                    values = data[key]
-                    params[short_key] = [dict(zip(keys, v)) for v in values]
-                else:
-                    params[short_key] = data[key]
-
-        # --- NORMALIZATION (CRITICAL FIX) ---
-        # We must normalize using statistics derived from the data itself to match training
-        print("Normalizing flux data...")
-        raw_flux = flux.copy()
-        norm_flux = self._normalize_flux(flux)
-
-        # Subsampling Logic
-        if self.n_samples and self.n_samples < len(flux):
-            print(f"Subsampling {len(flux)} -> {self.n_samples} events...")
-            idx = np.random.choice(len(flux), self.n_samples, replace=False)
-            
-            norm_flux = norm_flux[idx]
-            raw_flux = raw_flux[idx]
-            delta_t = delta_t[idx]
-            y = y[idx]
-            
-            # Smart Timestamp Slicing
-            if raw_ts.ndim == 1:
-                timestamps = np.tile(raw_ts, (len(norm_flux), 1))
-            else:
-                timestamps = raw_ts[idx]
-                
-            print("Note: Physical limit checks will use population stats due to subsampling.")
+            print("  Warning: timestamps missing, generating linear grid")
+            timestamps = np.linspace(0, MISSION_DURATION_DAYS, raw_flux.shape[1])
+            timestamps = np.tile(timestamps, (len(raw_flux), 1))
+        
+        # Lengths
+        if 'lengths' in data:
+            lengths = data['lengths'].astype(np.int64)
         else:
-            if raw_ts.ndim == 1:
-                timestamps = np.tile(raw_ts, (len(norm_flux), 1))
-            else:
-                timestamps = raw_ts
-
-        # Compute lengths (valid non-padding steps)
-        # Using the raw flux for length calculation is safer if normalization makes things 0
-        lengths = np.maximum((raw_flux != 0).sum(axis=1), 1)
-            
+            lengths = np.maximum((raw_flux != 0).sum(axis=1), 1)
+        
+        # Subsample if requested
+        if self.n_samples is not None:
+            n = min(self.n_samples, len(raw_flux))
+            indices = np.random.choice(len(raw_flux), n, replace=False)
+            raw_flux = raw_flux[indices]
+            y = y[indices]
+            delta_t = delta_t[indices]
+            timestamps = timestamps[indices]
+            lengths = lengths[indices]
+        
+        print(f"  Loaded {len(raw_flux):,} samples")
+        print(f"  Classes: {np.bincount(y)}")
+        
+        # Check for physical realism flags
+        if 'physical_realism' in data:
+            print(f"  Physical realism: {data['physical_realism']}")
+        if 'ab_zeropoint_jy' in data:
+            print(f"  AB zero point: {data['ab_zeropoint_jy']} Jy")
+        
+        # Normalize flux (matching train.py)
+        print("\nNormalizing flux...")
+        
+        # Use checkpoint stats if available
+        if 'normalization_stats' in self.checkpoint:
+            stats = self.checkpoint['normalization_stats']
+            print(f"  Using checkpoint stats: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
+        else:
+            # Compute from data (matching train.py logic)
+            stats = self._compute_normalization_stats(raw_flux)
+            print(f"  Computed from data: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
+        
+        # Apply normalization
+        mask = (raw_flux != 0)
+        norm_flux = np.where(mask, (raw_flux - stats['median']) / stats['iqr'], 0.0)
+        
+        # Load parameters if available
+        params = self._load_parameters(data, y)
+        
         return {
-            'norm_flux': norm_flux,
             'raw_flux': raw_flux,
+            'norm_flux': norm_flux,
             'delta_t': delta_t,
             'y': y,
             'lengths': lengths,
             'timestamps': timestamps,
-            'params': params
+            'params': params,
+            'stats': stats
         }
     
-    def _normalize_flux(self, flux: np.ndarray) -> np.ndarray:
-        """Applies Median/IQR normalization to match training data."""
-        # Calculate stats on a subset for speed
-        subset_size = min(len(flux), 10000)
-        # Flatten to calculate global stats, ignoring zeros (padding)
-        sample_vals = flux[:subset_size].flatten()
-        sample_vals = sample_vals[sample_vals != 0]
+    def _compute_normalization_stats(self, flux: np.ndarray) -> dict:
+        """Compute normalization statistics matching train.py."""
+        sample_size = min(10000, len(flux))
+        sample_flux = flux[:sample_size]
         
-        if len(sample_vals) == 0:
-            return flux 
-
-        median = np.median(sample_vals)
-        q75, q25 = np.percentile(sample_vals, [75, 25])
-        iqr = q75 - q25
+        valid_flux = sample_flux[sample_flux != 0]
+        valid_flux = valid_flux[~np.isnan(valid_flux)]
+        
+        if len(valid_flux) == 0:
+            return {'median': 0.0, 'iqr': 1.0}
+        
+        median = float(np.median(valid_flux))
+        q75, q25 = np.percentile(valid_flux, [75, 25])
+        iqr = float(q75 - q25)
+        
         if iqr < 1e-6:
             iqr = 1.0
-            
-        print(f"  > Norm Stats | Median: {median:.4f} | IQR: {iqr:.4f}")
         
-        # Apply to full dataset
-        norm_flux = np.zeros_like(flux, dtype=np.float32)
-        chunk_size = 50000
+        return {'median': median, 'iqr': iqr}
+    
+    def _load_parameters(self, data, labels):
+        """Load event parameters if available."""
+        params = {'flat': [], 'pspl': [], 'binary': []}
         
-        # Process in chunks
-        for i in range(0, len(flux), chunk_size):
-            end = min(i + chunk_size, len(flux))
-            chunk = flux[i:end]
-            mask = (chunk != 0)
-            chunk_norm = np.where(mask, (chunk - median) / iqr, 0.0)
-            norm_flux[i:end] = chunk_norm
-            
-        return norm_flux
+        for key in ['params_flat', 'params_pspl', 'params_binary']:
+            short_key = key.replace('params_', '')
+            if key in data and f"{key}_keys" in data:
+                keys = data[f"{key}_keys"]
+                values = data[key]
+                
+                for i, row in enumerate(values):
+                    param_dict = {k: float(row[j]) for j, k in enumerate(keys)}
+                    params[short_key].append(param_dict)
+        
+        return params
 
     def _run_inference(self):
+        """Run inference on test set."""
+        n = len(self.flux)
         all_probs = []
-        seq_probs_batches = []
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(self.flux), self.batch_size), desc="Inferring"):
-                end = min(i + self.batch_size, len(self.flux))
+            for i in tqdm(range(0, n, self.batch_size), desc="Inference"):
+                batch_end = min(i + self.batch_size, n)
                 
-                f = torch.tensor(self.flux[i:end], dtype=torch.float32).to(self.device)
-                d = torch.tensor(self.delta_t[i:end], dtype=torch.float32).to(self.device)
-                l = torch.tensor(self.lengths[i:end], dtype=torch.long).to(self.device)
+                flux_batch = torch.tensor(
+                    self.flux[i:batch_end], 
+                    dtype=torch.float32
+                ).to(self.device)
                 
-                # CRITICAL: Only return sequences if we actually need them
-                return_seq = self.run_early_detection or (self.n_evolution_per_type > 0)
+                dt_batch = torch.tensor(
+                    self.delta_t[i:batch_end], 
+                    dtype=torch.float32
+                ).to(self.device)
                 
-                out = self.model(f, d, lengths=l, return_all_timesteps=return_seq)
-                all_probs.append(out['probs'].cpu().numpy())
+                len_batch = torch.tensor(
+                    self.lengths[i:batch_end], 
+                    dtype=torch.long
+                ).to(self.device)
                 
-                if return_seq:
-                    if 'probs_seq' in out:
-                        # Store as list of batch arrays to prevent massive allocation
-                        seq_probs_batches.append(out['probs_seq'].cpu().numpy())
-                    else:
-                        pass 
-                
-        probs = np.concatenate(all_probs)
+                output = self.model(flux_batch, dt_batch, lengths=len_batch)
+                probs = output['probs'].cpu().numpy()
+                all_probs.append(probs)
+        
+        probs = np.concatenate(all_probs, axis=0)
         preds = probs.argmax(axis=1)
         confs = probs.max(axis=1)
         
-        return probs, preds, confs, seq_probs_batches
+        return probs, preds, confs
 
-    def _compute_base_metrics(self):
-        acc = accuracy_score(self.y, self.preds)
-        try:
-            auc = roc_auc_score(self.y, self.probs, multi_class='ovr', average='weighted')
-        except:
-            auc = 0.0
-            
-        report = classification_report(self.y, self.preds, output_dict=True)
-        cm = confusion_matrix(self.y, self.preds)
+    def _compute_metrics(self):
+        """Compute classification metrics."""
+        print("\nComputing metrics...")
         
-        print(f"\nResults:")
-        print(f"  Accuracy: {acc:.4f}")
-        print(f"  AUC:      {auc:.4f}")
+        metrics = {
+            'accuracy': accuracy_score(self.y, self.preds),
+            'precision_macro': precision_score(self.y, self.preds, average='macro', zero_division=0),
+            'recall_macro': recall_score(self.y, self.preds, average='macro', zero_division=0),
+            'f1_macro': f1_score(self.y, self.preds, average='macro', zero_division=0),
+        }
         
-        return {'acc': acc, 'auc': auc, 'report': report, 'cm': cm}
-
-    # =========================================================================
-    # VISUALIZATIONS
-    # =========================================================================
-
-    def plot_roc_curve(self):
-        fig, ax = plt.subplots(figsize=(10, 8))
-        classes = ['Flat', 'PSPL', 'Binary']
+        # Per-class metrics
+        for i, name in enumerate(CLASS_NAMES):
+            metrics[f'precision_{name}'] = precision_score(
+                self.y, self.preds, labels=[i], average='macro', zero_division=0
+            )
+            metrics[f'recall_{name}'] = recall_score(
+                self.y, self.preds, labels=[i], average='macro', zero_division=0
+            )
+            metrics[f'f1_{name}'] = f1_score(
+                self.y, self.preds, labels=[i], average='macro', zero_division=0
+            )
         
-        for i, cls in enumerate(classes):
-            if i >= self.probs.shape[1]: continue
-            y_bin = (self.y == i).astype(int)
-            if len(np.unique(y_bin)) < 2: continue
-            
-            fpr, tpr, _ = roc_curve(y_bin, self.probs[:, i])
-            auc = roc_auc_score(y_bin, self.probs[:, i])
-            ax.plot(fpr, tpr, lw=3, label=f'{cls} (AUC={auc:.3f})', color=COLORS[i])
-            
-        ax.plot([0, 1], [0, 1], 'k--', lw=2)
-        ax.set_xlabel('False Positive Rate')
-        ax.set_ylabel('True Positive Rate')
-        ax.set_title('ROC Curves')
-        ax.legend()
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'roc_curve.png')
-        plt.close()
+        print("\nMetrics:")
+        print(f"  Accuracy:  {metrics['accuracy']:.4f}")
+        print(f"  Precision: {metrics['precision_macro']:.4f}")
+        print(f"  Recall:    {metrics['recall_macro']:.4f}")
+        print(f"  F1 Score:  {metrics['f1_macro']:.4f}")
+        
+        return metrics
 
     def plot_confusion_matrix(self):
-        cm = self.metrics['cm']
-        # Normalize with safety
-        cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
+        """Plot confusion matrix."""
+        print("\nGenerating confusion matrix...")
         
-        plt.figure(figsize=(8, 7))
-        sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
-                   xticklabels=['Flat', 'PSPL', 'Binary'],
-                   yticklabels=['Flat', 'PSPL', 'Binary'])
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        plt.title('Confusion Matrix')
+        cm = confusion_matrix(self.y, self.preds)
+        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Absolute counts
+        sns.heatmap(
+            cm, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES,
+            ax=ax1, cbar_kws={'label': 'Count'}
+        )
+        ax1.set_title('Confusion Matrix (Counts)')
+        ax1.set_ylabel('True Label')
+        ax1.set_xlabel('Predicted Label')
+        
+        # Normalized
+        sns.heatmap(
+            cm_norm, annot=True, fmt='.3f', cmap='Blues',
+            xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES,
+            ax=ax2, cbar_kws={'label': 'Fraction'}
+        )
+        ax2.set_title('Confusion Matrix (Normalized)')
+        ax2.set_ylabel('True Label')
+        ax2.set_xlabel('Predicted Label')
+        
         plt.tight_layout()
         plt.savefig(self.output_dir / 'confusion_matrix.png')
         plt.close()
 
+    def plot_roc_curve(self):
+        """Plot ROC curves."""
+        print("\nGenerating ROC curves...")
+        
+        # One-hot encode labels
+        y_onehot = np.eye(3)[self.y]
+        
+        plt.figure(figsize=(10, 8))
+        
+        for i, name in enumerate(CLASS_NAMES):
+            fpr, tpr, _ = roc_curve(y_onehot[:, i], self.probs[:, i])
+            auc = roc_auc_score(y_onehot[:, i], self.probs[:, i])
+            plt.plot(fpr, tpr, color=COLORS[i], lw=2, 
+                    label=f'{name} (AUC = {auc:.3f})')
+        
+        plt.plot([0, 1], [0, 1], 'k--', lw=1, label='Random')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curves')
+        plt.legend(loc="lower right")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(self.output_dir / 'roc_curves.png')
+        plt.close()
+
     def plot_calibration(self):
-        """Reliability Diagram + Confidence Histogram"""
-        correct = (self.preds == self.y)
+        """Plot calibration curve."""
+        print("\nGenerating calibration plot...")
         
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        plt.figure(figsize=(10, 8))
         
-        # Reliability
         bins = np.linspace(0, 1, 11)
-        accs, centers = [], []
-        for i in range(len(bins)-1):
-            mask = (self.confs >= bins[i]) & (self.confs < bins[i+1])
-            if mask.sum() > 0:
-                accs.append(correct[mask].mean())
-                centers.append((bins[i] + bins[i+1])/2)
         
-        ax1.plot([0, 1], [0, 1], 'k--', alpha=0.5)
-        ax1.plot(centers, accs, 'o-', lw=3, color='purple')
-        ax1.set_xlabel('Confidence')
-        ax1.set_ylabel('Accuracy')
-        ax1.set_title('Reliability Diagram')
+        for i, name in enumerate(CLASS_NAMES):
+            class_mask = self.y == i
+            if class_mask.sum() == 0:
+                continue
+            
+            probs_class = self.probs[class_mask, i]
+            preds_class = self.preds[class_mask]
+            correct = (preds_class == i).astype(float)
+            
+            bin_means_pred = []
+            bin_means_true = []
+            
+            for j in range(len(bins) - 1):
+                bin_mask = (probs_class >= bins[j]) & (probs_class < bins[j+1])
+                if bin_mask.sum() > 0:
+                    bin_means_pred.append(probs_class[bin_mask].mean())
+                    bin_means_true.append(correct[bin_mask].mean())
+            
+            if bin_means_pred:
+                plt.plot(bin_means_pred, bin_means_true, 'o-', 
+                        color=COLORS[i], lw=2, markersize=8, label=name)
         
-        # Histogram
-        ax2.hist(self.confs[correct], bins=20, alpha=0.5, color='green', label='Correct', density=True)
-        ax2.hist(self.confs[~correct], bins=20, alpha=0.5, color='red', label='Incorrect', density=True)
-        ax2.set_xlabel('Confidence')
-        ax2.set_title('Confidence Distribution')
-        ax2.legend()
-        
+        plt.plot([0, 1], [0, 1], 'k--', lw=1, label='Perfect Calibration')
+        plt.xlabel('Mean Predicted Probability')
+        plt.ylabel('Fraction of Positives')
+        plt.title('Calibration Plot')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(self.output_dir / 'calibration.png')
         plt.close()
 
-    def plot_fine_early_detection(self):
-        """
-        Calculates accuracy at 50 different observation percentages.
-        Refactored to handle batch-wise sequence probabilities correctly.
-        """
-        if not self.seq_probs_batches:
-            print("[Warning] No sequence probabilities found. Skipping Early Detection.")
-            return
-
-        print("\n[Analysis] Running Fine-Grained Early Detection...")
-        
-        fractions = np.linspace(0.05, 1.0, 50)
-        
-        # We accumulate correct/total counts per fraction
-        total_correct = {f: 0 for f in fractions}
-        total_count = {f: 0 for f in fractions}
-        
-        current_idx = 0
-        
-        for batch_prob in tqdm(self.seq_probs_batches, desc="Early Detect Batches"):
-            B, T, C = batch_prob.shape
-            
-            # Get corresponding metadata for this batch
-            batch_lens = self.lengths[current_idx : current_idx + B]
-            batch_y = self.y[current_idx : current_idx + B]
-            
-            for frac in fractions:
-                # Vectorized index calculation
-                t_idx = (batch_lens * frac).astype(int)
-                t_idx = np.clip(t_idx - 1, 0, T-1)
-                
-                # Gather predictions: batch_prob[row, t_idx]
-                preds_at_frac = batch_prob[np.arange(B), t_idx].argmax(axis=1)
-                
-                correct = (preds_at_frac == batch_y).sum()
-                total_correct[frac] += correct
-                total_count[frac] += B
-            
-            current_idx += B
-            
-        # Compile results
-        acc_list = [total_correct[f] / max(total_count[f], 1) for f in fractions]
-            
-        plt.figure(figsize=(10, 6))
-        plt.plot(fractions*100, acc_list, 'o-', color='purple', lw=2)
-        plt.axhline(0.9, color='green', ls='--', label='90% Accuracy')
-        plt.xlabel('% of Light Curve Observed')
-        plt.ylabel('Accuracy')
-        plt.title('Early Detection Performance')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'fine_early_detection.png')
-        plt.close()
-
     def analyze_physical_limits(self):
-        """Analyzes Accuracy vs Impact Parameter (u0)."""
-        print("\n[Analysis] Verifying Physical Limits (u0 dependency)...")
-        if 'binary' not in self.params:
-            print("  Skipping: No binary parameters found.")
+        """Analyze accuracy vs physical parameters."""
+        print("\nAnalyzing physical parameter dependencies...")
+        
+        if 'binary' not in self.params or len(self.params['binary']) == 0:
+            print("  No binary parameters available")
             return
-
-        bin_mask = (self.y == 2)
-        if bin_mask.sum() == 0: return
         
         try:
-            u0_vals = np.array([p['u_0'] for p in self.params['binary']])
+            # Extract u0 for binary events
+            u0_vals = np.array([p.get('u0', p.get('u_0', np.nan)) 
+                               for p in self.params['binary']])
             
+            # Find binary events in predictions
+            bin_mask = self.y == 2
             bin_preds = self.preds[bin_mask]
             bin_correct = (bin_preds == 2).astype(int)
             
-            # Heuristic alignment check
-            if len(u0_vals) != len(bin_correct):
-                print("  Warning: Parameter count mismatch (Subsampling?). Attempting to align...")
-                min_len = min(len(u0_vals), len(bin_correct))
-                u0_vals = u0_vals[:min_len]
-                bin_correct = bin_correct[:min_len]
+            # Align arrays (handle subsampling)
+            min_len = min(len(u0_vals), len(bin_correct))
+            u0_vals = u0_vals[:min_len]
+            bin_correct = bin_correct[:min_len]
             
-            bins = np.logspace(np.log10(1e-4), np.log10(1.0), 15)
+            # Remove NaNs
+            valid = ~np.isnan(u0_vals)
+            u0_vals = u0_vals[valid]
+            bin_correct = bin_correct[valid]
+            
+            if len(u0_vals) == 0:
+                print("  No valid u0 values found")
+                return
+            
+            # Bin by u0
+            bins = np.logspace(np.log10(max(1e-4, u0_vals.min())), 
+                             np.log10(min(1.0, u0_vals.max())), 15)
             digitized = np.digitize(u0_vals, bins)
             
             accs, centers = [], []
@@ -484,13 +549,18 @@ class ComprehensiveEvaluator:
                     accs.append(bin_correct[mask].mean())
                     centers.append(np.sqrt(bins[i-1] * bins[i]))
             
+            if not accs:
+                print("  Insufficient data for u0 analysis")
+                return
+            
             plt.figure(figsize=(10, 6))
-            plt.semilogx(centers, accs, 'o-', color='blue', lw=2)
-            plt.xlabel('Impact Parameter ($u_0$)')
+            plt.semilogx(centers, accs, 'o-', color='blue', lw=2, markersize=8)
+            plt.xlabel('Impact Parameter (u₀)')
             plt.ylabel('Binary Classification Accuracy')
             plt.title('Physical Detection Limits')
             plt.axvspan(1e-4, 0.15, color='green', alpha=0.1, label='Strong Caustics')
             plt.axvspan(0.3, 1.0, color='red', alpha=0.1, label='Weak/PSPL-like')
+            plt.ylim([0, 1.05])
             plt.legend()
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
@@ -498,164 +568,233 @@ class ComprehensiveEvaluator:
             plt.close()
             
         except Exception as e:
-            print(f"  Error in physical limits: {e}")
+            print(f"  Error in physical limits analysis: {e}")
 
     def diagnose_temporal_bias(self):
-        """Checks if model is cheating using t0."""
-        print("\n[Analysis] Checking Temporal Bias (t0 distribution)...")
-        if 'pspl' not in self.params or 'binary' not in self.params: return
+        """Check for temporal bias in classifications."""
+        print("\nDiagnosing temporal bias...")
+        
+        if 'pspl' not in self.params or 'binary' not in self.params:
+            print("  Parameters not available")
+            return
+        
+        if len(self.params['pspl']) == 0 or len(self.params['binary']) == 0:
+            print("  Insufficient parameter data")
+            return
         
         try:
-            t0_pspl = [p['t_0'] for p in self.params['pspl']]
-            t0_bin = [p['t_0'] for p in self.params['binary']]
+            # Extract t0 values
+            t0_pspl = np.array([p.get('t0', p.get('t_0', np.nan)) 
+                               for p in self.params['pspl']])
+            t0_bin = np.array([p.get('t0', p.get('t_0', np.nan)) 
+                              for p in self.params['binary']])
             
-            # Truncate to match if subsampled (heuristic)
-            if self.n_samples:
-                limit = self.n_samples // 3 # Rough estimate
-                t0_pspl = t0_pspl[:limit]
-                t0_bin = t0_bin[:limit]
-
-            plt.figure(figsize=(10, 6))
-            plt.hist(t0_pspl, bins=30, alpha=0.5, density=True, label='PSPL t0')
-            plt.hist(t0_bin, bins=30, alpha=0.5, density=True, label='Binary t0')
-            plt.xlabel('Peak Time ($t_0$)')
-            plt.title('Temporal Bias Diagnostic')
+            # Remove NaNs
+            t0_pspl = t0_pspl[~np.isnan(t0_pspl)]
+            t0_bin = t0_bin[~np.isnan(t0_bin)]
+            
+            if len(t0_pspl) == 0 or len(t0_bin) == 0:
+                print("  No valid t0 values found")
+                return
+            
+            # Plot distributions
+            plt.figure(figsize=(12, 6))
+            
+            plt.subplot(1, 2, 1)
+            plt.hist(t0_pspl, bins=30, alpha=0.6, density=True, 
+                    color=COLORS[1], label='PSPL', edgecolor='black')
+            plt.hist(t0_bin, bins=30, alpha=0.6, density=True, 
+                    color=COLORS[2], label='Binary', edgecolor='black')
+            plt.xlabel('Peak Time (t₀) [days]')
+            plt.ylabel('Density')
+            plt.title('t₀ Distribution (Should be Identical)')
             plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # KS test
+            stat, pval = ks_2samp(t0_pspl, t0_bin)
+            
+            plt.subplot(1, 2, 2)
+            plt.text(0.1, 0.5, 
+                    f"Kolmogorov-Smirnov Test:\n\n"
+                    f"Statistic: {stat:.4f}\n"
+                    f"p-value: {pval:.4f}\n\n"
+                    f"Interpretation:\n"
+                    f"p > 0.05: Distributions are similar (good)\n"
+                    f"p < 0.05: Distributions differ (bias!)",
+                    transform=plt.gca().transAxes,
+                    fontsize=12,
+                    verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            plt.axis('off')
+            
             plt.tight_layout()
             plt.savefig(self.output_dir / 'temporal_bias_check.png')
             plt.close()
             
-            stat, pval = ks_2samp(t0_pspl, t0_bin)
-            print(f"  t0 Distribution Check: KS-stat={stat:.3f}, p-value={pval:.3f}")
+            print(f"  KS test: stat={stat:.4f}, p-value={pval:.4f}")
+            if pval < 0.05:
+                print("  WARNING: Significant temporal bias detected!")
+            else:
+                print("  No significant temporal bias (good)")
+                
         except Exception as e:
-            print(f"  Error in temporal bias: {e}")
+            print(f"  Error in temporal bias analysis: {e}")
 
     def plot_evolution_examples(self):
-        """Plots trajectory of Flux, Probability, and Confidence."""
-        print(f"\n[Visualizations] Generating {self.n_evolution_per_type} evolution plots per class...")
+        """Plot probability evolution for sample events."""
+        print(f"\nGenerating {self.n_evolution_per_type} evolution plots per class...")
         
-        classes = ['Flat', 'PSPL', 'Binary']
-        
-        for i, cls in enumerate(classes):
+        for i, cls_name in enumerate(CLASS_NAMES):
+            # Find correctly classified events
             candidates = np.where((self.y == i) & (self.preds == i))[0]
-            if len(candidates) == 0: continue
             
-            selection = np.random.choice(candidates, min(len(candidates), self.n_evolution_per_type), replace=False)
+            if len(candidates) == 0:
+                print(f"  No correct predictions for {cls_name}")
+                continue
             
-            for idx in selection:
-                self._plot_single_evolution(idx, cls)
+            # Random selection
+            n_plot = min(len(candidates), self.n_evolution_per_type)
+            selection = np.random.choice(candidates, n_plot, replace=False)
+            
+            for idx in tqdm(selection, desc=f"  {cls_name}"):
+                self._plot_single_evolution(idx, cls_name, i)
 
-    def _plot_single_evolution(self, idx, true_cls):
-        # 1. Get Prediction Sequence
-        # Since we stored batches, we need to find the specific sequence
-        # For simplicity, re-run inference on just this one item
+    def _plot_single_evolution(self, idx: int, cls_name: str, cls_idx: int):
+        """Plot single event evolution."""
+        # Rerun model with timestep outputs
         f = torch.tensor(self.flux[idx], dtype=torch.float32).unsqueeze(0).to(self.device)
         d = torch.tensor(self.delta_t[idx], dtype=torch.float32).unsqueeze(0).to(self.device)
         l = torch.tensor([self.lengths[idx]], dtype=torch.long).to(self.device)
         
         with torch.no_grad():
-            out = self.model(f, d, lengths=l, return_all_timesteps=True)
-            if 'probs_seq' not in out: return
-            probs = out['probs_seq'][0].cpu().numpy()
-            
+            output = self.model(f, d, lengths=l, return_all_timesteps=True)
+            if 'probs_seq' not in output:
+                return
+            probs = output['probs_seq'][0].cpu().numpy()
+        
         T = self.lengths[idx]
         times = self.timestamps[idx][:T]
-        raw_f = self.raw_flux[idx][:T] # Use RAW flux for plotting
+        raw_flux = self.raw_flux[idx][:T]
         probs = probs[:T]
         
-        # === MAGNITUDE CONVERSION (CRITICAL FIX) ===
-        # Handle zero/negative flux (noise)
-        valid_mask = raw_f > 0
-        mags = np.full_like(raw_f, 25.0) # Background limit
-        # m = -2.5 * log10(flux) + ZP
-        # Assuming ZP makes baseline ~20-21 (Roman W149)
-        # Using ZP=22 as generic standard
-        mags[valid_mask] = 22.0 - 2.5 * np.log10(raw_f[valid_mask])
+        # Convert flux to magnitude for visualization
+        valid_mask = raw_flux > 0
+        mags = np.full_like(raw_flux, 25.0)
+        if valid_mask.any():
+            # Use AB system: m = -2.5 * log10(flux / 3631) + offset
+            # Adjust offset for typical baseline
+            mags[valid_mask] = 22.0 - 2.5 * np.log10(raw_flux[valid_mask] / AB_ZEROPOINT_JY * 1e10)
         
+        # Create figure
         fig = plt.figure(figsize=(12, 10))
         gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.5, 1], hspace=0.1)
         
-        # 1. Light Curve (Inverted Magnitude)
+        # 1. Light curve
         ax0 = fig.add_subplot(gs[0])
-        # Mask Padding (strictly non-zero)
-        plot_mask = (raw_f != 0)
-        ax0.scatter(times[plot_mask], mags[plot_mask], c='k', s=10, alpha=0.6, label='W149 Magnitude')
-        ax0.invert_yaxis() # Brighter is Up
-        ax0.set_ylabel('Magnitude')
-        ax0.set_title(f'Event {idx} Evolution (True: {true_cls})')
-        ax0.legend()
+        plot_mask = (raw_flux != 0)
+        ax0.scatter(times[plot_mask], mags[plot_mask], c='k', s=10, alpha=0.6)
+        ax0.invert_yaxis()
+        ax0.set_ylabel('Magnitude (AB)')
+        ax0.set_title(f'Event {idx} - {cls_name}')
         ax0.grid(True, alpha=0.3)
         
-        # 2. Probability
+        # 2. Probabilities
         ax1 = fig.add_subplot(gs[1], sharex=ax0)
-        for i, cls in enumerate(['Flat', 'PSPL', 'Binary']):
-            ax1.plot(times, probs[:, i], color=COLORS[i], lw=2, label=cls)
+        for i, name in enumerate(CLASS_NAMES):
+            ax1.plot(times, probs[:, i], color=COLORS[i], lw=2, label=name)
         ax1.set_ylabel('Probability')
+        ax1.set_ylim([-0.05, 1.05])
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
         
         # 3. Confidence
         ax2 = fig.add_subplot(gs[2], sharex=ax0)
         conf = probs.max(axis=1)
-        ax2.plot(times, conf, color='purple', lw=2, label='Confidence')
-        ax2.axhline(0.9, color='green', ls='--', label='Trigger')
+        ax2.plot(times, conf, color='purple', lw=2)
+        ax2.axhline(0.9, color='green', ls='--', alpha=0.5, label='High Confidence')
         ax2.set_ylabel('Confidence')
         ax2.set_xlabel('Time (days)')
+        ax2.set_ylim([0, 1.05])
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        plt.savefig(self.output_dir / f'evolution_{true_cls}_{idx}.png')
+        plt.tight_layout()
+        plt.savefig(self.output_dir / f'evolution_{cls_name}_{idx}.png')
         plt.close()
 
     def run(self):
-        self.plot_roc_curve()
-        self.plot_confusion_matrix()
-        self.plot_calibration()
+        """Run full evaluation suite."""
+        print("\n" + "=" * 80)
+        print("RUNNING EVALUATION SUITE")
+        print("=" * 80)
         
-        if self.run_early_detection:
-            self.plot_fine_early_detection()
-            
+        self.plot_confusion_matrix()
+        self.plot_roc_curve()
+        self.plot_calibration()
         self.analyze_physical_limits()
         self.diagnose_temporal_bias()
         
         if self.n_evolution_per_type > 0:
             self.plot_evolution_examples()
-            
+        
+        # Save summary
         summary = {
-            'metrics': {k: float(v) for k, v in self.metrics.items() if isinstance(v, (int, float))},
-            'config': str(self.config),
+            'metrics': {k: float(v) for k, v in self.metrics.items()},
+            'model_config': {k: v for k, v in self.config.__dict__.items()},
+            'test_samples': int(len(self.y)),
             'timestamp': datetime.now().isoformat()
         }
-        with open(self.output_dir / 'summary.json', 'w') as f:
+        
+        with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
             json.dump(summary, f, indent=2)
-            
-        print(f"\n[Done] Evaluation complete. Results at: {self.output_dir}")
+        
+        # Print classification report
+        print("\n" + "=" * 80)
+        print("CLASSIFICATION REPORT")
+        print("=" * 80)
+        print(classification_report(self.y, self.preds, target_names=CLASS_NAMES, digits=4))
+        
+        print("\n" + "=" * 80)
+        print(f"Evaluation complete. Results saved to: {self.output_dir}")
+        print("=" * 80)
+
 
 # =============================================================================
-# CLI
+# COMMAND LINE INTERFACE
 # =============================================================================
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="God Mode Evaluation Suite")
+    parser = argparse.ArgumentParser(
+        description="Comprehensive evaluation suite for Roman microlensing classifier",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     
-    parser.add_argument('--experiment_name', required=True, type=str, help="Name of experiment to find model")
-    parser.add_argument('--data', required=True, type=str, help="Path to .npz data")
-    parser.add_argument('--output_dir', type=str, default=None, help="Optional custom output path")
+    parser.add_argument('--experiment_name', required=True, 
+                       help="Name of experiment to evaluate")
+    parser.add_argument('--data', required=True, 
+                       help="Path to test dataset (.npz)")
+    parser.add_argument('--output_dir', default=None, 
+                       help="Optional custom output directory")
     
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--n_samples', type=int, default=None, help="Subsample test set")
+    parser.add_argument('--batch_size', type=int, default=128,
+                       help="Batch size for inference")
+    parser.add_argument('--n_samples', type=int, default=None,
+                       help="Subsample test set for speed")
+    parser.add_argument('--device', default='cuda',
+                       help="Device: cuda or cpu")
     
-    parser.add_argument('--early_detection', action='store_true', help="Run fine-grained early detection")
-    parser.add_argument('--n_evolution_per_type', type=int, default=0, help="Number of evolution plots per class")
+    parser.add_argument('--n_evolution_per_type', type=int, default=5,
+                       help="Number of evolution plots per class")
     
     args = parser.parse_args()
     
-    evaluator = ComprehensiveEvaluator(
+    evaluator = RomanEvaluator(
         experiment_name=args.experiment_name,
         data_path=args.data,
         output_dir=args.output_dir,
+        device=args.device,
         batch_size=args.batch_size,
         n_samples=args.n_samples,
-        early_detection=args.early_detection,
         n_evolution_per_type=args.n_evolution_per_type
     )
     
