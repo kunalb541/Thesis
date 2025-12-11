@@ -613,7 +613,7 @@ def main():
     
     # GOD MODE FIX: Proper FP16 detection
     use_fp16 = False  # Using BF16, not FP16
-    scaler = torch.cuda.amp.GradScaler(enabled=use_fp16) if torch.cuda.is_available() else None
+    scaler =  None
     
     # Learning rate scheduler
     def lr_lambda(epoch):
