@@ -23,8 +23,7 @@ PERFORMANCE CHARACTERISTICS:
     - Multiprocessing using `spawn` for safe VBBinaryLensing usage  
     - Memory-contiguous outputs ideal for PyTorch / JAX ingestion  
 
-This module powers downstream ML pipelines such as CNN-GRU classifiers and
-Simulation-Based Inference models for binary microlensing parameter recovery.
+This module powers downstream ML pipelines such as CNN-GRU classifiers
 
 Author: Kunal Bhatia  
 Institution: University of Heidelberg  
