@@ -402,7 +402,7 @@ def train_epoch(
         
         with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
             output = model(flux, delta_t, lengths=lengths)
-            loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+            loss = F.cross_entropy(output, labels, weight=class_weights)
             loss = loss / accumulation_steps
         
         scaler.scale(loss).backward()
@@ -415,7 +415,7 @@ def train_epoch(
             optimizer.zero_grad(set_to_none=True)
         
         with torch.no_grad():
-            pred = output['probs'].argmax(dim=-1)
+            pred = output.argmax(dim=-1)
             correct += (pred == labels).sum().item()
             total += labels.size(0)
             total_loss += (loss.item() * accumulation_steps) * labels.size(0)
@@ -459,9 +459,9 @@ def evaluate(
             
             with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
                 output = model(flux, delta_t, lengths=lengths)
-                loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+                loss = F.cross_entropy(output, labels, weight=class_weights)
             
-            pred = output['probs'].argmax(dim=-1)
+            pred = output.argmax(dim=-1)
             correct += (pred == labels).sum().item()
             total += labels.size(0)
             total_loss += loss.item() * labels.size(0)
@@ -469,7 +469,7 @@ def evaluate(
             if return_predictions:
                 all_preds.append(pred.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
-                all_probs.append(output['probs'].cpu().numpy())
+                all_probs.append(output.cpu().numpy())
     
     results = {
         'loss': total_loss / total,
@@ -692,7 +692,7 @@ def main():
     )
     
     amp_dtype = torch.bfloat16 if args.use_amp and torch.cuda.is_available() else torch.float32
-    model = RomanMicrolensingGRU(config, dtype=amp_dtype).to(device)
+    model = RomanMicrolensingGRU(config).to(device)
     
     if rank == 0:
         n_params = count_parameters(model)
