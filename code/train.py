@@ -54,7 +54,7 @@ import h5py, numpy as np, torch
 import torch.distributed as dist
 import torch.nn as nn, torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.model_split import train_test_split
+from sklearn.model_selection import train_test_split
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
@@ -812,7 +812,7 @@ def parse_args() -> argparse.Namespace:
                             help='Batch size per GPU (increased from 512)')
     train_group.add_argument('--accumulation-steps', type=int, default=1)
     train_group.add_argument('--epochs', type=int, default=50)
-    train_group.add_argument('--lr', type=float, default=1e-3)
+    train_group.add_argument('--lr', type=float, default=1e-2)
     train_group.add_argument('--weight-decay', type=float, default=1e-3)
     train_group.add_argument('--warmup-epochs', type=int, default=5)
     train_group.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM)
@@ -838,9 +838,9 @@ def parse_args() -> argparse.Namespace:
     other_group.add_argument('--num-workers', type=int, default=4)
     other_group.add_argument('--prefetch-factor', type=int, default=12,
                             help='Prefetch factor (increased from 8)')
-    other_group.add_argument('--eval-every', type=int, default=5)
+    other_group.add_argument('--eval-every', type=int, default=10)
     other_group.add_argument('--save-every', type=int, default=10)
-    other_group.add_argument('--early-stopping-patience', type=int, default=0)
+    other_group.add_argument('--early-stopping-patience', type=int, default=20)
     other_group.add_argument('--broadcast-buffers', action='store_true', default=True)
     other_group.add_argument('--no-broadcast-buffers', dest='broadcast_buffers',
                             action='store_false')
