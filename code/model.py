@@ -45,9 +45,9 @@ class ModelConfig:
         use_gradient_checkpointing: Enable gradient checkpointing for memory efficiency
     """
     # Architecture
-    d_model: int = 128
-    n_layers: int = 3
-    dropout: float = 0.2
+    d_model: int = 64
+    n_layers: int = 2
+    dropout: float = 0.3
     window_size: int = 5
     max_seq_len: int = 2000
     n_classes: int = 3

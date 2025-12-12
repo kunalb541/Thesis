@@ -481,12 +481,12 @@ def main():
     
     # Data arguments
     parser.add_argument('--data', type=str, required=True, help='Path to training data (.npz)')
-    parser.add_argument('--output-dir', type=str, default='experiments', help='Output directory')
+    parser.add_argument('--output-dir', type=str, default='../results', help='Output directory')
     parser.add_argument('--experiment-name', type=str, default=None, help='Experiment name')
     
     # Model arguments
-    parser.add_argument('--d-model', type=int, default=256, help='Hidden dimension')
-    parser.add_argument('--n-layers', type=int, default=4, help='Number of GRU layers')
+    parser.add_argument('--d-model', type=int, default=64, help='Hidden dimension')
+    parser.add_argument('--n-layers', type=int, default=2, help='Number of GRU layers')
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
     
     # Hierarchical classification (default: True)
