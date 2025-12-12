@@ -1,17 +1,3 @@
-"""
-GOD MODE: Roman Microlensing GRU Classifier
-Extreme Performance Edition - Optimized for A100 GPUs
-
-Key Optimizations:
-- Depthwise separable convolutions (4x faster)
-- Flash Attention pooling (3x faster attention)
-- Fused operations (LayerNorm, SwiGLU)
-- Packed sequences (variable length)
-- Single-pass hierarchical inference
-- Compile-friendly architecture
-- Channels-last memory format
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
