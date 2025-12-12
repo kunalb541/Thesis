@@ -410,8 +410,8 @@ def main():
     parser.add_argument('--experiment-name', type=str, default=None)
     
     # Architecture
-    parser.add_argument('--d-model', type=int, default=256)
-    parser.add_argument('--n-layers', type=int, default=4)
+    parser.add_argument('--d-model', type=int, default=64)
+    parser.add_argument('--n-layers', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--window-size', type=int, default=5)
     
