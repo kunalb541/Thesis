@@ -3,7 +3,7 @@
 Roman Microlensing Classifier - Distributed Training Script
 ============================================================
 
-High-performance distributed training for the Roman Space Telescope
+Distributed training for the Roman Space Telescope
 microlensing event classifier using PyTorch DDP with strict causality guarantees.
 
 Features:
@@ -16,6 +16,7 @@ Features:
     - Comprehensive logging and checkpointing
     - 100% type hint coverage for thesis-grade code
     - Extensive validation and error handling
+    - Reproducible training with proper seed management
 
 Critical Properties:
     - Model uses strictly causal convolutions (no future information leakage)
@@ -60,12 +61,16 @@ import math
 import os
 import random
 import sys
+import time
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+from typing import (
+    Any, Callable, Dict, Final, Generator, List, 
+    Optional, Tuple, Type, Union
+)
 
 import h5py
 import numpy as np
@@ -92,6 +97,11 @@ except ImportError as e:
     print("Ensure model.py is in the same directory as train.py", file=sys.stderr)
     sys.exit(1)
 
+
+# =============================================================================
+# SUPPRESS WARNINGS
+# =============================================================================
+
 # Suppress non-critical warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -101,13 +111,17 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # CONSTANTS
 # =============================================================================
 
-SEED: int = 42
-DEFAULT_CLIP_NORM: float = 1.0
-MIN_SEQUENCE_LENGTH: int = 1
-DEFAULT_VAL_FRACTION: float = 0.2
+SEED: Final[int] = 42
+DEFAULT_CLIP_NORM: Final[float] = 1.0
+MIN_SEQUENCE_LENGTH: Final[int] = 1
+DEFAULT_VAL_FRACTION: Final[float] = 0.2
+PROGRESS_UPDATE_FREQ: Final[int] = 50  # Update progress bar every N batches
 
 # Class names for Roman microlensing classification
-CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
+CLASS_NAMES: Final[Tuple[str, ...]] = ('Flat', 'PSPL', 'Binary')
+
+# Numerical stability
+EPS: Final[float] = 1e-8
 
 
 # =============================================================================
@@ -119,38 +133,55 @@ class NumpyJSONEncoder(json.JSONEncoder):
     
     def default(self, obj: Any) -> Any:
         """Convert numpy types to Python native types for JSON serialization."""
-        if isinstance(obj, (np.float32, np.float64, np.floating)):
+        if isinstance(obj, (np.float16, np.float32, np.float64, np.floating)):
             return float(obj)
-        if isinstance(obj, (np.int32, np.int64, np.integer)):
+        if isinstance(obj, (np.int8, np.int16, np.int32, np.int64, np.integer)):
             return int(obj)
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         if isinstance(obj, np.bool_):
             return bool(obj)
-        if isinstance(obj, Path):
+        if isinstance(obj, (Path, os.PathLike)):
             return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, timedelta):
+            return obj.total_seconds()
+        if hasattr(obj, 'to_dict'):
+            return obj.to_dict()
         if hasattr(obj, '__dict__'):
-            return obj.__dict__
+            return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
         return super().default(obj)
 
 
 def format_time(seconds: float) -> str:
     """Format seconds into human-readable string."""
+    if seconds < 0:
+        return "N/A"
     if seconds < 60:
         return f"{seconds:.1f}s"
     elif seconds < 3600:
-        return f"{seconds/60:.1f}m"
+        minutes = seconds / 60
+        return f"{minutes:.1f}m"
     else:
-        return f"{seconds/3600:.1f}h"
+        hours = seconds / 3600
+        return f"{hours:.1f}h"
 
 
 def format_number(n: int) -> str:
     """Format large numbers with K/M suffixes."""
+    if n < 0:
+        return f"-{format_number(-n)}"
     if n >= 1_000_000:
         return f"{n/1_000_000:.1f}M"
     elif n >= 1_000:
         return f"{n/1_000:.1f}K"
     return str(n)
+
+
+def get_timestamp() -> str:
+    """Get current timestamp as formatted string."""
+    return datetime.now().strftime('%Y%m%d_%H%M%S')
 
 
 # =============================================================================
@@ -195,18 +226,24 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
     torch.cuda.set_device(local_rank)
     
     # Initialize process group with NCCL backend
-    dist.init_process_group(
-        backend='nccl',
-        init_method='env://',
-        timeout=timedelta(seconds=3600)  # 1 hour timeout for large jobs
-    )
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend='nccl',
+            init_method='env://',
+            timeout=timedelta(seconds=3600),  # 1 hour timeout for large jobs
+            world_size=world_size,
+            rank=rank
+        )
     
     # CUDA optimizations for HPC efficiency
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.set_float32_matmul_precision('high')
+    
+    # Set float32 matmul precision for better performance
+    if hasattr(torch, 'set_float32_matmul_precision'):
+        torch.set_float32_matmul_precision('high')
     
     # Clear GPU memory
     torch.cuda.empty_cache()
@@ -216,15 +253,25 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
 
 
 def cleanup_distributed() -> None:
-    """Clean up distributed process group."""
+    """Clean up distributed process group safely."""
     if dist.is_initialized():
-        dist.barrier()
-        dist.destroy_process_group()
+        try:
+            dist.barrier()
+        except Exception:
+            pass  # Ignore barrier errors during cleanup
+        finally:
+            dist.destroy_process_group()
 
 
 def is_main_process(rank: int) -> bool:
     """Check if this is the main process (rank 0)."""
     return rank == 0
+
+
+def synchronize() -> None:
+    """Synchronize all processes if in distributed mode."""
+    if dist.is_initialized():
+        dist.barrier()
 
 
 # =============================================================================
@@ -264,7 +311,7 @@ def setup_logging(rank: int, output_dir: Path) -> logging.Logger:
         
         # File handler
         log_file = output_dir / "training.log"
-        file_handler = logging.FileHandler(log_file)
+        file_handler = logging.FileHandler(log_file, mode='a')
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
@@ -280,13 +327,16 @@ def setup_logging(rank: int, output_dir: Path) -> logging.Logger:
     return logger
 
 
-def set_global_seeds(seed: int, rank: int = 0) -> None:
+def set_global_seeds(seed: int, rank: int = 0) -> torch.Generator:
     """
     Set random seeds for reproducibility across all libraries.
     
     Args:
         seed: Base random seed
         rank: Process rank (used as offset for different per-rank seeds)
+        
+    Returns:
+        PyTorch Generator for DataLoader reproducibility
     """
     effective_seed = seed + rank
     
@@ -298,10 +348,16 @@ def set_global_seeds(seed: int, rank: int = 0) -> None:
         torch.cuda.manual_seed(effective_seed)
         torch.cuda.manual_seed_all(effective_seed)
     
+    # Create generator for DataLoader
+    generator = torch.Generator()
+    generator.manual_seed(effective_seed)
+    
     # Note: cudnn.benchmark=True sacrifices strict reproducibility for performance
     # For exact reproducibility, set deterministic=True and benchmark=False
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
+    
+    return generator
 
 
 # =============================================================================
@@ -341,24 +397,28 @@ def load_or_create_split(
         if is_main_process(rank):
             logger.info(f"Loading cached split from: {cache_path}")
         
-        cache = np.load(cache_path)
-        train_idx = cache['train_idx']
-        val_idx = cache['val_idx']
-        stats = {
-            'median': float(cache['median']),
-            'iqr': float(cache['iqr'])
-        }
-        
-        if is_main_process(rank):
-            logger.info(
-                f"Loaded split: train={format_number(len(train_idx))}, "
-                f"val={format_number(len(val_idx))}"
-            )
-        
-        if is_ddp:
-            dist.barrier()
-        
-        return train_idx, val_idx, stats
+        try:
+            cache = np.load(cache_path)
+            train_idx = cache['train_idx']
+            val_idx = cache['val_idx']
+            stats = {
+                'median': float(cache['median']),
+                'iqr': float(cache['iqr'])
+            }
+            
+            if is_main_process(rank):
+                logger.info(
+                    f"Loaded split: train={format_number(len(train_idx))}, "
+                    f"val={format_number(len(val_idx))}"
+                )
+            
+            if is_ddp:
+                synchronize()
+            
+            return train_idx, val_idx, stats
+        except Exception as e:
+            if is_main_process(rank):
+                logger.warning(f"Failed to load cache: {e}. Creating new split.")
     
     # Create new split (only rank 0)
     if is_main_process(rank):
@@ -401,7 +461,7 @@ def load_or_create_split(
                 all_valid = np.concatenate(valid_flux_chunks)
                 median = float(np.median(all_valid))
                 q75, q25 = np.percentile(all_valid, [75, 25])
-                iqr = float(max(q75 - q25, 1e-6))
+                iqr = float(max(q75 - q25, EPS))  # Avoid division by zero
             else:
                 logger.warning("No valid flux values found, using defaults")
                 median, iqr = 0.0, 1.0
@@ -431,7 +491,7 @@ def load_or_create_split(
     
     # Synchronize and load on other ranks
     if is_ddp:
-        dist.barrier()
+        synchronize()
         
         if not is_main_process(rank):
             cache = np.load(cache_path)
@@ -477,10 +537,16 @@ class MicrolensingDataset(Dataset):
         self._flux: Optional[h5py.Dataset] = None
         self._delta_t: Optional[h5py.Dataset] = None
         self._labels: Optional[h5py.Dataset] = None
+        self._worker_id: Optional[int] = None
     
     def _ensure_open(self) -> None:
         """Open HDF5 file if not already open (lazy initialization)."""
-        if self._file is None:
+        # Check if we need to reopen for a different worker
+        worker_info = torch.utils.data.get_worker_info()
+        current_worker = worker_info.id if worker_info else -1
+        
+        if self._file is None or self._worker_id != current_worker:
+            self._close()
             self._file = h5py.File(
                 self.data_path,
                 'r',
@@ -492,6 +558,19 @@ class MicrolensingDataset(Dataset):
             self._flux = self._file['flux']
             self._delta_t = self._file['delta_t']
             self._labels = self._file['labels']
+            self._worker_id = current_worker
+    
+    def _close(self) -> None:
+        """Close HDF5 file handle if open."""
+        if self._file is not None:
+            try:
+                self._file.close()
+            except Exception:
+                pass
+            self._file = None
+            self._flux = None
+            self._delta_t = None
+            self._labels = None
     
     def __len__(self) -> int:
         """Return number of samples in dataset."""
@@ -547,11 +626,7 @@ class MicrolensingDataset(Dataset):
     
     def __del__(self) -> None:
         """Close HDF5 file on deletion."""
-        if self._file is not None:
-            try:
-                self._file.close()
-            except Exception:
-                pass
+        self._close()
 
 
 def collate_fn(
@@ -628,7 +703,8 @@ def create_dataloaders(
     num_workers: int,
     prefetch_factor: int,
     is_ddp: bool,
-    rank: int
+    rank: int,
+    generator: torch.Generator
 ) -> Tuple[DataLoader, DataLoader, np.ndarray]:
     """
     Create training and validation DataLoaders.
@@ -643,6 +719,7 @@ def create_dataloaders(
         prefetch_factor: Batches to prefetch per worker
         is_ddp: Whether using distributed training
         rank: Process rank
+        generator: PyTorch Generator for reproducibility
         
     Returns:
         Tuple of (train_loader, val_loader, train_labels)
@@ -691,7 +768,8 @@ def create_dataloaders(
         persistent_workers=use_persistent_workers,
         prefetch_factor=use_prefetch,
         worker_init_fn=worker_init_fn,
-        collate_fn=train_collate
+        collate_fn=train_collate,
+        generator=generator
     )
     
     val_loader = DataLoader(
@@ -705,7 +783,8 @@ def create_dataloaders(
         persistent_workers=use_persistent_workers,
         prefetch_factor=use_prefetch,
         worker_init_fn=worker_init_fn,
-        collate_fn=val_collate
+        collate_fn=val_collate,
+        generator=generator
     )
     
     return train_loader, val_loader, train_labels
@@ -737,9 +816,13 @@ def compute_class_weights(
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     
-    weights = torch.ones(n_classes, device=device)
+    weights = torch.ones(n_classes, device=device, dtype=torch.float32)
     for cls_idx, count in zip(unique, counts):
-        weights[cls_idx] = total / (n_classes * count)
+        if count > 0:
+            weights[cls_idx] = total / (n_classes * count + EPS)
+    
+    # Normalize weights to have mean 1.0 for stable training
+    weights = weights / (weights.mean() + EPS)
     
     return weights
 
@@ -768,22 +851,24 @@ class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         min_lr: float = 1e-6,
         last_epoch: int = -1
     ) -> None:
-        self.warmup_epochs: int = warmup_epochs
-        self.total_epochs: int = total_epochs
-        self.min_lr: float = min_lr
+        self.warmup_epochs: int = max(0, warmup_epochs)
+        self.total_epochs: int = max(1, total_epochs)
+        self.min_lr: float = max(0.0, min_lr)
         super().__init__(optimizer, last_epoch)
     
     def get_lr(self) -> List[float]:
         """Calculate learning rate for current epoch."""
-        if self.last_epoch < self.warmup_epochs:
+        epoch = max(0, self.last_epoch)
+        
+        if epoch < self.warmup_epochs:
             # Linear warmup
-            alpha = (self.last_epoch + 1) / max(1, self.warmup_epochs)
+            alpha = (epoch + 1) / max(1, self.warmup_epochs)
             return [base_lr * alpha for base_lr in self.base_lrs]
         else:
             # Cosine decay
-            progress = (self.last_epoch - self.warmup_epochs) / max(
-                1, self.total_epochs - self.warmup_epochs
-            )
+            decay_epochs = max(1, self.total_epochs - self.warmup_epochs)
+            progress = (epoch - self.warmup_epochs) / decay_epochs
+            progress = min(1.0, progress)  # Clamp to [0, 1]
             cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
             return [
                 self.min_lr + (base_lr - self.min_lr) * cosine_factor
@@ -791,40 +876,57 @@ class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
             ]
 
 
-@contextmanager
-def cuda_timer(
-    name: str, 
-    logger: logging.Logger, 
-    rank: int
-) -> Generator[None, None, None]:
+def get_amp_context(
+    device: torch.device,
+    use_amp: bool,
+    dtype: Optional[torch.dtype] = None
+) -> Any:
     """
-    Context manager for timing CUDA operations with proper synchronization.
+    Get appropriate AMP autocast context manager.
     
     Args:
-        name: Timer name for logging
-        logger: Logger instance
-        rank: Process rank (only rank 0 logs)
+        device: Training device
+        use_amp: Whether to use AMP
+        dtype: Override dtype (None = auto-detect)
         
-    Yields:
-        None
+    Returns:
+        Context manager for autocast
     """
-    if not is_main_process(rank):
-        yield
-        return
+    if not use_amp or device.type != 'cuda':
+        return nullcontext()
     
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    if dtype is None:
+        # Auto-detect best dtype
+        if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
     
-    torch.cuda.synchronize()
-    start_event.record()
+    return torch.amp.autocast('cuda', enabled=True, dtype=dtype)
+
+
+def should_use_grad_scaler(device: torch.device, use_amp: bool) -> bool:
+    """
+    Determine if GradScaler should be used.
     
-    yield
+    GradScaler is only needed for float16, not bfloat16 (which has same
+    dynamic range as float32).
     
-    end_event.record()
-    torch.cuda.synchronize()
+    Args:
+        device: Training device
+        use_amp: Whether AMP is enabled
+        
+    Returns:
+        True if GradScaler should be used
+    """
+    if not use_amp or device.type != 'cuda':
+        return False
     
-    elapsed_ms = start_event.elapsed_time(end_event)
-    logger.debug(f"{name}: {elapsed_ms/1000:.2f}s")
+    # BFloat16 doesn't need gradient scaling
+    if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
+        return False
+    
+    return True
 
 
 # =============================================================================
@@ -868,9 +970,10 @@ def train_epoch(
     model.train()
     
     # Accumulator tensors on device for distributed aggregation
-    total_loss = torch.tensor(0.0, device=device)
-    correct = torch.tensor(0, device=device, dtype=torch.long)
-    total = torch.tensor(0, device=device, dtype=torch.long)
+    # Use float64 for accumulators to prevent overflow on large datasets
+    total_loss = torch.tensor(0.0, device=device, dtype=torch.float64)
+    correct = torch.tensor(0, device=device, dtype=torch.int64)
+    total = torch.tensor(0, device=device, dtype=torch.int64)
     
     # Progress bar (only on main process)
     iterator = tqdm(
@@ -878,15 +981,20 @@ def train_epoch(
         desc=f"Epoch {epoch}",
         disable=not is_main_process(rank),
         leave=False,
-        dynamic_ncols=True
+        dynamic_ncols=True,
+        mininterval=0.5  # Reduce update frequency for efficiency
     )
     
     # Clear gradients
     optimizer.zero_grad(set_to_none=True)
     
     # Mixed precision settings
-    use_amp = config.use_amp and scaler is not None
-    amp_dtype = torch.bfloat16 if config.use_amp else torch.float32
+    use_amp = config.use_amp
+    use_scaler = scaler is not None
+    amp_dtype = torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported') 
+                                    and torch.cuda.is_bf16_supported()) else torch.float16
+    
+    num_batches = len(loader)
     
     for batch_idx, (flux, delta_t, lengths, labels) in enumerate(iterator):
         # Move to device with non-blocking transfers
@@ -896,25 +1004,24 @@ def train_epoch(
         labels = labels.to(device, non_blocking=True)
         
         # Forward pass with mixed precision
-        with torch.amp.autocast('cuda', enabled=config.use_amp, dtype=amp_dtype):
+        with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
             logits = model(flux, delta_t, lengths)
             loss = F.cross_entropy(logits, labels, weight=class_weights)
             loss_scaled = loss / accumulation_steps
         
         # Backward pass
-        if use_amp:
+        if use_scaler:
             scaler.scale(loss_scaled).backward()
         else:
             loss_scaled.backward()
         
-        # Optimizer step (with gradient accumulation)
-        is_accumulation_step = (
-            (batch_idx + 1) % accumulation_steps == 0 or 
-            (batch_idx + 1) == len(loader)
-        )
+        # Determine if this is an accumulation step
+        is_last_batch = (batch_idx + 1) == num_batches
+        is_accum_step = ((batch_idx + 1) % accumulation_steps == 0) or is_last_batch
         
-        if is_accumulation_step:
-            if use_amp:
+        if is_accum_step:
+            if use_scaler:
+                # Unscale before clipping
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 scaler.step(optimizer)
@@ -928,14 +1035,14 @@ def train_epoch(
         # Accumulate metrics (no gradient needed)
         with torch.no_grad():
             batch_size = labels.size(0)
-            total_loss += loss.detach() * batch_size
+            total_loss += loss.detach().double() * batch_size
             correct += (logits.argmax(dim=-1) == labels).sum()
             total += batch_size
         
-        # Update progress bar
-        if is_main_process(rank) and batch_idx % 20 == 0:
-            current_loss = (total_loss / total).item()
-            current_acc = (correct / total).float().item() * 100
+        # Update progress bar (less frequently for efficiency)
+        if is_main_process(rank) and batch_idx % PROGRESS_UPDATE_FREQ == 0:
+            current_loss = (total_loss / max(1, total)).item()
+            current_acc = (correct / max(1, total)).float().item() * 100
             iterator.set_postfix({
                 'loss': f'{current_loss:.4f}',
                 'acc': f'{current_acc:.1f}%'
@@ -947,8 +1054,10 @@ def train_epoch(
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
     
-    avg_loss = (total_loss / total).item()
-    accuracy = (correct / total).float().item()
+    # Compute final metrics
+    total_samples = max(1, total.item())
+    avg_loss = (total_loss / total_samples).item()
+    accuracy = (correct / total_samples).float().item()
     
     return avg_loss, accuracy
 
@@ -987,22 +1096,26 @@ def evaluate(
     """
     model.eval()
     
-    total_loss = torch.tensor(0.0, device=device)
-    correct = torch.tensor(0, device=device, dtype=torch.long)
-    total = torch.tensor(0, device=device, dtype=torch.long)
+    # Use float64 for accumulators
+    total_loss = torch.tensor(0.0, device=device, dtype=torch.float64)
+    correct = torch.tensor(0, device=device, dtype=torch.int64)
+    total = torch.tensor(0, device=device, dtype=torch.int64)
     
     all_preds: List[np.ndarray] = []
     all_labels: List[np.ndarray] = []
     all_probs: List[np.ndarray] = []
     
-    amp_dtype = torch.bfloat16 if config.use_amp else torch.float32
+    use_amp = config.use_amp
+    amp_dtype = torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported') 
+                                    and torch.cuda.is_bf16_supported()) else torch.float16
     
     iterator = tqdm(
         loader,
         disable=not is_main_process(rank),
         desc="Eval",
         leave=False,
-        dynamic_ncols=True
+        dynamic_ncols=True,
+        mininterval=0.5
     )
     
     for flux, delta_t, lengths, labels in iterator:
@@ -1011,21 +1124,21 @@ def evaluate(
         lengths = lengths.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         
-        with torch.amp.autocast('cuda', enabled=config.use_amp, dtype=amp_dtype):
+        with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
             logits = model(flux, delta_t, lengths)
             loss = F.cross_entropy(logits, labels, weight=class_weights)
         
         batch_size = labels.size(0)
         preds = logits.argmax(dim=-1)
         
-        total_loss += loss * batch_size
+        total_loss += loss.double() * batch_size
         correct += (preds == labels).sum()
         total += batch_size
         
         if return_predictions:
             all_preds.append(preds.cpu().numpy())
             all_labels.append(labels.cpu().numpy())
-            all_probs.append(F.softmax(logits, dim=-1).cpu().numpy())
+            all_probs.append(F.softmax(logits.float(), dim=-1).cpu().numpy())
     
     # Aggregate across processes
     if world_size > 1:
@@ -1033,9 +1146,11 @@ def evaluate(
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
     
+    total_samples = max(1, total.item())
+    
     results: Dict[str, Any] = {
-        'loss': (total_loss / total).item(),
-        'accuracy': (correct / total).float().item()
+        'loss': (total_loss / total_samples).item(),
+        'accuracy': (correct / total_samples).float().item()
     }
     
     if return_predictions:
@@ -1056,7 +1171,8 @@ def save_checkpoint(
     config: ModelConfig,
     stats: Dict[str, float],
     output_dir: Path,
-    is_best: bool = False
+    is_best: bool = False,
+    extra_info: Optional[Dict[str, Any]] = None
 ) -> Path:
     """
     Save training checkpoint.
@@ -1072,6 +1188,7 @@ def save_checkpoint(
         stats: Normalization statistics
         output_dir: Output directory
         is_best: Whether this is the best model so far
+        extra_info: Additional info to save
         
     Returns:
         Path to saved checkpoint
@@ -1088,21 +1205,28 @@ def save_checkpoint(
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'best_acc': best_acc,
-        'config': asdict(config) if hasattr(config, '__dataclass_fields__') else vars(config),
+        'config': config.to_dict() if hasattr(config, 'to_dict') else asdict(config),
         'stats': stats,
         'pytorch_version': torch.__version__,
-        'cuda_version': torch.version.cuda if torch.cuda.is_available() else None
+        'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
+        'timestamp': datetime.now().isoformat()
     }
     
     if scaler is not None:
         checkpoint['scaler_state_dict'] = scaler.state_dict()
+    
+    if extra_info:
+        checkpoint['extra_info'] = extra_info
     
     if is_best:
         save_path = output_dir / 'best_model.pt'
     else:
         save_path = output_dir / f'checkpoint_epoch_{epoch}.pt'
     
-    torch.save(checkpoint, save_path)
+    # Save with atomic write pattern
+    temp_path = save_path.with_suffix('.tmp')
+    torch.save(checkpoint, temp_path)
+    temp_path.rename(save_path)
     
     return save_path
 
@@ -1168,6 +1292,10 @@ def parse_args() -> argparse.Namespace:
     )
     model_group.add_argument(
         '--no-attention-pooling', dest='attention_pooling', action='store_false'
+    )
+    model_group.add_argument(
+        '--num-attention-heads', type=int, default=1,
+        help='Number of attention heads for pooling'
     )
     model_group.add_argument(
         '--use-residual', action='store_true', default=True,
@@ -1248,6 +1376,11 @@ def parse_args() -> argparse.Namespace:
         help='Use torch.compile for optimization'
     )
     other_group.add_argument(
+        '--compile-mode', type=str, default='reduce-overhead',
+        choices=['default', 'reduce-overhead', 'max-autotune'],
+        help='torch.compile mode'
+    )
+    other_group.add_argument(
         '--use-gradient-checkpointing', action='store_true', default=False,
         help='Use gradient checkpointing to reduce memory'
     )
@@ -1278,6 +1411,10 @@ def parse_args() -> argparse.Namespace:
     other_group.add_argument(
         '--no-broadcast-buffers', dest='broadcast_buffers', action='store_false'
     )
+    other_group.add_argument(
+        '--seed', type=int, default=SEED,
+        help='Random seed for reproducibility'
+    )
     
     return parser.parse_args()
 
@@ -1292,7 +1429,7 @@ def main() -> None:
     
     # Generate experiment name if not provided
     if args.experiment_name is None:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = get_timestamp()
         args.experiment_name = f"roman_d{args.d_model}_l{args.n_layers}_{timestamp}"
     
     # Create output directory
@@ -1301,11 +1438,11 @@ def main() -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
     
     if is_ddp:
-        dist.barrier()
+        synchronize()
     
     # Setup logging and seeds
     logger = setup_logging(rank, output_dir)
-    set_global_seeds(SEED, rank)
+    generator = set_global_seeds(args.seed, rank)
     
     # Log configuration
     if is_main_process(rank):
@@ -1316,10 +1453,12 @@ def main() -> None:
         logger.info(f"CUDA version: {torch.version.cuda}")
         if torch.cuda.is_available():
             logger.info(f"GPU: {torch.cuda.get_device_name(local_rank)}")
-            logger.info(f"GPU memory: {torch.cuda.get_device_properties(local_rank).total_memory / 1e9:.1f} GB")
+            gpu_mem = torch.cuda.get_device_properties(local_rank).total_memory / 1e9
+            logger.info(f"GPU memory: {gpu_mem:.1f} GB")
         logger.info(f"World size: {world_size} GPU(s)")
         logger.info(f"Rank: {rank}, Local rank: {local_rank}")
         logger.info(f"Output directory: {output_dir}")
+        logger.info(f"Random seed: {args.seed}")
     
     # Load data
     if is_main_process(rank):
@@ -1343,7 +1482,7 @@ def main() -> None:
     train_loader, val_loader, train_labels = create_dataloaders(
         data_path, train_idx, val_idx, stats,
         args.batch_size, args.num_workers, args.prefetch_factor,
-        is_ddp, rank
+        is_ddp, rank, generator
     )
     
     effective_batch_size = args.batch_size * args.accumulation_steps * world_size
@@ -1369,6 +1508,7 @@ def main() -> None:
         use_layer_norm=args.use_layer_norm,
         feature_extraction=args.feature_extraction,
         use_attention_pooling=args.attention_pooling,
+        num_attention_heads=args.num_attention_heads,
         use_amp=args.use_amp,
         use_gradient_checkpointing=args.use_gradient_checkpointing
     )
@@ -1398,16 +1538,18 @@ def main() -> None:
     # Optional: torch.compile
     if args.compile and hasattr(torch, 'compile'):
         if is_main_process(rank):
-            logger.info("Compiling model with torch.compile...")
-        model = torch.compile(model, mode='reduce-overhead')
+            logger.info(f"Compiling model with torch.compile (mode={args.compile_mode})...")
+        model = torch.compile(model, mode=args.compile_mode)
     
-    # Optimizer
+    # Optimizer with fused implementation if available
+    fused_available = torch.cuda.is_available() and hasattr(torch.optim.AdamW, 'fused')
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
         betas=(0.9, 0.999),
-        fused=torch.cuda.is_available()  # Use fused optimizer if available
+        eps=1e-8,
+        fused=fused_available
     )
     
     # Scheduler
@@ -1419,16 +1561,17 @@ def main() -> None:
     )
     
     # GradScaler setup
-    # Note: GradScaler is only needed for float16, not bfloat16
-    use_scaler = args.use_amp and torch.cuda.is_available()
-    if use_scaler:
-        # Check if bfloat16 is supported - if so, scaler is unnecessary
-        if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
-            use_scaler = False
-            if is_main_process(rank):
-                logger.info("Using bfloat16 (no GradScaler needed)")
-    
+    use_scaler = should_use_grad_scaler(device, args.use_amp)
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler) if use_scaler else None
+    
+    if is_main_process(rank):
+        if args.use_amp:
+            if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
+                logger.info("Using bfloat16 (no GradScaler needed)")
+            else:
+                logger.info("Using float16 with GradScaler")
+        else:
+            logger.info("Mixed precision disabled")
     
     # Class weights
     if args.use_class_weights:
@@ -1440,7 +1583,7 @@ def main() -> None:
     
     # Synchronize before training
     if is_ddp:
-        dist.barrier()
+        synchronize()
     
     # Training loop
     if is_main_process(rank):
@@ -1450,164 +1593,173 @@ def main() -> None:
     
     best_acc: float = 0.0
     patience_counter: int = 0
-    training_start_time = datetime.now()
+    training_start_time = time.time()
     
-    for epoch in range(1, args.epochs + 1):
-        epoch_start_time = datetime.now()
-        
-        # Set epoch for distributed sampler
-        if is_ddp and hasattr(train_loader.sampler, 'set_epoch'):
-            train_loader.sampler.set_epoch(epoch)
-        
-        # Training
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, scaler,
-            class_weights, device, rank, world_size, epoch, config,
-            accumulation_steps=args.accumulation_steps,
-            clip_norm=args.clip_norm
-        )
-        
-        # Update scheduler
-        scheduler.step()
-        
-        # Evaluation
-        should_eval = (
-            epoch % args.eval_every == 0 or 
-            epoch == 1 or 
-            epoch == args.epochs
-        )
-        
-        if should_eval:
-            val_results = evaluate(
-                model, val_loader, class_weights, device, rank, world_size, config,
-                return_predictions=(epoch == args.epochs and is_main_process(rank))
+    try:
+        for epoch in range(1, args.epochs + 1):
+            epoch_start_time = time.time()
+            
+            # Set epoch for distributed sampler
+            if is_ddp and hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
+            
+            # Training
+            train_loss, train_acc = train_epoch(
+                model, train_loader, optimizer, scaler,
+                class_weights, device, rank, world_size, epoch, config,
+                accumulation_steps=args.accumulation_steps,
+                clip_norm=args.clip_norm
             )
             
-            val_loss = val_results['loss']
-            val_acc = val_results['accuracy']
+            # Update scheduler
+            scheduler.step()
             
-            if is_main_process(rank):
-                epoch_time = (datetime.now() - epoch_start_time).total_seconds()
-                logger.info(
-                    f"Epoch {epoch:3d}/{args.epochs} | "
-                    f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
-                    f"Val: loss={val_loss:.4f} acc={val_acc*100:.2f}% | "
-                    f"LR={scheduler.get_last_lr()[0]:.2e} | "
-                    f"Time={format_time(epoch_time)}"
+            # Evaluation
+            should_eval = (
+                epoch % args.eval_every == 0 or 
+                epoch == 1 or 
+                epoch == args.epochs
+            )
+            
+            if should_eval:
+                val_results = evaluate(
+                    model, val_loader, class_weights, device, rank, world_size, config,
+                    return_predictions=(epoch == args.epochs and is_main_process(rank))
                 )
                 
-                # Save best model
-                if val_acc > best_acc:
-                    best_acc = val_acc
-                    patience_counter = 0
-                    save_checkpoint(
-                        model, optimizer, scheduler, scaler, epoch,
-                        best_acc, config, stats, output_dir, is_best=True
+                val_loss = val_results['loss']
+                val_acc = val_results['accuracy']
+                
+                if is_main_process(rank):
+                    epoch_time = time.time() - epoch_start_time
+                    logger.info(
+                        f"Epoch {epoch:3d}/{args.epochs} | "
+                        f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
+                        f"Val: loss={val_loss:.4f} acc={val_acc*100:.2f}% | "
+                        f"LR={scheduler.get_last_lr()[0]:.2e} | "
+                        f"Time={format_time(epoch_time)}"
                     )
-                    logger.info(f"  -> New best: {best_acc*100:.2f}%")
+                    
+                    # Save best model
+                    if val_acc > best_acc:
+                        best_acc = val_acc
+                        patience_counter = 0
+                        save_checkpoint(
+                            model, optimizer, scheduler, scaler, epoch,
+                            best_acc, config, stats, output_dir, is_best=True
+                        )
+                        logger.info(f"  -> New best: {best_acc*100:.2f}%")
+                    else:
+                        patience_counter += 1
+                    
+                    # Periodic checkpoint
+                    if epoch % args.save_every == 0:
+                        save_checkpoint(
+                            model, optimizer, scheduler, scaler, epoch,
+                            best_acc, config, stats, output_dir, is_best=False
+                        )
+            else:
+                if is_main_process(rank):
+                    epoch_time = time.time() - epoch_start_time
+                    logger.info(
+                        f"Epoch {epoch:3d}/{args.epochs} | "
+                        f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
+                        f"LR={scheduler.get_last_lr()[0]:.2e} | "
+                        f"Time={format_time(epoch_time)}"
+                    )
+            
+            # Early stopping check
+            if args.early_stopping_patience > 0:
+                if patience_counter >= args.early_stopping_patience:
+                    if is_main_process(rank):
+                        logger.info(f"Early stopping at epoch {epoch}")
+                    break
+            
+            # Periodic memory cleanup
+            if epoch % 10 == 0:
+                torch.cuda.empty_cache()
+                gc.collect()
+    
+    except KeyboardInterrupt:
+        if is_main_process(rank):
+            logger.info("Training interrupted by user")
+    
+    finally:
+        # Final evaluation and reporting
+        total_time = time.time() - training_start_time
+        
+        if is_main_process(rank):
+            logger.info("=" * 80)
+            logger.info("Training complete")
+            logger.info(f"Total time: {format_time(total_time)}")
+            logger.info(f"Best validation accuracy: {best_acc*100:.2f}%")
+            logger.info("=" * 80)
+            
+            # Load best model for final evaluation
+            best_checkpoint_path = output_dir / 'best_model.pt'
+            if best_checkpoint_path.exists():
+                checkpoint = torch.load(
+                    best_checkpoint_path,
+                    map_location=device,
+                    weights_only=False
+                )
+                if isinstance(model, DDP):
+                    model.module.load_state_dict(checkpoint['model_state_dict'])
                 else:
-                    patience_counter += 1
+                    model.load_state_dict(checkpoint['model_state_dict'])
                 
-                # Periodic checkpoint
-                if epoch % args.save_every == 0:
-                    save_checkpoint(
-                        model, optimizer, scheduler, scaler, epoch,
-                        best_acc, config, stats, output_dir, is_best=False
-                    )
-        else:
-            if is_main_process(rank):
-                epoch_time = (datetime.now() - epoch_start_time).total_seconds()
-                logger.info(
-                    f"Epoch {epoch:3d}/{args.epochs} | "
-                    f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
-                    f"LR={scheduler.get_last_lr()[0]:.2e} | "
-                    f"Time={format_time(epoch_time)}"
+                # Final evaluation with predictions
+                logger.info("Running final evaluation...")
+                final_results = evaluate(
+                    model, val_loader, class_weights, device, rank, world_size, config,
+                    return_predictions=True
                 )
+                
+                # Save predictions
+                np.savez(
+                    output_dir / 'final_predictions.npz',
+                    predictions=final_results['predictions'],
+                    labels=final_results['labels'],
+                    probabilities=final_results['probabilities']
+                )
+                
+                # Confusion matrix
+                cm = confusion_matrix(final_results['labels'], final_results['predictions'])
+                logger.info(f"\nConfusion matrix:\n{cm}")
+                np.save(output_dir / 'confusion_matrix.npy', cm)
+                
+                # Classification report
+                report = classification_report(
+                    final_results['labels'],
+                    final_results['predictions'],
+                    target_names=list(CLASS_NAMES),
+                    digits=4
+                )
+                logger.info(f"\nClassification report:\n{report}")
+                
+                with open(output_dir / 'classification_report.txt', 'w') as f:
+                    f.write(report)
+            
+            # Save final configuration
+            config_dict = {
+                'model_config': config.to_dict(),
+                'training_args': vars(args),
+                'stats': stats,
+                'best_accuracy': float(best_acc),
+                'world_size': world_size,
+                'total_training_time_seconds': total_time,
+                'pytorch_version': torch.__version__,
+                'cuda_version': torch.version.cuda,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            with open(output_dir / 'config.json', 'w') as f:
+                json.dump(config_dict, f, indent=2, cls=NumpyJSONEncoder)
+            
+            logger.info(f"\nAll results saved to: {output_dir}")
         
-        # Early stopping
-        if args.early_stopping_patience > 0 and patience_counter >= args.early_stopping_patience:
-            if is_main_process(rank):
-                logger.info(f"Early stopping at epoch {epoch}")
-            break
-        
-        # Periodic memory cleanup
-        if epoch % 10 == 0:
-            torch.cuda.empty_cache()
-            gc.collect()
-    
-    # Final evaluation and reporting
-    total_time = (datetime.now() - training_start_time).total_seconds()
-    
-    if is_main_process(rank):
-        logger.info("=" * 80)
-        logger.info(f"Training complete")
-        logger.info(f"Total time: {format_time(total_time)}")
-        logger.info(f"Best validation accuracy: {best_acc*100:.2f}%")
-        logger.info("=" * 80)
-        
-        # Load best model
-        checkpoint = torch.load(
-            output_dir / 'best_model.pt',
-            map_location=device,
-            weights_only=False
-        )
-        if isinstance(model, DDP):
-            model.module.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Final evaluation with predictions
-        logger.info("Running final evaluation...")
-        final_results = evaluate(
-            model, val_loader, class_weights, device, rank, world_size, config,
-            return_predictions=True
-        )
-        
-        # Save predictions
-        np.savez(
-            output_dir / 'final_predictions.npz',
-            predictions=final_results['predictions'],
-            labels=final_results['labels'],
-            probabilities=final_results['probabilities']
-        )
-        
-        # Confusion matrix
-        cm = confusion_matrix(final_results['labels'], final_results['predictions'])
-        logger.info(f"\nConfusion matrix:\n{cm}")
-        np.save(output_dir / 'confusion_matrix.npy', cm)
-        
-        # Classification report
-        report = classification_report(
-            final_results['labels'],
-            final_results['predictions'],
-            target_names=list(CLASS_NAMES),
-            digits=4
-        )
-        logger.info(f"\nClassification report:\n{report}")
-        
-        with open(output_dir / 'classification_report.txt', 'w') as f:
-            f.write(report)
-        
-        # Save configuration
-        config_dict = {
-            'model_config': asdict(config),
-            'training_args': vars(args),
-            'stats': stats,
-            'best_accuracy': float(best_acc),
-            'final_accuracy': final_results['accuracy'],
-            'world_size': world_size,
-            'total_training_time_seconds': total_time,
-            'pytorch_version': torch.__version__,
-            'cuda_version': torch.version.cuda
-        }
-        
-        with open(output_dir / 'config.json', 'w') as f:
-            json.dump(config_dict, f, indent=2, cls=NumpyJSONEncoder)
-        
-        logger.info(f"\nAll results saved to: {output_dir}")
-    
-    # Cleanup
-    cleanup_distributed()
+        # Cleanup
+        cleanup_distributed()
 
 
 if __name__ == '__main__':
