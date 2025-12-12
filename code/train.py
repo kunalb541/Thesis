@@ -20,7 +20,7 @@ import random
 import h5py
 import os
 import gc
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 from contextlib import contextmanager
 
 try:
@@ -38,9 +38,6 @@ except ImportError as e:
 warnings.filterwarnings("ignore")
 
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
 CLIP_NORM = 1.0
 DEFAULT_LR = 3e-4
 WARMUP_EPOCHS = 5
@@ -50,7 +47,6 @@ MISSION_DURATION_DAYS = 1826.25
 
 
 class NumpyEncoder(json.JSONEncoder):
-    """JSON encoder for numpy types."""
     def default(self, obj):
         if isinstance(obj, (np.float32, np.float64, np.floating)):
             return float(obj)
@@ -61,11 +57,7 @@ class NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-# =============================================================================
-# DISTRIBUTED SETUP
-# =============================================================================
 def setup_distributed() -> Tuple[int, int, int, bool]:
-    """Initialize distributed training environment with optimal settings."""
     if 'RANK' in os.environ:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -83,16 +75,11 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
                 timeout=timedelta(seconds=1800)
             )
             
-            # A100-optimized performance settings
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.enabled = True
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-            
-            # Enable TensorFloat-32 for A100
             torch.set_float32_matmul_precision('high')
-            
-            # Memory optimizations
             torch.cuda.empty_cache()
             gc.collect()
             
@@ -102,7 +89,6 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
 
 
 def setup_logging(rank: int, output_dir: Path):
-    """Configure logging system."""
     logger = logging.getLogger("TRAIN")
     
     if rank == 0:
@@ -128,7 +114,6 @@ def setup_logging(rank: int, output_dir: Path):
 
 
 def set_seed_everywhere(seed: int, rank: int = 0) -> None:
-    """Set random seeds for reproducibility."""
     random.seed(seed + rank)
     np.random.seed(seed + rank)
     torch.manual_seed(seed + rank)
@@ -137,43 +122,49 @@ def set_seed_everywhere(seed: int, rank: int = 0) -> None:
         torch.cuda.manual_seed(seed + rank)
         torch.cuda.manual_seed_all(seed + rank)
     
-    # For maximum speed on A100, use non-deterministic algorithms
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     torch.use_deterministic_algorithms(False)
 
 
-# =============================================================================
-# DATASET WITH OPTIMIZED HDF5 ACCESS
-# =============================================================================
-
-def load_labels_and_split(data_path: Path, logger: logging.Logger) -> Tuple[np.ndarray, np.ndarray, Dict]:
-    """
-    Loads only the 'labels' eagerly to perform train/val split.
-    Computes normalization stats from a sample of training data.
-    """
+def load_labels_and_split(
+    data_path: Path, 
+    logger: Optional[logging.Logger],
+    rank: int = 0,
+    is_ddp: bool = False
+) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    cache_path = data_path.parent / f"{data_path.stem}_split_cache.npz"
+    
+    if cache_path.exists():
+        if rank == 0 and logger:
+            logger.info(f"Loading cached split from {cache_path}")
+        cache = np.load(cache_path)
+        train_idx = cache['train_idx']
+        val_idx = cache['val_idx']
+        stats = {'median': float(cache['median']), 'iqr': float(cache['iqr'])}
+        
+        if rank == 0 and logger:
+            logger.info(f"Loaded: train={len(train_idx)}, val={len(val_idx)}")
+        
+        if is_ddp:
+            dist.barrier()
+        
+        return train_idx, val_idx, stats
+    
     with h5py.File(data_path, 'r', libver='latest', swmr=True) as f:
-        # Load labels (small, fast)
         labels = f['labels'][:]
         
-        # Perform train/val split on indices
         indices = np.arange(len(labels))
         train_idx, val_idx = train_test_split(
             indices, test_size=0.2, shuffle=True, random_state=SEED, stratify=labels
         )
         
-        # Compute normalization stats from training data sample
         flux_data = f['flux']
         sample_size = min(100000, len(train_idx))
+        sample_indices = np.random.choice(train_idx, size=sample_size, replace=False)
+        sample_indices_sorted = np.sort(sample_indices)
         
-        # Sample random indices and SORT them for HDF5 fancy indexing
-        sample_indices_unsorted = np.random.choice(train_idx, size=sample_size, replace=False)
-        sample_indices_sorted = np.sort(sample_indices_unsorted)
-        
-        # Lazy load only the sample
         sample_flux = flux_data[sample_indices_sorted]
-        
-        # Compute robust statistics
         valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
         
         if len(valid_flux) == 0:
@@ -188,23 +179,30 @@ def load_labels_and_split(data_path: Path, logger: logging.Logger) -> Tuple[np.n
 
         stats = {'median': median, 'iqr': iqr}
         
-        # Log class distribution
-        if logger:
+        if logger and rank == 0:
             unique, counts = np.unique(labels[train_idx], return_counts=True)
             logger.info("Training class distribution:")
             for cls, cnt in zip(unique, counts):
                 logger.info(f"  Class {cls}: {cnt} ({100*cnt/len(train_idx):.2f}%)")
-        
+    
+    if rank == 0:
+        np.savez(
+            cache_path, 
+            train_idx=train_idx, 
+            val_idx=val_idx, 
+            median=stats['median'], 
+            iqr=stats['iqr']
+        )
+        if logger:
+            logger.info(f"Cached split to {cache_path}")
+    
+    if is_ddp:
+        dist.barrier()
+    
     return train_idx, val_idx, stats
 
 
-class MicrolensingLazyDataset(Dataset):
-    """
-    Roman Space Telescope microlensing dataset with optimized lazy HDF5 loading.
-    
-    Thread-safe design: Each DataLoader worker opens its own file handle.
-    """
-    
+class MicrolensingBatchDataset(Dataset):
     def __init__(
         self, 
         data_path: Path,
@@ -222,61 +220,27 @@ class MicrolensingLazyDataset(Dataset):
         self._labels_dset = None
         
     def _open_h5_file(self):
-        """Open HDF5 file handle with optimal settings for parallel access."""
         if self._h5_file is None:
-            # Use libver='latest' and swmr=True for best performance with concurrent access
             self._h5_file = h5py.File(self.data_path, 'r', libver='latest', swmr=True)
-            # Cache dataset handles to avoid repeated lookups
             self._flux_dset = self._h5_file['flux']
             self._delta_t_dset = self._h5_file['delta_t']
             self._labels_dset = self._h5_file['labels']
+    
+    @property
+    def dsets(self):
+        self._open_h5_file()
+        return self._flux_dset, self._delta_t_dset, self._labels_dset
             
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, idx_in_subset: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fetch single sample with optimized HDF5 access."""
-        # Open file handle lazily in worker thread
+    def __getitem__(self, idx_in_subset: int) -> Tuple[int, int]:
         self._open_h5_file()
-        
-        # Get global index
-        global_idx = self.indices[idx_in_subset]
-        
-        # Direct slice access (fastest method)
-        flux_np = self._flux_dset[global_idx, :]
-        delta_t_np = self._delta_t_dset[global_idx, :]
-        label_np = self._labels_dset[global_idx]
-        
-        # Convert to tensors (contiguous for GPU transfer)
-        flux = torch.from_numpy(flux_np).float().contiguous()
-        delta_t = torch.from_numpy(delta_t_np).float().contiguous()
-        label = torch.tensor(label_np, dtype=torch.long)
-        
-        # Preprocessing
-        padding_mask = (~torch.isnan(flux)) & (flux != 0.0)
-        
-        if self.handle_nans == 'zero':
-            flux = torch.nan_to_num(flux, nan=0.0)
-        
-        delta_t = torch.nan_to_num(delta_t, nan=0.0)
-        
-        # Apply normalization
-        median = self.stats['median']
-        iqr = self.stats['iqr']
-        flux = (flux - median) / iqr
-        
-        # Re-apply padding mask
-        flux = flux * padding_mask.float()
-        
-        return (
-            flux,
-            delta_t,
-            padding_mask.sum().long().clamp(min=1),
-            label
-        )
+        global_idx = int(self.indices[idx_in_subset])
+        label = int(self._labels_dset[global_idx])
+        return global_idx, label
 
     def __del__(self):
-        """Close HDF5 file handle on cleanup."""
         if self._h5_file is not None:
             try:
                 self._h5_file.close()
@@ -284,19 +248,50 @@ class MicrolensingLazyDataset(Dataset):
                 pass
 
 
+def batch_h5_collate_fn(batch: List[Tuple[int, int]], dataset: MicrolensingBatchDataset):
+    global_indices = np.array([item[0] for item in batch], dtype=np.int64)
+    labels_list = np.array([item[1] for item in batch], dtype=np.int64)
+    
+    sort_order = np.argsort(global_indices)
+    sorted_indices = global_indices[sort_order]
+    
+    flux_dset, delta_t_dset, _ = dataset.dsets
+    
+    flux_batch = flux_dset[sorted_indices.tolist()]
+    delta_t_batch = delta_t_dset[sorted_indices.tolist()]
+    
+    unsort_order = np.argsort(sort_order)
+    flux_batch = flux_batch[unsort_order]
+    delta_t_batch = delta_t_batch[unsort_order]
+    
+    flux = torch.from_numpy(flux_batch).float()
+    delta_t = torch.from_numpy(delta_t_batch).float()
+    labels = torch.from_numpy(labels_list).long()
+    
+    padding_mask = (~torch.isnan(flux)) & (flux != 0.0)
+    
+    if dataset.handle_nans == 'zero':
+        flux = torch.nan_to_num(flux, nan=0.0)
+    
+    delta_t = torch.nan_to_num(delta_t, nan=0.0)
+    
+    median = dataset.stats['median']
+    iqr = dataset.stats['iqr']
+    flux = (flux - median) / iqr
+    flux = flux * padding_mask.float()
+    
+    lengths = padding_mask.sum(dim=1).long().clamp(min=1)
+    
+    return flux, delta_t, lengths, labels
+
+
 def worker_init_fn(worker_id: int):
-    """Initialize each DataLoader worker with unique seed and optimal settings."""
-    # Set unique seed per worker
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
-    
-    # Force HDF5 to use low-level driver for better multiprocessing
-    os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 
 
 def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Tensor:
-    """Compute inverse frequency class weights for balanced training."""
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     weights = total / (len(unique) * counts)
@@ -305,12 +300,8 @@ def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Ten
     return weight_tensor
 
 
-# =============================================================================
-# TRAINING LOOP WITH OPTIMIZATIONS
-# =============================================================================
 @contextmanager
 def timer(name: str, logger: logging.Logger, rank: int):
-    """Context manager for timing code blocks."""
     if rank == 0:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -338,7 +329,6 @@ def train_epoch(
     accumulation_steps: int = 1,
     clip_norm: float = CLIP_NORM
 ) -> Tuple[float, float]:
-    """Execute one training epoch with gradient accumulation and AMP."""
     model.train()
     
     total_loss = 0.0
@@ -350,33 +340,25 @@ def train_epoch(
     optimizer.zero_grad(set_to_none=True)
     
     for batch_idx, (flux, delta_t, lengths, labels) in enumerate(iterator):
-        # Non-blocking transfer for overlap with computation
         flux = flux.to(device, non_blocking=True)
         delta_t = delta_t.to(device, non_blocking=True)
         lengths = lengths.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         
-        # AMP context with bfloat16 for A100
         with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
             output = model(flux, delta_t, lengths=lengths)
             loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
             loss = loss / accumulation_steps
         
-        # Scaled backward pass
         scaler.scale(loss).backward()
         
-        # Gradient accumulation step
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
-            # Unscale for gradient clipping
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
-            
-            # Optimizer step
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
         
-        # Compute metrics
         with torch.no_grad():
             pred = output['probs'].argmax(dim=-1)
             correct += (pred == labels).sum().item()
@@ -389,7 +371,6 @@ def train_epoch(
                 'acc': f'{100.0 * correct / total:.2f}%'
             })
     
-    # Cleanup
     torch.cuda.empty_cache()
     
     return total_loss / total, correct / total
@@ -404,7 +385,6 @@ def evaluate(
     config: ModelConfig,
     return_predictions: bool = False
 ) -> Dict[str, Any]:
-    """Evaluate model on validation set with AMP."""
     model.eval()
     
     total_loss = 0.0
@@ -460,7 +440,6 @@ def save_checkpoint(
     output_dir: Path,
     is_best: bool = False
 ) -> None:
-    """Save model checkpoint."""
     if isinstance(model, DDP):
         model_state = model.module.state_dict()
     else:
@@ -482,24 +461,18 @@ def save_checkpoint(
         torch.save(checkpoint, output_dir / f'checkpoint_epoch_{epoch}.pt')
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
 def main():
     parser = argparse.ArgumentParser(description='Train Roman microlensing classifier')
     
-    # Data
     parser.add_argument('--data', type=str, required=True, help='Path to training data')
     parser.add_argument('--output-dir', type=str, default='../results', help='Output directory')
     parser.add_argument('--experiment-name', type=str, default=None, help='Experiment name')
     
-    # Model architecture
     parser.add_argument('--d-model', type=int, default=64, help='Hidden dimension')
     parser.add_argument('--n-layers', type=int, default=2, help='Number of recurrent layers')
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout probability')
     parser.add_argument('--window-size', type=int, default=5, help='Causal window size')
     
-    # Model variants
     parser.add_argument('--hierarchical', dest='hierarchical', action='store_true', 
                         help='Use hierarchical classification')
     parser.add_argument('--no-hierarchical', dest='hierarchical', action='store_false')
@@ -523,7 +496,6 @@ def main():
     parser.add_argument('--no-layer-norm', dest='use_layer_norm', action='store_false')
     parser.set_defaults(use_layer_norm=True)
     
-    # Training
     parser.add_argument('--batch-size', type=int, default=256, help='Batch size per GPU')
     parser.add_argument('--accumulation-steps', type=int, default=1, help='Gradient accumulation steps')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
@@ -532,7 +504,6 @@ def main():
     parser.add_argument('--warmup-epochs', type=int, default=5, help='Warmup epochs')
     parser.add_argument('--clip-norm', type=float, default=1.0, help='Gradient clipping norm')
     
-    # Optimization
     parser.add_argument('--use-amp', dest='use_amp', action='store_true', 
                         help='Use automatic mixed precision')
     parser.add_argument('--no-amp', dest='use_amp', action='store_false')
@@ -542,28 +513,25 @@ def main():
                         action='store_true', help='Use gradient checkpointing')
     parser.add_argument('--no-gradient-checkpointing', dest='use_gradient_checkpointing', 
                         action='store_false')
-    parser.set_defaults(use_gradient_checkpointing=False)  # Disabled by default for speed
+    parser.set_defaults(use_gradient_checkpointing=False)
     
     parser.add_argument('--use-class-weights', action='store_true', default=True,
                         help='Use class weighting')
     parser.add_argument('--compile', action='store_true', default=False,
                         help='Use torch.compile')
     
-    # DataLoader optimization
     parser.add_argument('--num-workers', type=int, default=8, 
-                        help='DataLoader workers per GPU (8-16 recommended)')
+                        help='DataLoader workers per GPU')
     parser.add_argument('--prefetch-factor', type=int, default=2,
                         help='Batches to prefetch per worker')
     
-    # Evaluation
     parser.add_argument('--eval-every', type=int, default=5, help='Evaluate every N epochs')
     parser.add_argument('--save-every', type=int, default=10, help='Save checkpoint every N epochs')
     parser.add_argument('--early-stopping-patience', type=int, default=0, 
-                        help='Early stopping patience (0=disabled)')
+                        help='Early stopping patience')
     
     args = parser.parse_args()
     
-    # Setup distributed environment
     rank, local_rank, world_size, is_ddp = setup_distributed()
     device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
@@ -584,32 +552,34 @@ def main():
         logger.info(f"Random seed: {SEED}")
         logger.info(f"PyTorch version: {torch.__version__}")
         logger.info(f"CUDA version: {torch.version.cuda}")
-        logger.info(f"Device: {torch.cuda.get_device_name(local_rank)}")
+        if torch.cuda.is_available():
+            logger.info(f"Device: {torch.cuda.get_device_name(local_rank)}")
         logger.info(f"World size: {world_size} GPUs")
     
     set_seed_everywhere(SEED, rank)
     
-    # Load data and compute splits
     if rank == 0:
-        logger.info(f"Loading data indices and computing normalization stats: {args.data}")
+        logger.info(f"Loading data: {args.data}")
     
-    train_idx, val_idx, stats = load_labels_and_split(Path(args.data), logger if rank == 0 else None)
+    train_idx, val_idx, stats = load_labels_and_split(
+        Path(args.data), 
+        logger if rank == 0 else None,
+        rank=rank,
+        is_ddp=is_ddp
+    )
     
     if rank == 0:
         logger.info(f"Dataset size: {len(train_idx) + len(val_idx)} samples")
         logger.info(f"Split: train={len(train_idx)}, val={len(val_idx)}")
         logger.info(f"Normalization: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
     
-    # Create datasets
-    train_dataset = MicrolensingLazyDataset(Path(args.data), train_idx, stats)
-    val_dataset = MicrolensingLazyDataset(Path(args.data), val_idx, stats)
+    train_dataset = MicrolensingBatchDataset(Path(args.data), train_idx, stats)
+    val_dataset = MicrolensingBatchDataset(Path(args.data), val_idx, stats)
     
-    # Load labels for class weights
     with h5py.File(args.data, 'r') as f:
         all_labels = f['labels'][:]
     labels_train_for_weights = all_labels[train_idx]
     
-    # Create samplers
     if is_ddp:
         train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=SEED, drop_last=True)
         val_sampler = DistributedSampler(val_dataset, shuffle=False)
@@ -617,7 +587,9 @@ def main():
         train_sampler = None
         val_sampler = None
     
-    # Create DataLoaders with optimal settings
+    train_collate = lambda batch: batch_h5_collate_fn(batch, train_dataset)
+    val_collate = lambda batch: batch_h5_collate_fn(batch, val_dataset)
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -628,7 +600,8 @@ def main():
         drop_last=True,
         persistent_workers=True,
         prefetch_factor=args.prefetch_factor,
-        worker_init_fn=worker_init_fn
+        worker_init_fn=worker_init_fn,
+        collate_fn=train_collate
     )
     
     val_loader = DataLoader(
@@ -640,14 +613,15 @@ def main():
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=args.prefetch_factor,
-        worker_init_fn=worker_init_fn
+        worker_init_fn=worker_init_fn,
+        collate_fn=val_collate
     )
     
     if rank == 0:
         logger.info(f"DataLoader workers per GPU: {args.num_workers}")
         logger.info(f"Total DataLoader workers: {args.num_workers * world_size}")
+        logger.info(f"Batched HDF5 reads enabled")
     
-    # Create model with optimal dtype for A100
     config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
@@ -662,7 +636,6 @@ def main():
         use_gradient_checkpointing=args.use_gradient_checkpointing
     )
     
-    # Use bfloat16 for AMP on A100 (better than float16)
     amp_dtype = torch.bfloat16 if args.use_amp and torch.cuda.is_available() else torch.float32
     model = RomanMicrolensingGRU(config, dtype=amp_dtype).to(device)
     
@@ -674,9 +647,8 @@ def main():
         effective_batch = args.batch_size * args.accumulation_steps * world_size
         logger.info(f"Effective batch size: {effective_batch}")
         logger.info(f"Gradient checkpointing: {args.use_gradient_checkpointing}")
-        logger.info(f"Mixed precision (AMP): {args.use_amp}")
+        logger.info(f"Mixed precision: {args.use_amp}")
     
-    # Wrap model in DDP
     if is_ddp:
         model = DDP(
             model,
@@ -685,28 +657,24 @@ def main():
             gradient_as_bucket_view=True,
             find_unused_parameters=False,
             broadcast_buffers=True,
-            static_graph=True  # Optimization for static computation graphs
+            static_graph=True
         )
     
-    # Compile model (PyTorch 2.0+)
     if args.compile and hasattr(torch, 'compile'):
         if rank == 0:
-            logger.info("Compiling model with torch.compile...")
+            logger.info("Compiling model with torch.compile")
         model = torch.compile(model, mode='max-autotune')
     
-    # Create optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
         betas=(0.9, 0.999),
-        fused=True  # Fused AdamW for A100
+        fused=True
     )
     
-    # Create gradient scaler for AMP
     scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)
     
-    # Create learning rate scheduler
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
             return (epoch + 1) / args.warmup_epochs
@@ -714,7 +682,6 @@ def main():
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
-    # Compute class weights
     if args.use_class_weights:
         class_weights = compute_class_weights(labels_train_for_weights, device)
         if rank == 0:
@@ -725,7 +692,6 @@ def main():
     if is_ddp:
         dist.barrier()
     
-    # Training loop
     if rank == 0:
         logger.info("=" * 80)
         logger.info("Training started")
@@ -796,7 +762,6 @@ def main():
                 logger.info(f"Early stopping at epoch {epoch}")
             break
     
-    # Final evaluation
     if rank == 0:
         logger.info("=" * 80)
         logger.info(f"Training complete | Best accuracy: {best_acc*100:.2f}%")
@@ -834,7 +799,6 @@ def main():
         with open(output_dir / 'classification_report.txt', 'w') as f:
             f.write(report)
         
-        # Save training configuration
         config_dict = {
             'model_config': config.__dict__,
             'training_args': vars(args),
