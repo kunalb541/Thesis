@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # =============================================================================
 @dataclass
 class ModelConfig:
-    """GOD MODE Configuration - Optimized defaults."""
+    
     # Architecture
     d_model: int = 256
     n_layers: int = 4
@@ -26,7 +26,7 @@ class ModelConfig:
     max_seq_len: int = 2400
     n_classes: int = 3
     
-    # Model variants (GOD MODE defaults)
+    # Model variants 
     hierarchical: bool = True
     use_residual: bool = True
     use_layer_norm: bool = True
@@ -88,7 +88,7 @@ class RobustSinusoidalEncoding(nn.Module):
 
 
 # =============================================================================
-# FLASH ATTENTION POOLING (GOD MODE)
+# FLASH ATTENTION POOLING 
 # =============================================================================
 class FlashAttentionPooling(nn.Module):
     """
@@ -178,11 +178,11 @@ class DepthwiseSeparableConv1d(nn.Module):
 
 
 # =============================================================================
-# OPTIMIZED FEATURE EXTRACTOR (GOD MODE CONV)
+# OPTIMIZED FEATURE EXTRACTOR
 # =============================================================================
 class OptimizedConvFeatureExtractor(nn.Module):
     """
-    GOD MODE: Depthwise separable + Fused ops + SwiGLU.
+    Depthwise separable + Fused ops + SwiGLU.
     4x faster than standard conv.
     """
     
@@ -320,11 +320,11 @@ class OptimizedStackedGRU(nn.Module):
 
 
 # =============================================================================
-# GOD MODE MAIN MODEL
+# MAIN MODEL
 # =============================================================================
 class RomanMicrolensingGRU(nn.Module):
     """
-    GOD MODE: Ultra-optimized Roman microlensing classifier.
+    Ultra-optimized Roman microlensing classifier.
     
     Optimizations:
     - Depthwise separable convolutions (4x faster)
@@ -353,7 +353,7 @@ class RomanMicrolensingGRU(nn.Module):
             nn.Dropout(config.dropout)
         )
         
-        # 2. Feature extraction (GOD MODE: Depthwise separable conv)
+        # 2. Feature extraction (Depthwise separable conv)
         self.feature_extractor = OptimizedConvFeatureExtractor(config.d_model, config.dropout)
         
         # 3. Multi-scale windowed processing
@@ -420,7 +420,6 @@ class RomanMicrolensingGRU(nn.Module):
         return_all_timesteps: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass (GOD MODE optimized).
         
         Args:
             flux: (B, T) normalized magnitudes
@@ -572,7 +571,7 @@ def get_model_info(model: nn.Module) -> Dict[str, Any]:
 # =============================================================================
 if __name__ == '__main__':
     print("=" * 80)
-    print("GOD MODE: ROMAN MICROLENSING GRU")
+    print("ROMAN MICROLENSING GRU")
     print("=" * 80)
     
     config = ModelConfig(
