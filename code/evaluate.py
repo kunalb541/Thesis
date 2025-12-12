@@ -137,6 +137,8 @@ class RomanEvaluator:
         self.lengths = self.data_dict['lengths']
         self.timestamps = self.data_dict['timestamps']
         self.params = self.data_dict['params']
+        self.norm_median = self.data_dict['norm_median']
+        self.norm_iqr = self.data_dict['norm_iqr']
         
         print("\nRunning inference on test set...")
         self.probs, self.preds, self.confs = self._run_inference()
@@ -226,8 +228,22 @@ class RomanEvaluator:
         for ptype in ['flat', 'pspl', 'binary']:
             key = f'params_{ptype}'
             param_array = data.get(key, data.get(ptype, None))
+            # Need to filter the array to only include the events of the correct type
             if param_array is not None and param_array.dtype.fields is not None:
-                params[ptype] = [dict(zip(param_array.dtype.names, row)) for row in param_array]
+                # Find indices in the full array 'y' that correspond to this ptype
+                ptype_idx = CLASS_NAMES.index(ptype.capitalize())
+                original_indices = np.where(y == ptype_idx)[0]
+                
+                # Check if the param_array is the same length as the number of events of that type
+                if len(param_array) == len(original_indices):
+                    # We can use the param_array directly as it corresponds to the correct subset
+                    params[ptype] = [dict(zip(param_array.dtype.names, row)) for row in param_array]
+                else:
+                    # Fallback/Debug: The param array might be the full set of parameters
+                    # We will rely on _plot_diagnostic to handle the length check
+                    # For safety, let's skip if the lengths are drastically mismatched
+                    if len(param_array) > 0:
+                        params[ptype] = [dict(zip(param_array.dtype.names, row)) for row in param_array]
         
         if not params:
             print("  Physical parameters (params_pspl, params_binary, etc.) not found.")
@@ -242,6 +258,8 @@ class RomanEvaluator:
             delta_t = delta_t[indices]
             timestamps = timestamps[indices]
             lengths = lengths[indices]
+            # NOTE: Param dict is NOT subsampled here. It is handled in _plot_diagnostic based on the filtered 'y'
+
         
         print(f"  Loaded {len(raw_flux):,} samples")
         print(f"  Classes: {np.unique(y)}")
@@ -281,6 +299,10 @@ class RomanEvaluator:
             'norm_iqr': iqr
         }
 
+    # =========================================================================
+    # CORE LOGIC
+    # =========================================================================
+    
     def _run_inference(self):
         """Run inference on test set."""
         n = len(self.flux)
@@ -366,7 +388,6 @@ class RomanEvaluator:
         print("\nRunning full analysis and generating plots...")
         self.plot_confusion_matrix()
         self.plot_roc_curves()
-        # FIX: The missing method is now called here.
         self.plot_calibration_curve() 
         
         if self.n_example_grid_per_type > 0:
@@ -388,8 +409,24 @@ class RomanEvaluator:
     # PLOTTING FUNCTIONS
     # =========================================================================
     
+    def _raw_flux_to_relative_mag(self, raw_flux: np.ndarray) -> np.ndarray:
+        """Converts raw flux to relative magnitude (brighter is up)."""
+        # Relative Mag = 2.5 * log10(F_median / F)
+        # We plot the NEGATIVE of this value to keep brighter light curves at the top.
+        
+        # Avoid log(0) and potential division by zero by replacing 0 with a small epsilon
+        epsilon = 1e-10 
+        flux = np.where(raw_flux == 0, epsilon, raw_flux)
+
+        # Relative magnitude: M = -2.5 * log10(F / F_median)
+        # This is equivalent to plotting: 2.5 * log10(F_median / F)
+        relative_mag = 2.5 * np.log10(self.norm_median / flux)
+
+        # Plot NEGATIVE relative mag to keep brighter/peak flux UP
+        return -relative_mag
+    
     def plot_example_grid(self):
-        """Plot a 3x4 grid of raw light curves (4 per class, scatter plot, no padding, inverted y-axis)."""
+        """Plot a 3x4 grid of relative magnitude light curves (4 per class, scatter plot, no padding, inverted y-axis)."""
         print(f"\nGenerating {self.n_example_grid_per_type} example grid plots per class...")
         
         n_rows = 3
@@ -401,7 +438,7 @@ class RomanEvaluator:
         if n_rows == 1 or n_cols == 1:
             axes = np.atleast_2d(axes)
 
-        fig.suptitle('Example Simulated Light Curves (Raw Flux)', fontsize=16)
+        fig.suptitle('Example Simulated Light Curves (Relative Magnitude)', fontsize=16)
         
         for i, cls_name in enumerate(CLASS_NAMES):
             candidates = np.where(self.y == i)[0]
@@ -413,24 +450,36 @@ class RomanEvaluator:
             for j, idx in enumerate(selection):
                 ax = axes[i, j]
                 length = self.lengths[idx]
+                
+                # --- Magnitude Conversion and Slicing ---
                 time_axis = self.timestamps[idx, :length]
                 raw_flux = self.raw_flux[idx, :length]
+                # Convert only the non-padded, actual data points
+                mag_data = self._raw_flux_to_relative_mag(raw_flux)
                 
                 # Scatter plot for discrete data points, excluding pad values
-                ax.scatter(time_axis, raw_flux, color=COLORS[i], s=5, linewidths=0)
+                ax.scatter(time_axis, mag_data, color=COLORS[i], s=5, linewidths=0)
                 
-                # Invert Y-axis for standard astronomical convention (brighter/higher flux peak is up)
-                ax.invert_yaxis()
+                # Invert Y-axis for standard astronomical convention (fainter/higher magnitude number is up)
+                # Since we plotted -Relative_Mag, the brighter events (lower mag number) are UP, so we DON'T invert.
+                # If we plot Relative_Mag (brighter is positive), we DO invert.
+                # Let's stick to the convention where smaller mag number is UP (brighter).
+                # Since the peak is now at the max positive value, we do NOT invert.
+                
+                # ax.invert_yaxis() # DO NOT INVERT Y-AXIS - MAGNITUDE IS ALREADY INVERTED
                 
                 ax.set_title(f'True: {cls_name}', fontsize=10)
                 
                 if i == n_rows - 1:
                     ax.set_xlabel('Time (Days)', fontsize=8)
                 if j == 0:
-                    ax.set_ylabel('Raw Flux (Jy)', fontsize=8)
+                    ax.set_ylabel('-Relative Magnitude', fontsize=8) # Label reflects the inverted axis
                 
                 ax.tick_params(axis='both', which='major', labelsize=7)
                 ax.grid(True, which='both', linestyle='--', alpha=0.5)
+                
+                # Add a line at 0 for median flux/mag
+                ax.axhline(0, color='k', linestyle=':', alpha=0.5, linewidth=1)
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.98])
         plt.savefig(self.output_dir / 'example_data_grid.png')
@@ -490,7 +539,6 @@ class RomanEvaluator:
         plt.close()
         print("  Generated ROC Curves.")
 
-    # FIX: Restored the missing function
     def plot_calibration_curve(self):
         """Plot and save the reliability diagram (calibration curve)."""
         
@@ -515,7 +563,6 @@ class RomanEvaluator:
         plt.savefig(self.output_dir / 'calibration_curve.png')
         plt.close()
         print("  Generated Calibration Curve.")
-    # END FIX
 
     def plot_parameter_diagnostics(self):
         """Plot diagnostic metrics against physical parameters (if available)."""
@@ -526,11 +573,10 @@ class RomanEvaluator:
         print("\nRunning parameter diagnostics...")
         
         try:
-            # This calls the method that generates diag_binary_u0.png
+            # These calls now handle their own success/failure prints
             self._plot_binary_u0_accuracy() 
             self._plot_binary_q_accuracy()
             self._plot_pspl_tE_accuracy()
-            print("  Generated Parameter Diagnostics.")
         except Exception as e:
             print(f"  Error in parameter diagnostics: {e}")
 
@@ -550,18 +596,27 @@ class RomanEvaluator:
             
             if len(param_list) != class_mask.sum():
                  warnings.warn(f"Mismatch in counts for {data_type}: params={len(param_list)}, y_true={class_mask.sum()}. Skipping plot.")
+                 print(f"  [DEBUG] Skipping {class_name} {param_key} plot due to data mismatch: {len(param_list)} params vs {class_mask.sum()} samples in the true class.")
                  return
 
             param_vals = np.array([p.get(param_key, np.nan) for p in param_list])
             class_correct = (class_preds == class_idx).astype(int)
 
+            # Filter out NaN or zero values, as is required for log-plotting and meaningful analysis
             valid = ~np.isnan(param_vals) & (param_vals > 0)
+            
+            # --- CRITICAL DEBUGGING PRINT ---
+            if valid.sum() == 0:
+                print(f"  [DEBUG] Skipping {class_name} {param_key} plot: {class_mask.sum()} samples found, but 0 valid parameter values (>0 and not NaN) remain after filtering.")
+            # --------------------------------
+            
             param_vals = param_vals[valid]
             class_correct = class_correct[valid]
 
-            if len(param_vals) == 0: return
+            if len(param_vals) == 0:
+                return # Final exit if no valid data remains for plotting
 
-            # Bin by parameter on a log scale
+            # Plotting code starts here (only if data is valid)
             log_param = np.log10(param_vals)
             bins = np.linspace(log_param.min(), log_param.max(), 10)
             
@@ -577,12 +632,10 @@ class RomanEvaluator:
 
             plt.figure(figsize=(7, 5))
             
-            # Primary axis: Accuracy
             plt.plot(10**np.array(centers), accs, 'o-', color=COLORS[class_idx], label=f'{class_name} Accuracy')
             plt.ylabel(f"Accuracy ({class_name} Class)")
             plt.ylim([0, 1.05])
             
-            # Secondary axis: Counts (to show data density)
             ax2 = plt.gca().twinx()
             bar_width = (10**bins[1]-10**bins[0])*0.8
             ax2.bar(10**np.array(centers), counts, width=bar_width, color='gray', alpha=0.3, label='Sample Count')
@@ -590,17 +643,20 @@ class RomanEvaluator:
             ax2.set_yscale('log')
             ax2.tick_params(axis='y', labelcolor='gray')
             
-            # Configure X-axis
             plt.title(f"{class_name} Classification Accuracy vs. {param_label}")
             plt.xlabel(param_label)
             plt.xscale('log')
             plt.grid(True, which="both", ls="--")
             plt.tight_layout()
-            plt.savefig(self.output_dir / f'diag_{data_type}_{param_key}.png')
+            
+            # Successful Save Print
+            file_name = f'diag_{data_type}_{param_key}.png'
+            plt.savefig(self.output_dir / file_name)
             plt.close()
+            print(f"  Generated Parameter Diagnostic: {file_name}") 
+            
         except Exception as e:
             print(f"  Error plotting {data_type} {param_key} accuracy: {e}")
-
 
     def _plot_binary_u0_accuracy(self):
         """Plot accuracy vs. source-lens separation (u0) for binary events. (Generates diag_binary_u0.png)"""
@@ -681,7 +737,7 @@ class RomanEvaluator:
                 self._plot_single_evolution(idx, cls_name, i)
 
     def _plot_single_evolution(self, idx: int, cls_name: str, cls_idx: int):
-        """Plot single event evolution (3-panel: Flux (scatter, inverted), Probs, Confidence)."""
+        """Plot single event evolution (3-panel: Mag (scatter), Probs, Confidence)."""
         
         # --- 1. Run time-series inference ---
         f = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -707,7 +763,8 @@ class RomanEvaluator:
                 else:
                     raise ValueError(f"Unexpected tensor dimension in evolution plot: {probs_tensor.ndim}")
                     
-                probs_seq.append(probs.squeeze(0).cpu().numpy())
+                probs = probs.squeeze(0).cpu().numpy()
+                probs_seq.append(probs)
         
         if not probs_seq: return
         probs_full = np.array(probs_seq)
@@ -717,22 +774,20 @@ class RomanEvaluator:
         fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         fig.suptitle(f'Probability Evolution (True: {cls_name}, Predicted: {CLASS_NAMES[self.preds[idx]]})', fontsize=14)
 
-        # Panel 1: Raw Light Curve (Flux)
+        # Panel 1: Light Curve (Magnitude)
         ax1 = axes[0]
         raw_flux = self.raw_flux[idx, :length]
         
-        # FIX: Scatter Plot and No Padding
-        ax1.scatter(time_axis, raw_flux, color='gray', s=5, linewidths=0, label='Raw Flux')
+        # --- Magnitude Conversion and Zero Plotting Fix ---
+        mag_data = self._raw_flux_to_relative_mag(raw_flux)
         
-        # For context, plot the interpolated curve using a thin line
-        ax1.plot(time_axis, raw_flux, '-', color='gray', linewidth=0.5, alpha=0.5)
+        # FIX: Use ONLY scatter plot, which implicitly handles no plotting of the padded zeros (since they are filtered in _raw_flux_to_relative_mag)
+        ax1.scatter(time_axis, mag_data, color='gray', s=5, linewidths=0, label='Light Curve')
         
-        # FIX: Invert Y-axis
-        ax1.invert_yaxis()
-        
-        ax1.set_ylabel('Raw Flux (Jy)')
+        ax1.set_ylabel('-Relative Magnitude')
         ax1.grid(True, which='both', linestyle='--', alpha=0.5)
         ax1.legend(loc='upper right', fontsize=8)
+        ax1.axhline(0, color='k', linestyle=':', alpha=0.5, linewidth=1) # Line for median flux/mag
 
         # Panel 2: Class Probability Evolution
         ax2 = axes[1]
