@@ -60,14 +60,6 @@ class NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-def load_compat(path):
-    """Load data from NPZ or HDF5 format."""
-    path = str(path)
-    if path.endswith('.h5') or path.endswith('.hdf5'):
-        with h5py.File(path, 'r') as f:
-            return {k: f[k][:] for k in f.keys()}
-    return np.load(path, allow_pickle=True)
-
 
 # =============================================================================
 # DISTRIBUTED SETUP
@@ -149,70 +141,140 @@ def set_seed_everywhere(seed: int, rank: int = 0) -> None:
 # =============================================================================
 # DATASET
 # =============================================================================
-class MicrolensingDataset(Dataset):
+# =============================================================================
+# DATA UTILS (OPTIMIZED FOR LAZY HDF5 LOADING)
+# =============================================================================
+
+# =============================================================================
+# DATA UTILS (OPTIMIZED FOR LAZY HDF5 LOADING)
+# =============================================================================
+
+# REMOVED load_compat(path) as it is no longer used for the main data load
+
+def load_labels_and_split(data_path: Path) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
-    Roman Space Telescope microlensing event dataset.
+    Loads only the 'labels' and 'flux' metadata (for normalization) 
+    eagerly to perform the train/val index split.
+    The large 'flux' and 'delta_t' arrays remain on disk.
+    """
+    logger = logging.getLogger("TRAIN")
     
-    Handles:
-    - AB magnitude system normalization
-    - NaN values from photometric conversions
-    - Causal temporal encoding
-    - Variable sequence lengths
+    with h5py.File(data_path, 'r') as f:
+        # 1. Eagerly load ONLY the labels array (small)
+        labels = f['labels'][:]
+        flux_data = f['flux']
+        
+        # 2. Compute normalization stats from the training data (robust sampling)
+        indices = np.arange(len(labels))
+        _, val_idx = train_test_split(
+            indices, test_size=0.2, shuffle=True, random_state=SEED, stratify=labels
+        )
+        train_idx = np.setdiff1d(indices, val_idx) # Get train indices
+        
+        # Sample a small fraction of flux data from the training set for statistics
+        sample_size = min(100000, len(train_idx))
+        sample_indices = np.random.choice(train_idx, size=sample_size, replace=False)
+        sample_flux = flux_data[sample_indices]
+        
+        valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
+        
+        if len(valid_flux) == 0:
+            median = 0.0
+            iqr = 1.0
+        else:
+            median = float(np.median(valid_flux))
+            q75, q25 = np.percentile(valid_flux, [75, 25])
+            iqr = float(q75 - q25)
+            if iqr < 1e-6:
+                iqr = 1.0
+
+        stats = {'median': median, 'iqr': iqr}
+        
+    return train_idx, val_idx, stats
+
+
+class MicrolensingLazyDataset(Dataset):
+    """
+    Roman Space Telescope microlensing event dataset with lazy HDF5 loading.
+    
+    The file handle is opened lazily in __init__ and closed in __del__ 
+    or by the DataLoader worker process.
     """
     
     def __init__(
         self, 
-        flux: np.ndarray, 
-        delta_t: np.ndarray, 
-        labels: np.ndarray, 
-        stats: Optional[Dict] = None,
+        data_path: Path,
+        indices: np.ndarray,
+        stats: Dict,
         handle_nans: str = 'zero'
     ):
-        self.flux = torch.from_numpy(np.ascontiguousarray(flux)).float()
-        self.delta_t = torch.from_numpy(np.ascontiguousarray(delta_t)).float()
-        self.labels = torch.from_numpy(np.ascontiguousarray(labels)).long()
+        self.data_path = data_path
+        self.indices = indices
+        self.stats = stats
+        self.handle_nans = handle_nans
+        self._h5_file = None
         
-        self.padding_mask = (~torch.isnan(self.flux)) & (self.flux != 0.0)
-        self.lengths = self.padding_mask.sum(dim=1).long().clamp(min=1)
-        
-        if handle_nans == 'zero':
-            self.flux = torch.nan_to_num(self.flux, nan=0.0)
-        elif handle_nans == 'median':
-            for i in range(len(self.flux)):
-                valid = self.flux[i][self.padding_mask[i]]
-                if len(valid) > 0:
-                    median = valid.median()
-                    self.flux[i] = torch.where(
-                        torch.isnan(self.flux[i]), 
-                        median, 
-                        self.flux[i]
-                    )
-        
-        self.delta_t = torch.nan_to_num(self.delta_t, nan=0.0)
-        
-        if stats is not None:
-            median = stats['median']
-            iqr = stats['iqr']
+    def _open_h5_file(self):
+        """Open the HDF5 file if it's not open yet."""
+        if self._h5_file is None:
+            # Set libver='latest' for better performance on large files
+            self._h5_file = h5py.File(self.data_path, 'r', libver='latest')
             
-            if iqr < 1e-6:
-                iqr = 1.0
-            
-            self.flux = torch.where(
-                self.padding_mask,
-                (self.flux - median) / iqr,
-                torch.tensor(0.0, dtype=self.flux.dtype)
-            )
-
     def __len__(self) -> int:
-        return len(self.labels)
+        return len(self.indices)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx_in_subset: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        # Open HDF5 file handle lazily on the DataLoader worker thread
+        self._open_h5_file()
+        
+        # Get the global index for the required sample
+        global_idx = self.indices[idx_in_subset]
+        
+        # LAZY LOAD: Read only the single slice needed (flux, delta_t, labels)
+        flux_np = self._h5_file['flux'][global_idx, :]
+        delta_t_np = self._h5_file['delta_t'][global_idx, :]
+        label_np = self._h5_file['labels'][global_idx]
+        
+        # Convert to Tensors
+        flux = torch.from_numpy(flux_np).float()
+        delta_t = torch.from_numpy(delta_t_np).float()
+        label = torch.tensor(label_np).long()
+        
+        # --- Preprocessing ---
+        padding_mask = (~torch.isnan(flux)) & (flux != 0.0)
+        
+        if self.handle_nans == 'zero':
+            flux = torch.nan_to_num(flux, nan=0.0)
+        
+        delta_t = torch.nan_to_num(delta_t, nan=0.0)
+        
+        # Apply Normalization
+        median = self.stats['median']
+        iqr = self.stats['iqr']
+        
+        # Normalize flux (magnitude) data
+        flux = (flux - median) / iqr
+        
+        # Re-apply padding mask to ensure padded values (0.0) are maintained
+        flux = flux * padding_mask.float()
+        
         return (
-            self.flux[idx],
-            self.delta_t[idx],
-            self.lengths[idx],
-            self.labels[idx]
+            flux,
+            delta_t,
+            padding_mask.sum().long().clamp(min=1), # lengths
+            label
         )
+
+    def __del__(self):
+        """Ensure HDF5 file is closed when the object is destroyed."""
+        if self._h5_file is not None:
+            self._h5_file.close()
+
+# Keep compute_normalization_stats and MicrolensingDataset (original) if they are used elsewhere.
+# However, the logic is now integrated into load_labels_and_split and MicrolensingLazyDataset.
+# I recommend DELETING the original compute_normalization_stats and MicrolensingDataset.
+# NOTE: compute_class_weights will need to be updated to use the labels from the lazy load.
 
 
 def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> Dict[str, float]:
