@@ -413,12 +413,12 @@ def main():
     
     # Data
     parser.add_argument('--data', type=str, required=True, help='Path to training data')
-    parser.add_argument('--output-dir', type=str, default='experiments', help='Output directory')
+    parser.add_argument('--output-dir', type=str, default='../results', help='Output directory')
     parser.add_argument('--experiment-name', type=str, default=None, help='Experiment name')
     
     # Model architecture
-    parser.add_argument('--d-model', type=int, default=256, help='Hidden dimension')
-    parser.add_argument('--n-layers', type=int, default=4, help='Number of recurrent layers')
+    parser.add_argument('--d-model', type=int, default=64, help='Hidden dimension')
+    parser.add_argument('--n-layers', type=int, default=2, help='Number of recurrent layers')
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout probability')
     parser.add_argument('--window-size', type=int, default=5, help='Causal window size')
     

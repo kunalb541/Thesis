@@ -290,7 +290,6 @@ class OptimizedStackedGRU(nn.Module):
             num_layers=num_layers,
             batch_first=True, 
             dropout=dropout if num_layers > 1 else 0,
-            proj_size=0  # No projection for speed
         )
         
         self.norm = nn.LayerNorm(hidden_size)
