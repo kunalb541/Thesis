@@ -31,50 +31,33 @@ class ModelConfig:
 # ATTENTION POOLING (FIXED FOR FLASH ATTENTION 2 + DDP)
 # =============================================================================
 class AttentionPooling(nn.Module):
-    """
-    Learnable attention pooling with Flash Attention 2 support.
-    CRITICAL FIX: Properly formatted tensors for scaled_dot_product_attention.
-    """
-    def __init__(self, d_model: int, dropout: float = 0.1):
-        super().__init__()
-        self.query = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-        self.key_proj = nn.Linear(d_model, d_model, bias=False)
-        self.value_proj = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = dropout
-        
+    """Fixed version with robust mask handling."""
+    
     def forward(
         self, 
         x: torch.Tensor, 
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Args:
-            x: (B, T, D) sequence
-            mask: (B, T) boolean mask (True for valid positions)
-        Returns:
-            (B, D) pooled representation
-        """
         B, T, D = x.shape
         
-        # CRITICAL FIX: Add num_heads dimension for scaled_dot_product_attention
-        # PyTorch expects: (batch, num_heads, seq_len, head_dim)
-        
-        # Expand learnable query and add num_heads dimension
+        # Add num_heads dimension for Flash Attention
         q = self.query.expand(B, -1, -1).unsqueeze(1)  # (B, 1, 1, D)
+        k = self.key_proj(x).unsqueeze(1)              # (B, 1, T, D)
+        v = self.value_proj(x).unsqueeze(1)            # (B, 1, T, D)
         
-        # Project keys and values, then add num_heads dimension
-        k = self.key_proj(x).unsqueeze(1)  # (B, 1, T, D)
-        v = self.value_proj(x).unsqueeze(1)  # (B, 1, T, D)
-        
-        # Prepare attention mask for SDPA
         attn_mask = None
         if mask is not None:
-            # scaled_dot_product_attention expects: (B, 1, 1, T) for single-head
+            # CRITICAL FIX: Handle empty masks
+            valid_counts = mask.sum(dim=1)
+            
+            # If any sequence has no valid positions, use all positions
+            # This prevents NaN from all -inf attention masks
+            safe_mask = mask.clone()
+            safe_mask[valid_counts == 0] = True
+            
             attn_mask = torch.zeros(B, 1, 1, T, dtype=x.dtype, device=x.device)
-            # Fill with -inf where mask is False (invalid positions)
-            attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(1), float('-inf'))
+            attn_mask.masked_fill_(~safe_mask.unsqueeze(1).unsqueeze(1), float('-inf'))
         
-        # Flash Attention 2 automatically used on A100/H100/MI300 GPUs
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
@@ -82,9 +65,7 @@ class AttentionPooling(nn.Module):
             is_causal=False
         )
         
-        # Remove num_heads and query dimensions: (B, 1, 1, D) -> (B, D)
         return out.squeeze(1).squeeze(1)
-
 
 # =============================================================================
 # DEPTHWISE SEPARABLE CONVOLUTION (4X FASTER, 8X FEWER PARAMETERS)
