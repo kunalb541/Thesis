@@ -200,7 +200,7 @@ class OptimizedConvFeatureExtractor(nn.Module):
         self.swiglu = nn.Sequential(
             nn.Linear(d_model, d_model * 2, bias=False),
             nn.SiLU(),  # Swish activation
-            nn.Linear(d_model, d_model, bias=False)
+            nn.Linear(d_model*2, d_model, bias=False)
         )
         
         self.dropout = nn.Dropout(dropout)

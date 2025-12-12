@@ -239,7 +239,7 @@ def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Ten
     total = len(labels)
     weights = total / (len(unique) * counts)
     weight_tensor = torch.zeros(3, device=device)
-    weight_tensor[unique] = torch.from_numpy(weights).float()
+    weight_tensor[unique] = torch.from_numpy(weights).float().to(device)
     return weight_tensor
 
 
