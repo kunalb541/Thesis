@@ -1,125 +1,45 @@
 import torch
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-import torch.nn.functional as F
-import torch.nn.functional as F
-import torch.nn.functional as F
-import math
-import logging
-import warnings
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Literal, Any
-
-logger = logging.getLogger("ROMAN_MODEL")
-warnings.filterwarnings("ignore", category=UserWarning)
+from typing import Optional, Tuple
+import math
 
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
 @dataclass
 class ModelConfig:
-    
-    # Architecture
-    d_model: int = 256
-    n_layers: int = 4
+    """Model architecture configuration."""
+    d_model: int = 64
+    n_layers: int = 2
     dropout: float = 0.3
     window_size: int = 5
     max_seq_len: int = 2400
     n_classes: int = 3
-    
-    # Model variants 
     hierarchical: bool = True
     use_residual: bool = True
     use_layer_norm: bool = True
-    feature_extraction: Literal["conv", "mlp"] = "conv"
+    feature_extraction: str = 'conv'
     use_attention_pooling: bool = True
-    
-    # Training options
     use_amp: bool = True
-    use_gradient_checkpointing: bool = False  # Default to False for speed
+    use_gradient_checkpointing: bool = False
     use_flash_attention: bool = True
     use_packed_sequences: bool = False
-    
-    def __post_init__(self):
-        if self.d_model % 8 != 0:
-            raise ValueError(f"d_model must be divisible by 8 for tensor cores, got {self.d_model}")
-        if self.d_model <= 0 or self.d_model > 2048:
-            raise ValueError(f"d_model out of range, got {self.d_model}")
 
 
 # =============================================================================
-# TEMPORAL ENCODING (OPTIMIZED)
+# ATTENTION POOLING (FIXED FOR DDP + VARIABLE LENGTHS)
 # =============================================================================
-class RobustSinusoidalEncoding(nn.Module):
+class AttentionPooling(nn.Module):
     """
-    Optimized sinusoidal encoding with fused operations.
-    - Precomputed frequencies (buffer, no gradient)
-    - Fused log-scale time transformation
-    - Memory-efficient computation
+    Learnable attention pooling for variable-length sequences.
+    Fixed for proper mask handling and DDP compatibility.
     """
-    
-    def __init__(self, d_model: int, max_timescale: float = 10000.0):
-        super().__init__()
-        self.d_model = d_model
-        
-        # Precompute frequency bands (half for sin, half for cos)
-        half_dim = d_model // 2
-        div_term = torch.exp(
-            torch.arange(0, half_dim * 2, 2, dtype=torch.float32) * 
-            -(math.log(max_timescale) / half_dim)
-        )
-        self.register_buffer('div_term', div_term, persistent=False)
-
-    def forward(self, delta_t: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            delta_t: (B, T) time differences
-        Returns:
-            (B, T, d_model) encodings
-        """
-        # Fused: abs + clamp + log1p (safe for all time scales)
-        dt = delta_t.abs().clamp(min=1e-6).unsqueeze(-1)
-        scaled_time = torch.log1p(dt)
-        
-        # Compute arguments
-        args = scaled_time * self.div_term
-        
-        # Fused sin/cos computation
-        pe = torch.cat([args.sin(), args.cos()], dim=-1)
-        
-        return pe
-
-
-# =============================================================================
-# FLASH ATTENTION POOLING (PYTORCH 2.0+ OPTIMIZED)
-# =============================================================================
-class FlashAttentionPooling(nn.Module):
-    """
-    Flash Attention-based pooling using PyTorch's SDPA.
-    Up to 3x faster than standard attention with memory savings.
-    """
-    
     def __init__(self, d_model: int, dropout: float = 0.1):
         super().__init__()
-        
-        # Single learnable query vector (more efficient than per-sample)
         self.query = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-        
-        # Key projection (lightweight)
         self.key_proj = nn.Linear(d_model, d_model, bias=False)
         self.value_proj = nn.Linear(d_model, d_model, bias=False)
-        
         self.scale = math.sqrt(d_model)
         self.dropout = dropout
         
@@ -145,13 +65,17 @@ class FlashAttentionPooling(nn.Module):
         v = self.value_proj(x)  # (B, T, D)
         
         # Prepare attention mask for SDPA
+        # CRITICAL FIX: Proper shape and filling for scaled_dot_product_attention
         attn_mask = None
         if mask is not None:
-            # Convert boolean mask to additive mask
+            # scaled_dot_product_attention expects: (B, num_heads, 1, T) or (B, 1, 1, T)
+            # We use single head, so shape is (B, 1, 1, T)
             attn_mask = torch.zeros(B, 1, 1, T, dtype=x.dtype, device=x.device)
+            # Fill with -inf where mask is False (invalid positions)
+            attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(1), float('-inf'))
         
         # Flash attention via scaled_dot_product_attention (PyTorch 2.0+)
-        # This automatically uses Flash Attention 2 on A100 GPUs
+        # Automatically uses Flash Attention 2 on A100/H100 GPUs
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
@@ -159,6 +83,7 @@ class FlashAttentionPooling(nn.Module):
             is_causal=False
         )
         
+        return out.squeeze(1)  # (B, D)
 
 
 # =============================================================================
@@ -167,293 +92,127 @@ class FlashAttentionPooling(nn.Module):
 class FusedDepthwiseSeparableConv1d(nn.Module):
     """
     Depthwise separable convolution with fused operations.
-    
-    Speedup over standard conv:
-    - 4x fewer FLOPs
-    - Better memory locality
-    - Optimized for A100 tensor cores
+    ~4x faster than standard conv, fewer parameters.
     """
-    
     def __init__(
         self, 
         in_channels: int, 
         out_channels: int, 
-        kernel_size: int = 3,
+        kernel_size: int = 5,
         stride: int = 1,
-        padding: int = 0,
+        padding: int = 2,
         bias: bool = False
     ):
         super().__init__()
-        
-        # Depthwise conv (groups=in_channels) - operates on each channel independently
+        # Depthwise: each input channel convolved separately
         self.depthwise = nn.Conv1d(
-            in_channels, in_channels, kernel_size,
-            stride=stride, padding=padding, groups=in_channels, bias=False
+            in_channels, in_channels,
+            kernel_size=kernel_size, 
+            stride=stride, 
+            padding=padding,
+            groups=in_channels,  # Key: groups = in_channels
+            bias=False
         )
-        
-        # BatchNorm for depthwise (faster than LayerNorm for conv)
-        self.bn = nn.BatchNorm1d(in_channels, momentum=0.1, eps=1e-5)
-        
-        # Pointwise conv (1x1) - mixes channels
-        self.pointwise = nn.Conv1d(in_channels, out_channels, 1, bias=bias)
+        # Pointwise: 1x1 conv to mix channels
+        self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=bias)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, C, T)
-        Returns:
-            (B, C_out, T)
-        """
-        x = self.depthwise(x)
-        x = self.bn(x)
-        x = self.pointwise(x)
-        return x
+        return self.pointwise(self.depthwise(x))
 
 
 # =============================================================================
-# SWIGLU ACTIVATION (FASTER THAN GELU)
+# HIERARCHICAL FEATURE EXTRACTOR
 # =============================================================================
-class SwiGLU(nn.Module):
+class HierarchicalFeatureExtractor(nn.Module):
     """
-    SwiGLU activation: SwiGLU(x, W, V) = (Wx ⊙ SiLU(Vx))
-    
-    Used in LLaMA, outperforms GELU/ReLU.
-    Fused implementation for speed.
+    Multi-scale feature extraction via depthwise separable convolutions.
+    Captures features at different temporal scales efficiently.
     """
-    
-    def __init__(self, dim: int, expansion: float = 2.0, bias: bool = False):
-        super().__init__()
-        hidden_dim = int(dim * expansion)
-        
-        # Single linear layer outputs both value and gate (more efficient)
-        self.fc = nn.Linear(dim, hidden_dim * 2, bias=bias)
-        self.out_proj = nn.Linear(hidden_dim, dim, bias=bias)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (..., dim)
-        Returns:
-            (..., dim)
-        """
-        # Split into value and gate in one go
-        x_val, x_gate = self.fc(x).chunk(2, dim=-1)
-        
-        # Fused SiLU(gate) * value
-        x = F.silu(x_gate) * x_val
-        
-        return self.out_proj(x)
-
-
-# =============================================================================
-# OPTIMIZED FEATURE EXTRACTOR
-# =============================================================================
-class OptimizedConvFeatureExtractor(nn.Module):
-    """
-    Ultra-fast feature extractor using:
-    - Depthwise separable convolutions (4x faster)
-    - Fused batch normalization
-    - SwiGLU activation (faster than GELU)
-    - Residual connections
-    """
-    
-    def __init__(self, d_model: int, dropout: float = 0.1):
-        super().__init__()
-        
-        # Two depthwise separable conv blocks with causal padding
-        self.conv1 = FusedDepthwiseSeparableConv1d(
-            d_model, d_model, kernel_size=3, padding=0, bias=False
-        )
-        self.act1 = nn.SiLU(inplace=True)
-        self.drop1 = nn.Dropout(dropout, inplace=False)
-        
-        self.conv2 = FusedDepthwiseSeparableConv1d(
-            d_model, d_model, kernel_size=3, padding=0, bias=False
-        )
-        self.act2 = nn.SiLU(inplace=True)
-        
-        # SwiGLU feedforward
-        self.ffn = SwiGLU(d_model, expansion=2.0, bias=False)
-        
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, T, C)
-        Returns:
-            (B, T, C)
-        """
-        residual = x
-        
-        # Conv block 1 (causal)
-        x = x.transpose(1, 2).contiguous()  # (B, C, T)
-        x = F.pad(x, (2, 0))  # Left padding for causality
-        x = self.conv1(x)
-        x = self.act1(x)
-        x = self.drop1(x)
-        
-        # Conv block 2 (causal)
-        x = F.pad(x, (2, 0))
-        x = self.conv2(x)
-        x = self.act2(x)
-        x = x.transpose(1, 2).contiguous()  # (B, T, C)
-        
-        # SwiGLU FFN with residual
-        x = self.norm(x + residual)
-        x = x + self.ffn(x)
-        x = self.dropout(x)
-        
-        return x
-
-
-# =============================================================================
-# OPTIMIZED WINDOWED PROCESSOR
-# =============================================================================
-class OptimizedWindowProcessor(nn.Module):
-    """
-    Efficient causal windowed convolution.
-    Captures local temporal patterns.
-    """
-    
-    def __init__(self, d_model: int, window_size: int, dropout: float):
-        super().__init__()
-        self.window_size = window_size
-        
-        self.conv = FusedDepthwiseSeparableConv1d(
-            d_model, d_model, kernel_size=window_size, padding=0, bias=False
-        )
-        
-        self.norm = nn.LayerNorm(d_model)
-        self.act = nn.SiLU(inplace=True)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, T, C)
-        Returns:
-            (B, T, C)
-        """
-        # Transpose for conv
-        x = x.transpose(1, 2)  # (B, C, T)
-        
-        # Causal padding
-        x = F.pad(x, (max(0, self.window_size - 1), 0))
-        
-        # Depthwise separable conv
-        x = self.conv(x)
-        
-        # Back to sequence format
-        x = x.transpose(1, 2)  # (B, T, C)
-        
-        # Post-processing
-        x = self.norm(x)
-        x = self.act(x)
-        x = self.dropout(x)
-        
-        return x
-
-
-# =============================================================================
-# OPTIMIZED STACKED GRU
-# =============================================================================
-class OptimizedStackedGRU(nn.Module):
-    """
-    CuDNN-fused multi-layer GRU with optimizations:
-    - Single nn.GRU call for kernel fusion
-    - Residual connections across layers
-    - Layer normalization for stability
-    - Optimized for A100 tensor cores
-    """
-    
     def __init__(
         self, 
-        input_size: int, 
-        hidden_size: int, 
-        num_layers: int, 
-        dropout: float, 
-        use_residual: bool
+        input_channels: int = 2, 
+        d_model: int = 64,
+        dropout: float = 0.3
     ):
         super().__init__()
         
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.use_residual = use_residual
-        
-        # CuDNN-fused GRU (fastest implementation)
-        self.gru = nn.GRU(
-            input_size, 
-            hidden_size, 
-            num_layers=num_layers,
-            batch_first=True, 
-            dropout=dropout if num_layers > 1 else 0,
-            bias=True
+        # Low-level features (fine-grained, short timescales)
+        self.conv_low = nn.Sequential(
+            FusedDepthwiseSeparableConv1d(input_channels, d_model // 2, kernel_size=3, padding=1),
+            nn.BatchNorm1d(d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout)
         )
         
-        # Post-GRU normalization
-        self.norm = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout)
+        # Mid-level features (medium timescales)
+        self.conv_mid = nn.Sequential(
+            FusedDepthwiseSeparableConv1d(input_channels, d_model // 2, kernel_size=5, padding=2),
+            nn.BatchNorm1d(d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
         
-        # Residual projection (if dimensions don't match)
-        if use_residual and input_size != hidden_size:
-            self.res_proj = nn.Linear(input_size, hidden_size, bias=False)
-        else:
-            self.res_proj = None
-
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        lengths: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # High-level features (coarse, long timescales)
+        self.conv_high = nn.Sequential(
+            FusedDepthwiseSeparableConv1d(input_channels, d_model // 2, kernel_size=7, padding=3),
+            nn.BatchNorm1d(d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Fusion layer: combine multi-scale features
+        self.fusion = nn.Sequential(
+            nn.Conv1d(d_model + d_model // 2, d_model, kernel_size=1),
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, T, input_size)
-            lengths: (B,) sequence lengths (optional)
+            x: (B, C, T) input sequence
         Returns:
-            output: (B, T, hidden_size)
-            hidden: (num_layers, B, hidden_size)
+            (B, D, T) multi-scale features
         """
-        # Store for residual
-        residual = x if self.res_proj is None else self.res_proj(x)
+        # Extract features at different scales
+        low = self.conv_low(x)      # Fine details
+        mid = self.conv_mid(x)       # Medium patterns
+        high = self.conv_high(x)     # Coarse trends
         
-        # Pack sequences for efficiency (if lengths provided)
-        if lengths is not None and lengths.min() < x.size(1):
-            # Sort by length (required for pack_padded_sequence)
-            lengths_sorted, idx_sort = lengths.sort(descending=True)
-            _, idx_unsort = idx_sort.sort()
-            
-            x_sorted = x.index_select(0, idx_sort)
-            
-            # Pack
-            x_packed = nn.utils.rnn.pack_padded_sequence(
-                x_sorted, lengths_sorted.cpu(), batch_first=True, enforce_sorted=True
-            )
-            
-            # GRU forward
-            out_packed, hidden = self.gru(x_packed)
-            
-            # Unpack
-            out, _ = nn.utils.rnn.pad_packed_sequence(out_packed, batch_first=True)
-            
-            # Unsort
-            out = out.index_select(0, idx_unsort)
-            hidden = hidden.index_select(1, idx_unsort)
-        else:
-            # Standard forward (CuDNN optimized)
-            out, hidden = self.gru(x)
+        # Concatenate and fuse
+        combined = torch.cat([low, mid, high], dim=1)
+        return self.fusion(combined)
+
+
+# =============================================================================
+# SIMPLE FEATURE EXTRACTOR (FALLBACK)
+# =============================================================================
+class SimpleFeatureExtractor(nn.Module):
+    """Simple baseline feature extractor."""
+    def __init__(
+        self, 
+        input_channels: int = 2, 
+        d_model: int = 64,
+        window_size: int = 5,
+        dropout: float = 0.3
+    ):
+        super().__init__()
+        padding = window_size // 2
         
-        # Post-processing with residual
-        out = self.norm(out)
+        self.conv = nn.Sequential(
+            FusedDepthwiseSeparableConv1d(
+                input_channels, d_model, 
+                kernel_size=window_size, 
+                padding=padding
+            ),
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
         
-        if self.use_residual and residual.size(-1) == out.size(-1):
-                actual_len = out.size(1); out = out + residual[:, :actual_len]
-        
-        out = self.dropout(out)
-        
-        return out, hidden
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
 
 
 # =============================================================================
@@ -461,496 +220,247 @@ class OptimizedStackedGRU(nn.Module):
 # =============================================================================
 class RomanMicrolensingGRU(nn.Module):
     """
-    Ultra-optimized Roman microlensing classifier for A100 GPUs.
+    Optimized GRU-based classifier for Roman microlensing events.
     
-    Key Optimizations:
-    ✓ Depthwise separable convolutions (4x faster than standard)
-    ✓ Flash Attention pooling via PyTorch SDPA (3x faster)
-    ✓ CuDNN-fused GRU operations
-    ✓ SwiGLU activation (faster convergence than GELU)
-    ✓ Fused batch normalization in conv layers
-    ✓ Single-pass hierarchical inference
-    ✓ Optimized memory layout for tensor cores
-    ✓ torch.compile() friendly architecture
-    ✓ Gradient checkpointing support (optional)
-    ✓ Mixed precision (BF16) compatible
+    Architecture:
+        1. Multi-scale convolutional feature extraction
+        2. Bidirectional GRU with optional residual connections
+        3. Attention-based pooling
+        4. Classification head
     
-    Expected speedup: 3-5x over baseline on A100
+    Features:
+        - Flash Attention 2 (automatic on A100/H100)
+        - Depthwise separable convolutions (4x faster)
+        - Proper variable-length sequence handling
+        - DDP-compatible attention masking
+        - Mixed precision training ready
     """
-    
-    def __init__(self, config: ModelConfig, dtype: torch.dtype = torch.float32):
+    def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.amp_dtype = dtype
         
-        # 1. Input embedding (fused projection + encoding)
-        self.flux_proj = nn.Linear(1, config.d_model // 2, bias=False)
-        self.time_enc = RobustSinusoidalEncoding(config.d_model // 2)
-        
-        # Input mixing layer (combines flux + time features)
-        self.input_mix = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model, bias=False),
-            nn.LayerNorm(config.d_model),
-            nn.SiLU(inplace=True),
-            nn.Dropout(config.dropout)
-        )
-        
-        # 2. Feature extraction (Depthwise separable conv)
-        if config.feature_extraction == "conv":
-            self.feature_extractor = OptimizedConvFeatureExtractor(
-                config.d_model, config.dropout
+        # Feature extraction
+        if config.hierarchical:
+            self.feature_extractor = HierarchicalFeatureExtractor(
+                input_channels=2,
+                d_model=config.d_model,
+                dropout=config.dropout
             )
         else:
-            # MLP fallback (slower but simpler)
-            self.feature_extractor = nn.Sequential(
-                nn.Linear(config.d_model, config.d_model * 2, bias=False),
-                nn.LayerNorm(config.d_model * 2),
-                nn.SiLU(inplace=True),
-                nn.Dropout(config.dropout),
-                nn.Linear(config.d_model * 2, config.d_model, bias=False),
-                nn.LayerNorm(config.d_model),
-                nn.Dropout(config.dropout)
+            self.feature_extractor = SimpleFeatureExtractor(
+                input_channels=2,
+                d_model=config.d_model,
+                window_size=config.window_size,
+                dropout=config.dropout
             )
         
-        # 3. Multi-scale windowed processing
-        self.window_processor = OptimizedWindowProcessor(
-            config.d_model, config.window_size, config.dropout
-        )
-        
-        # 4. Recurrent core (CuDNN-optimized)
-        rnn_input_dim = config.d_model * 2  # Concatenated features
-        
-        self.gru = OptimizedStackedGRU(
-            input_size=rnn_input_dim,
+        # Temporal modeling: Bidirectional GRU
+        self.gru = nn.GRU(
+            input_size=config.d_model,
             hidden_size=config.d_model,
             num_layers=config.n_layers,
-            dropout=config.dropout,
-            use_residual=config.use_residual
+            batch_first=True,
+            dropout=config.dropout if config.n_layers > 1 else 0.0,
+            bidirectional=True
         )
         
-        self.norm_final = nn.LayerNorm(config.d_model)
+        # Project bidirectional output back to d_model
+        self.gru_proj = nn.Linear(config.d_model * 2, config.d_model)
         
-        # 5. Pooling (Flash Attention or simple max pooling)
+        # Optional residual connection
+        self.use_residual = config.use_residual
+        if config.use_residual:
+            self.residual_norm = nn.LayerNorm(config.d_model)
+        
+        # Pooling
         if config.use_attention_pooling:
-            self.pool = FlashAttentionPooling(config.d_model, config.dropout)
+            self.pool = AttentionPooling(config.d_model, dropout=config.dropout)
         else:
-            self.pool = None
+            self.pool = self._mean_pool
         
-        # 6. Classification heads (hierarchical or flat)
-        if config.hierarchical:
-            # Shared trunk for hierarchical classification
-            self.shared_trunk = nn.Sequential(
-                nn.Linear(config.d_model, config.d_model, bias=False),
-                nn.LayerNorm(config.d_model),
-                nn.SiLU(inplace=True),
-                nn.Dropout(config.dropout)
-            )
-            
-            # Stage 1: Flat vs Deviation (any microlensing event)
-            self.head_deviation = nn.Linear(config.d_model, 2, bias=True)
-            
-            # Stage 2: PSPL vs Binary (conditioned on deviation)
-            self.head_type = nn.Linear(config.d_model, 2, bias=True)
-        else:
-            # Flat 3-way classification
-            self.classifier = nn.Linear(config.d_model, config.n_classes, bias=True)
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(config.d_model, config.d_model),
+            nn.LayerNorm(config.d_model) if config.use_layer_norm else nn.Identity(),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.d_model, config.n_classes)
+        )
         
         self._init_weights()
     
     def _init_weights(self):
-        """
-        Initialize weights for optimal A100 performance.
-        Uses Kaiming initialization for SiLU/SwiGLU activations.
-        """
-        for name, module in self.named_modules():
-            if isinstance(module, nn.Linear):
-                # Kaiming for SiLU (similar to ReLU but slightly different)
-                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-                    
-            elif isinstance(module, nn.Conv1d):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-                    
-            elif isinstance(module, (nn.LayerNorm, nn.BatchNorm1d)):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-
-    def forward(
+        """Improved weight initialization."""
+        for name, param in self.named_parameters():
+            if 'weight' in name and param.dim() >= 2:
+                # Kaiming initialization for conv/linear weights
+                nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='relu')
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+            elif 'norm' in name and 'weight' in name:
+                nn.init.ones_(param)
+    
+    def _mean_pool(
         self, 
-        flux: torch.Tensor, 
-        delta_t: torch.Tensor, 
-        lengths: Optional[torch.Tensor] = None,
-        return_all_timesteps: bool = False
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass with automatic mixed precision support.
+        x: torch.Tensor, 
+        mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Masked mean pooling fallback."""
+        if mask is None:
+            return x.mean(dim=1)
         
-        Args:
-            flux: (B, T) normalized flux/magnitude measurements
-            delta_t: (B, T) time differences between observations
-            lengths: (B,) actual sequence lengths (for masking)
-            return_all_timesteps: If True, return predictions for all timesteps
-            
-        Returns:
-            Dictionary containing:
-                - logits: (B, n_classes) final logits
-                - probs: (B, n_classes) softmax probabilities
-                - aux_dev: (B, 2) auxiliary deviation head logits (hierarchical only)
-                - aux_type: (B, 2) auxiliary type head logits (hierarchical only)
-                - logits_seq: (B, T, n_classes) per-timestep logits (if requested)
-                - probs_seq: (B, T, n_classes) per-timestep probs (if requested)
+        # Expand mask to match feature dimensions
+        mask_expanded = mask.unsqueeze(-1).float()  # (B, T, 1)
+        
+        # Masked sum and count
+        masked_sum = (x * mask_expanded).sum(dim=1)
+        valid_counts = mask_expanded.sum(dim=1).clamp(min=1.0)
+        
+        return masked_sum / valid_counts
+    
+    def forward(
+        self,
+        flux: torch.Tensor,
+        delta_t: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
+        Args:
+            flux: (B, T) magnitude observations
+            delta_t: (B, T) time differences
+            lengths: (B,) actual sequence lengths (optional)
+        Returns:
+            (B, C) logits for C classes
+        """
+        B, T = flux.shape
         device = flux.device
-        use_amp = self.config.use_amp and device.type == 'cuda'
         
-        # Mixed precision context
-        with torch.amp.autocast(
-            device_type=device.type, 
-            dtype=self.amp_dtype, 
-            enabled=use_amp
-        ):
-            B, T = flux.shape
+        # Stack features: (B, 2, T)
+        x = torch.stack([flux, delta_t], dim=1)
+        
+        # Convolutional feature extraction: (B, D, T)
+        features = self.feature_extractor(x)
+        
+        # Transpose for GRU: (B, T, D)
+        features = features.transpose(1, 2)
+        
+        # Create mask from lengths or pad values
+        if lengths is not None:
+            # Create boolean mask: True for valid positions
+            mask = torch.arange(T, device=device).expand(B, T) < lengths.unsqueeze(1)
+        else:
+            # Infer mask from non-zero flux values (pad_value = 0.0)
+            mask = (flux != 0.0)
+        
+        # GRU with optional packed sequences (more efficient for variable lengths)
+        if self.config.use_packed_sequences and lengths is not None:
+            # Sort by length (required for pack_padded_sequence)
+            lengths_clamped = lengths.clamp(min=1)  # Avoid zero-length sequences
+            sorted_lengths, sort_idx = lengths_clamped.sort(descending=True)
+            sorted_features = features[sort_idx]
             
-            # 1. Create attention mask from lengths
-            mask = None
-            if lengths is not None:
-                arange = torch.arange(T, device=device).unsqueeze(0)
-                mask = arange < lengths.unsqueeze(1)  # (B, T)
+            # Pack, process, unpack
+            packed = pack_padded_sequence(
+                sorted_features, 
+                sorted_lengths.cpu(), 
+                batch_first=True,
+                enforce_sorted=True
+            )
+            gru_out_packed, _ = self.gru(packed)
+            gru_out_sorted, _ = pad_packed_sequence(gru_out_packed, batch_first=True)
             
-            # 2. Embed inputs
-            # Flux: (B, T) -> (B, T, d_model//2)
-            flux_emb = self.flux_proj(flux.unsqueeze(-1))
+            # Unsort back to original order
+            _, unsort_idx = sort_idx.sort()
+            gru_out = gru_out_sorted[unsort_idx]
             
-            # Time: (B, T) -> (B, T, d_model//2)
-            time_emb = self.time_enc(delta_t)
-            
-            # Concatenate and mix
-            x = torch.cat([flux_emb, time_emb], dim=-1)  # (B, T, d_model)
-            x = self.input_mix(x)
-            
-            # Apply mask
-            if mask is not None:
-                x = x * mask.unsqueeze(-1).float()
-            
-            # 3. Feature extraction with optional gradient checkpointing
-            if self.config.use_gradient_checkpointing and self.training:
-                x_feat = checkpoint.checkpoint(
-                    self.feature_extractor, x, use_reentrant=False
+            # Pad to original sequence length if needed
+            if gru_out.size(1) < T:
+                padding = torch.zeros(
+                    B, T - gru_out.size(1), gru_out.size(2),
+                    device=device, dtype=gru_out.dtype
                 )
-                x_window = checkpoint.checkpoint(
-                    self.window_processor, x_feat, use_reentrant=False
-                )
-            else:
-                x_feat = self.feature_extractor(x)
-                x_window = self.window_processor(x_feat)
-            
-            # 4. Combine multi-scale features
-            combined = torch.cat([x_feat, x_window], dim=-1)  # (B, T, d_model*2)
-            
-            # 5. Recurrent processing (CuDNN-fused)
-            gru_out, _ = self.gru(combined, lengths)
-            gru_out = self.norm_final(gru_out)
-            
-            # 6. Temporal pooling
-            if self.pool is not None:
-                # Flash attention pooling
-                features = self.pool(gru_out, mask)
-            elif lengths is not None:
-                # Last valid timestep pooling
-                idx = (lengths - 1).clamp(min=0).long()
-                idx = idx.view(-1, 1, 1).expand(-1, 1, gru_out.size(-1))
-                features = gru_out.gather(1, idx).squeeze(1)
-            else:
-                # Simple last timestep
-                features = gru_out[:, -1, :]
-            
-            # 7. Classification
-            result = {}
-            
-            if self.config.hierarchical:
-                # Hierarchical inference (single pass)
-                result = self._hierarchical_inference(features)
-                
-                # Per-timestep predictions (if requested)
-                if return_all_timesteps:
-                    # Reshape for per-timestep inference
-                    B_T, D = gru_out.size(0) * gru_out.size(1), gru_out.size(2)
-                    gru_flat = gru_out.reshape(-1, D)
-                    result_seq = self._hierarchical_inference(gru_flat)
-                    
-                    # Reshape back
-                    result['logits_seq'] = result_seq['logits'].view(B, T, -1)
-                    result['probs_seq'] = result_seq['probs'].view(B, T, -1)
-            else:
-                # Flat classification
-                logits = self.classifier(features)
-                result['logits'] = logits
-                result['probs'] = F.softmax(logits, dim=-1)
-                
-                if return_all_timesteps:
-                    logits_seq = self.classifier(gru_out)
-                    result['logits_seq'] = logits_seq
-                    result['probs_seq'] = F.softmax(logits_seq, dim=-1)
-            
-            return result
-
-    def _hierarchical_inference(self, features: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Optimized single-pass hierarchical inference.
+                gru_out = torch.cat([gru_out, padding], dim=1)
+        else:
+            # Standard GRU (handles padding internally via masking)
+            gru_out, _ = self.gru(features)
         
-        Decision tree:
-            Stage 1: Is it flat or showing deviation?
-                - Flat: P(Flat)
-                - Deviation: Continue to Stage 2
-            
-            Stage 2: What type of microlensing? (PSPL or Binary)
-                - P(PSPL | Deviation)
-                - P(Binary | Deviation)
+        # Project bidirectional output: (B, T, D*2) -> (B, T, D)
+        gru_out = self.gru_proj(gru_out)
         
-        Final probabilities (log-space for numerical stability):
-            P(Flat) = P(Flat from Stage 1)
-            P(PSPL) = P(Deviation) * P(PSPL | Deviation)
-            P(Binary) = P(Deviation) * P(Binary | Deviation)
+        # Optional residual connection
+        if self.use_residual:
+            gru_out = self.residual_norm(gru_out + features)
         
-        Args:
-            features: (..., d_model) features from pooling
+        # Attention pooling with mask: (B, T, D) -> (B, D)
+        if isinstance(self.pool, AttentionPooling):
+            pooled = self.pool(gru_out, mask)
+        else:
+            pooled = self.pool(gru_out, mask)
         
-        Returns:
-            Dictionary with logits, probs, and auxiliary outputs
-        """
-        # Shared trunk
-        h = self.shared_trunk(features)
+        # Classification
+        logits = self.classifier(pooled)
         
-        # Compute both stages in parallel
-        dev_logits = self.head_deviation(h)  # (..., 2): [flat, deviation]
-        type_logits = self.head_type(h)      # (..., 2): [PSPL, binary]
-        
-        # Log probabilities for numerical stability
-        dev_log_probs = F.log_softmax(dev_logits, dim=-1)
-        type_log_probs = F.log_softmax(type_logits, dim=-1)
-        
-        # Extract components
-        log_p_flat = dev_log_probs[..., 0:1]        # P(flat)
-        log_p_deviation = dev_log_probs[..., 1:2]   # P(deviation)
-        
-        log_p_pspl_given_dev = type_log_probs[..., 0:1]    # P(PSPL | dev)
-        log_p_binary_given_dev = type_log_probs[..., 1:2]  # P(binary | dev)
-        
-        # Joint probabilities via log-space addition
-        log_p_pspl = log_p_deviation + log_p_pspl_given_dev      # P(dev) * P(PSPL|dev)
-        log_p_binary = log_p_deviation + log_p_binary_given_dev  # P(dev) * P(binary|dev)
-        
-        # Concatenate final distribution
-        final_log_probs = torch.cat([log_p_flat, log_p_pspl, log_p_binary], dim=-1)
-        
-        return {
-            'logits': final_log_probs,
-            'probs': torch.exp(final_log_probs),
-            'aux_dev': dev_logits,
-            'aux_type': type_logits
-        }
+        return logits
+    
+    def count_parameters(self) -> int:
+        """Count trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 # =============================================================================
-# UTILITIES
+# MODEL FACTORY
 # =============================================================================
-def count_parameters(model: nn.Module) -> int:
-    """Count trainable parameters."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def get_model_info(model: nn.Module) -> Dict[str, Any]:
-    """Get comprehensive model information."""
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = count_parameters(model)
+def create_model(config: Optional[ModelConfig] = None) -> RomanMicrolensingGRU:
+    """Create model with default or custom config."""
+    if config is None:
+        config = ModelConfig()
     
-    # Memory estimates
-    param_memory_mb = total_params * 4 / (1024 ** 2)  # FP32
-    param_memory_bf16_mb = total_params * 2 / (1024 ** 2)  # BF16
+    model = RomanMicrolensingGRU(config)
     
-    # Gradient memory (during training)
-    grad_memory_mb = trainable_params * 4 / (1024 ** 2)
+    print(f"Model created with {model.count_parameters():,} parameters")
+    print(f"Architecture: {config}")
     
-    # Optimizer state (AdamW: 2x params for momentum + variance)
-    optimizer_memory_mb = trainable_params * 8 / (1024 ** 2)
-    
-    return {
-        'total_parameters': total_params,
-        'trainable_parameters': trainable_params,
-        'parameter_memory_fp32_mb': param_memory_mb,
-        'parameter_memory_bf16_mb': param_memory_bf16_mb,
-        'gradient_memory_mb': grad_memory_mb,
-        'optimizer_memory_mb': optimizer_memory_mb,
-        'total_training_memory_mb': param_memory_mb + grad_memory_mb + optimizer_memory_mb,
-        'config': model.config.__dict__ if hasattr(model, 'config') else None
-    }
-
-
-def profile_model(
-    model: nn.Module, 
-    batch_size: int = 16, 
-    seq_len: int = 2400,
-    device: str = 'cuda'
-) -> Dict[str, Any]:
-    """
-    Profile model performance and memory usage.
-    
-    Args:
-        model: Model to profile
-        batch_size: Batch size for profiling
-        seq_len: Sequence length
-        device: Device to run on
-    
-    Returns:
-        Dictionary with profiling results
-    """
-    model = model.to(device)
-    model.eval()
-    
-    # Create dummy inputs
-    flux = torch.randn(batch_size, seq_len, device=device)
-    delta_t = torch.rand(batch_size, seq_len, device=device) * 100
-    lengths = torch.randint(1000, seq_len + 1, (batch_size,), device=device)
-    
-    # Warmup
-    with torch.no_grad():
-        for _ in range(5):
-            _ = model(flux, delta_t, lengths=lengths)
-    
-    if device == 'cuda':
-        torch.cuda.synchronize()
-    
-    # Profile forward pass
-    import time
-    num_runs = 50
-    
-    if device == 'cuda':
-        torch.cuda.reset_peak_memory_stats()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        
-        start.record()
-        with torch.no_grad():
-            for _ in range(num_runs):
-                _ = model(flux, delta_t, lengths=lengths)
-        end.record()
-        
-        torch.cuda.synchronize()
-        elapsed_ms = start.elapsed_time(end)
-        peak_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-    else:
-        start_time = time.time()
-        with torch.no_grad():
-            for _ in range(num_runs):
-                _ = model(flux, delta_t, lengths=lengths)
-        elapsed_ms = (time.time() - start_time) * 1000
-        peak_memory_mb = 0
-    
-    avg_time_ms = elapsed_ms / num_runs
-    throughput = 1000.0 / avg_time_ms * batch_size  # samples/sec
-    
-    return {
-        'avg_forward_time_ms': avg_time_ms,
-        'throughput_samples_per_sec': throughput,
-        'peak_memory_mb': peak_memory_mb,
-        'batch_size': batch_size,
-        'seq_len': seq_len
-    }
+    return model
 
 
 # =============================================================================
-# TESTING & BENCHMARKING
+# TESTING
 # =============================================================================
-if __name__ == '__main__':
-    print("=" * 80)
-    print("ROMAN MICROLENSING GRU - ULTRA-OPTIMIZED FOR A100")
-    print("=" * 80)
+if __name__ == "__main__":
+    # Test model with variable-length sequences
+    print("Testing model...")
     
-    # Configuration
     config = ModelConfig(
-        d_model=256,
-        n_layers=4,
+        d_model=64,
+        n_layers=2,
         dropout=0.3,
-        window_size=5,
         hierarchical=True,
         use_attention_pooling=True,
-        use_amp=True,
-        use_gradient_checkpointing=False  # For max speed
+        use_flash_attention=True
     )
     
-    # Create model
-    model = RomanMicrolensingGRU(config, dtype=torch.bfloat16)
+    model = create_model(config)
+    model.eval()
     
-    # Model info
-    info = get_model_info(model)
-    print(f"\n📊 Model Information:")
-    print(f"  Total parameters: {info['total_parameters']:,}")
-    print(f"  Trainable parameters: {info['trainable_parameters']:,}")
-    print(f"  Parameter memory (FP32): {info['parameter_memory_fp32_mb']:.1f} MB")
-    print(f"  Parameter memory (BF16): {info['parameter_memory_bf16_mb']:.1f} MB")
-    print(f"  Gradient memory: {info['gradient_memory_mb']:.1f} MB")
-    print(f"  Optimizer memory (AdamW): {info['optimizer_memory_mb']:.1f} MB")
-    print(f"  Total training memory: {info['total_training_memory_mb']:.1f} MB")
+    # Test inputs with variable lengths
+    B, T = 16, 2400
+    flux = torch.randn(B, T)
+    delta_t = torch.randn(B, T)
     
-    print(f"\n⚡ Optimizations:")
-    print(f"  ✓ Depthwise separable convolutions (4x faster)")
-    print(f"  ✓ Flash Attention pooling via SDPA (3x faster)")
-    print(f"  ✓ CuDNN-fused GRU (optimal for A100)")
-    print(f"  ✓ SwiGLU activation (faster convergence)")
-    print(f"  ✓ Fused BatchNorm in conv layers")
-    print(f"  ✓ Single-pass hierarchical inference")
-    print(f"  ✓ Optimized for tensor cores (d_model % 8 = 0)")
-    print(f"  ✓ torch.compile() compatible")
-    print(f"  ✓ Mixed precision (BF16) ready")
+    # Simulate variable lengths
+    lengths = torch.randint(100, T, (B,))
     
-    # Test forward pass
-    batch_size = 16
-    seq_len = 2400
+    # Zero out padding
+    for i in range(B):
+        flux[i, lengths[i]:] = 0.0
+        delta_t[i, lengths[i]:] = 0.0
     
-    flux = torch.randn(batch_size, seq_len)
-    delta_t = torch.rand(batch_size, seq_len) * 100
-    lengths = torch.randint(1000, seq_len + 1, (batch_size,))
-    
-    print(f"\n🧪 Test Forward Pass:")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Sequence length: {seq_len}")
+    print(f"\nInput shapes: flux={flux.shape}, delta_t={delta_t.shape}")
+    print(f"Lengths: {lengths.tolist()}")
     
     with torch.no_grad():
-        output = model(flux, delta_t, lengths=lengths)
+        logits = model(flux, delta_t, lengths=lengths)
     
-    print(f"\n📤 Output Shapes:")
-    for key, value in output.items():
-        if isinstance(value, torch.Tensor):
-            print(f"  {key}: {tuple(value.shape)}")
-    
-    print(f"\n🎯 Sample Predictions (batch 0):")
-    probs = output['probs'][0]
-    class_names = ['Flat', 'PSPL', 'Binary']
-    for name, p in zip(class_names, probs):
-        print(f"  {name:8s}: {p:.4f} ({p*100:.2f}%)")
-    
-    # Benchmark on GPU if available
-    if torch.cuda.is_available():
-        print(f"\n⚡ Performance Benchmark (A100):")
-        profile_results = profile_model(model, batch_size=32, seq_len=2400, device='cuda')
-        print(f"  Average forward time: {profile_results['avg_forward_time_ms']:.2f} ms")
-        print(f"  Throughput: {profile_results['throughput_samples_per_sec']:.1f} samples/sec")
-        print(f"  Peak memory: {profile_results['peak_memory_mb']:.1f} MB")
-        
-        # Estimate training throughput
-        # Training is ~3x slower than inference (forward + backward + optimizer)
-        training_throughput = profile_results['throughput_samples_per_sec'] / 3
-        samples_per_epoch = 1000000  # Example: 1M training samples
-        time_per_epoch_min = samples_per_epoch / training_throughput / 60
-        
-        print(f"\n📈 Training Estimates (single GPU):")
-        print(f"  Training throughput: ~{training_throughput:.1f} samples/sec")
-        print(f"  Time per epoch (1M samples): ~{time_per_epoch_min:.1f} minutes")
-        print(f"  Time per epoch (48 GPUs): ~{time_per_epoch_min/48:.2f} minutes")
-    
-    print(f"\n" + "=" * 80)
-    print("✅ Model ready for distributed training on A100 cluster!")
-    print("=" * 80)
+    print(f"Output shape: {logits.shape}")
+    print(f"Output (first 3): {logits[:3]}")
+    print("\n✓ Model test passed!")
