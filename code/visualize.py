@@ -1,534 +1,753 @@
-import os
 import sys
+import json
+import argparse
+import logging
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import argparse
-import matplotlib
-try:
-    matplotlib.use('Agg')
-except Exception:
-    pass
-import matplotlib.pyplot as plt
-import seaborn as sns
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
 from pathlib import Path
 from tqdm import tqdm
-from sklearn.decomposition import PCA
-from sklearn.metrics import confusion_matrix
-import gc
+from datetime import datetime, timedelta
+import warnings
+import random
 import h5py
+import os
+import gc
+from typing import Dict, Any, Tuple, Optional, List
 
-# Dynamic import setup
-current_dir = Path(__file__).resolve().parent
-sys.path.insert(0, str(current_dir))
+try:
+    current_dir = Path(__file__).resolve().parent
+    sys.path.insert(0, str(current_dir))
+    from model import RomanMicrolensingGRU, ModelConfig
+    
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-# Global configuration
-np.random.seed(42)
-torch.manual_seed(42)
-sns.set_style("whitegrid")
-COLORS = ['#95a5a6', '#e74c3c', '#3498db'] 
-CLASS_NAMES = ['Flat', 'PSPL', 'Binary']
+except ImportError as e:
+    print(f"Import error: {e}")
+    sys.exit(1)
 
-# Physical constants
+warnings.filterwarnings("ignore")
+
+
+CLIP_NORM = 1.0
+DEFAULT_LR = 3e-4
+WARMUP_EPOCHS = 5
+SEED = 42
 AB_ZEROPOINT_JY = 3631.0
 MISSION_DURATION_DAYS = 1826.25
 
 
-# =============================================================================
-# ROMAN VISUALIZER
-# =============================================================================
-class RomanVisualizer:
-    """
-    Advanced visualization suite for Roman microlensing classifier.
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.float32, np.float64, np.floating)):
+            return float(obj)
+        if isinstance(obj, (np.int32, np.int64, np.integer)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+def load_compat(path):
+    path = str(path)
+    if path.endswith('.h5') or path.endswith('.hdf5'):
+        with h5py.File(path, 'r') as f:
+            return {k: f[k][:] for k in f.keys()}
+    return np.load(path, allow_pickle=True)
+
+
+def setup_distributed() -> Tuple[int, int, int, bool]:
+    if 'RANK' in os.environ:
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        
+        if rank == 0:
+            print(f"Distributed: {world_size} processes", flush=True)
+        
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            
+            dist.init_process_group(
+                backend='nccl', 
+                init_method='env://',
+                timeout=timedelta(seconds=1800)
+            )
+            
+            # Performance optimizations
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.enabled = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            
+            # Memory optimization
+            if hasattr(torch.cuda, 'memory_stats'):
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            return rank, local_rank, world_size, True
     
-    Capabilities:
-        - Latent space visualization via PCA
-        - Deep event analysis with probability trajectories
-        - Embedding norm analysis
-        - Feature extraction visualization
-    """
+    return 0, 0, 1, False
+
+
+def setup_logging(rank: int, output_dir: Path):
+    logger = logging.getLogger("TRAIN")
     
+    if rank == 0:
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(logging.INFO)
+        
+        file_handler = logging.FileHandler(output_dir / "training.log")
+        file_handler.setLevel(logging.INFO)
+        
+        fmt = logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S')
+        console.setFormatter(fmt)
+        file_handler.setFormatter(fmt)
+        
+        logger.addHandler(console)
+        logger.addHandler(file_handler)
+    else:
+        logger.setLevel(logging.CRITICAL)
+    
+    return logger
+
+
+def set_seed_everywhere(seed: int, rank: int = 0) -> None:
+    random.seed(seed + rank)
+    np.random.seed(seed + rank)
+    torch.manual_seed(seed + rank)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed + rank)
+        torch.cuda.manual_seed_all(seed + rank)
+    
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+
+class MicrolensingDataset(Dataset):
     def __init__(
         self, 
-        model_path: str, 
-        data_path: str, 
-        output-dir: str, 
-        device: str = 'cuda'
+        flux: np.ndarray, 
+        delta_t: np.ndarray, 
+        labels: np.ndarray, 
+        stats: Optional[Dict] = None,
+        handle_nans: str = 'zero'
     ):
-        """
-        Args:
-            model_path: Path to model checkpoint (.pt file)
-            data_path: Path to test data (.npz file)
-            output-dir: Directory for output visualizations
-            device: 'cuda' or 'cpu'
-        """
-        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.out_dir = Path(output-dir)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+        # Contiguous arrays for faster GPU transfer
+        self.flux = torch.from_numpy(np.ascontiguousarray(flux)).float()
+        self.delta_t = torch.from_numpy(np.ascontiguousarray(delta_t)).float()
+        self.labels = torch.from_numpy(np.ascontiguousarray(labels)).long()
         
-        print("=" * 80)
-        print("ROMAN SPACE TELESCOPE - VISUALIZATION SUITE")
-        print("=" * 80)
-        print(f"Model:      {Path(model_path).name}")
-        print(f"Data:       {Path(data_path).name}")
-        print(f"Output:     {self.out_dir}")
-        print(f"Device:     {self.device}")
+        self.padding_mask = (~torch.isnan(self.flux)) & (self.flux != 0.0)
+        self.lengths = self.padding_mask.sum(dim=1).long().clamp(min=1)
         
-        # Load model
-        self.model, self.config, self.checkpoint = self._load_model(model_path)
+        if handle_nans == 'zero':
+            self.flux = torch.nan_to_num(self.flux, nan=0.0)
+        elif handle_nans == 'median':
+            for i in range(len(self.flux)):
+                valid = self.flux[i][self.padding_mask[i]]
+                if len(valid) > 0:
+                    median = valid.median()
+                    self.flux[i] = torch.where(
+                        torch.isnan(self.flux[i]), 
+                        median, 
+                        self.flux[i]
+                    )
         
-        # Load data
-        self.flux, self.delta_t, self.labels, self.lengths = self._load_data(data_path)
+        self.delta_t = torch.nan_to_num(self.delta_t, nan=0.0)
         
-        # =====================================================================
-        # CRITICAL FIX: APPLY NORMALIZATION FROM CHECKPOINT
-        # =====================================================================
-        # The model was trained on normalized data (approx mean=0, std=1).
-        # We must apply the EXACT same statistics to the visualization data.
-        if 'normalization_stats' in self.checkpoint:
-            stats = self.checkpoint['normalization_stats']
-            print(f"Applying normalization from checkpoint: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
+        if stats is not None:
+            median = stats['median']
+            iqr = stats['iqr']
             
-            # Create mask for valid data (non-zero, non-nan)
-            mask = (self.flux != 0) & (~np.isnan(self.flux))
+            if iqr < 1e-6:
+                iqr = 1.0
             
-            # Apply (Flux - Median) / IQR
-            # This matches the logic in train.py exactly
-            self.flux = np.where(
-                mask, 
-                (self.flux - stats['median']) / stats['iqr'], 
-                0.0
+            self.flux = torch.where(
+                self.padding_mask,
+                (self.flux - median) / iqr,
+                torch.tensor(0.0, dtype=self.flux.dtype)
             )
-        else:
-            print("⚠️ WARNING: No normalization stats found in checkpoint.")
-            print("   Visualizations will likely be incorrect (garbage in -> garbage out).")
-            print("   Ensure you are using a checkpoint trained with the latest train.py.")
-        # =====================================================================
-        
-        # Hook for feature extraction
-        self.hook_handle = None
-        self.hook_output = {}
-        
-        print("=" * 80 + "\n")
 
-    def _load_model(self, model_path: str):
-        """Load model from checkpoint."""
-        print(f"\nLoading model from {Path(model_path).name}...")
-        
-        try:
-            from model import RomanMicrolensingGRU, ModelConfig
-        except ImportError as e:
-            print(f"CRITICAL: Cannot import model: {e}")
-            print("Make sure model.py is in the same directory")
-            sys.exit(1)
-        
-        try:
-            ckpt = torch.load(model_path, map_location=self.device)
-        except Exception as e:
-            print(f"CRITICAL: Failed to load checkpoint: {e}")
-            sys.exit(1)
-        
-        # Extract config
-        config_dict = ckpt.get('config', {})
-        valid_keys = set(ModelConfig.__annotations__.keys())
-        clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
-        config = ModelConfig(**clean_conf)
-        
-        # Create model
-        model = RomanMicrolensingGRU(config, dtype=torch.float32).to(self.device)
-        
-        # Load weights
-        state = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
-        clean_state = {k.replace('module.', ''): v for k, v in state.items()}
-        model.load_state_dict(clean_state, strict=False)
-        model.eval()
-        
-        print(f"  Model loaded: {sum(p.numel() for p in model.parameters()):,} parameters")
-        print(f"  Config: d_model={config.d_model}, n_layers={config.n_layers}")
-        
-        return model, config, ckpt
+    def __len__(self) -> int:
+        return len(self.labels)
 
-    def _load_data(self, data_path: str):
-        """Load data from HDF5 or NPZ."""
-        data_path = Path(data_path)
-        
-        if data_path.suffix in ['.h5', '.hdf5']:
-            print(f"Loading HDF5 data: {data_path.name}")
-            
-            with h5py.File(data_path, 'r') as f:
-                flux = f['flux'][:]
-                delta_t = f['delta_t'][:]
-                labels = f['labels'][:]
-                
-                # Compute lengths
-                valid_mask = (flux != 0) & (~np.isnan(flux))
-                lengths = valid_mask.sum(axis=1)
-        
-        elif data_path.suffix == '.npz':
-            print(f"Loading NPZ data: {data_path.name}")
-            print("⚠️  WARNING: NPZ is 37x slower than HDF5")
-            
-            data = np.load(data_path)
-            flux = data['flux']
-            delta_t = data['delta_t']
-            labels = data['labels']
-            
-            valid_mask = (flux != 0) & (~np.isnan(flux))
-            lengths = valid_mask.sum(axis=1)
-        
-        else:
-            raise ValueError(f"Unsupported format: {data_path.suffix}")
-        
-        return flux, delta_t, labels, lengths
-    
-    def _compute_normalization_stats(self, flux: np.ndarray) -> dict:
-        """Compute normalization statistics matching train.py."""
-        # Kept for compatibility, though we prioritize checkpoint stats
-        subset = flux[:10000].flatten()
-        subset = subset[subset != 0]
-        
-        if len(subset) == 0:
-            return {'median': 0.0, 'iqr': 1.0}
-        
-        median = float(np.median(subset))
-        q75, q25 = np.percentile(subset, [75, 25])
-        iqr = float(q75 - q25)
-        
-        if iqr < 1e-6:
-            iqr = 1.0
-        
-        return {'median': median, 'iqr': iqr}
-
-    def _register_hook(self):
-        """Register forward hook to capture GRU embeddings."""
-        def hook(module, input, output):
-            # Capture GRU output sequence
-            self.hook_output['gru_seq'] = output[0].detach()
-        
-        # Hook into the GRU stack
-        if hasattr(self.model, 'gru'):
-            self.hook_handle = self.model.gru.register_forward_hook(hook)
-
-    def _remove_hook(self):
-        """Remove forward hook."""
-        if self.hook_handle:
-            self.hook_handle.remove()
-            self.hook_handle = None
-
-    def extract_trajectory(self, flux_idx: int):
-        """
-        Extract probability and embedding trajectory for single event.
-        
-        Args:
-            flux_idx: Index of event in dataset
-            
-        Returns:
-            probs: (T, 3) probability array
-            embeddings: (T, d_model) embedding array
-        """
-        f = torch.tensor(self.flux[flux_idx], dtype=torch.float32).unsqueeze(0).to(self.device)
-        d = torch.tensor(self.delta_t[flux_idx], dtype=torch.float32).unsqueeze(0).to(self.device)
-        l = torch.tensor([self.lengths[flux_idx]], dtype=torch.long).to(self.device)
-        
-        self._register_hook()
-        try:
-            with torch.no_grad():
-                output = self.model(f, d, lengths=l, return_all_timesteps=True)
-                
-                # Get embeddings from hook
-                embeddings = self.hook_output.get('gru_seq', None)
-                if embeddings is None:
-                    embeddings = torch.zeros(1, f.size(1), self.config.d_model).to(self.device)
-                
-                # Get probabilities
-                if 'probs_seq' in output:
-                    probs = output['probs_seq']
-                else:
-                    # Fallback: compute from logits
-                    if self.config.hierarchical:
-                        probs = torch.exp(output['logits_seq'])
-                    else:
-                        probs = F.softmax(output['logits_seq'], dim=-1)
-                    
-        finally:
-            self._remove_hook()
-        
-        return probs[0].cpu().numpy(), embeddings[0].cpu().numpy()
-
-    def plot_deep_analysis(self, idx: int):
-        """Generate comprehensive deep analysis plot for single event."""
-        print(f"  Plotting Event {idx}...")
-        
-        probs, embeddings = self.extract_trajectory(idx)
-        T = self.lengths[idx]
-        
-        fig = plt.figure(figsize=(15, 10))
-        gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
-        
-        # 1. Flux time series
-        ax1 = fig.add_subplot(gs[0, :])
-        # Plot only valid part
-        ax1.plot(self.flux[idx][:T], c='k', alpha=0.7, linewidth=1.5, label='Normalized Flux')
-        ax1.set_ylabel('Normalized Flux')
-        ax1.set_title(f"Event {idx} | True Class: {CLASS_NAMES[self.labels[idx]]}")
-        ax1.legend(loc='upper right')
-        ax1.grid(True, alpha=0.3)
-        
-        # 2. Probability evolution
-        ax2 = fig.add_subplot(gs[1, :])
-        for c in range(3):
-            ax2.plot(probs[:T, c], color=COLORS[c], label=CLASS_NAMES[c], lw=2)
-        ax2.set_ylim([-0.05, 1.05])
-        ax2.set_ylabel('Probability')
-        ax2.set_title("Probability Evolution")
-        ax2.legend(loc='upper left')
-        ax2.grid(True, alpha=0.3)
-        
-        # 3. Latent state activity (L2 norm)
-        ax3 = fig.add_subplot(gs[2, 0])
-        norms = np.linalg.norm(embeddings[:T], axis=1)
-        ax3.plot(norms, color='purple', lw=2)
-        ax3.set_ylabel('Embedding Norm')
-        ax3.set_xlabel('Time Step')
-        ax3.set_title("Latent State Activity")
-        ax3.grid(True, alpha=0.3)
-        
-        # 4. Confidence over time
-        ax4 = fig.add_subplot(gs[2, 1])
-        confidence = probs[:T].max(axis=1)
-        ax4.plot(confidence, color='orange', lw=2)
-        ax4.axhline(0.9, color='green', linestyle='--', alpha=0.5, label='High Confidence')
-        ax4.set_ylabel('Max Probability')
-        ax4.set_xlabel('Time Step')
-        ax4.set_title("Classification Confidence")
-        ax4.set_ylim([0, 1.05])
-        ax4.legend()
-        ax4.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.out_dir / f"deep_analysis_{idx}.png", dpi=300)
-        plt.close()
-        gc.collect()
-
-    def plot_latent_space(self, n: int = 2000, method: str = 'pca'):
-        """
-        Visualize latent space using dimensionality reduction.
-        
-        Args:
-            n: Number of samples to visualize
-            method: Dimensionality reduction method ('pca' supported)
-        """
-        print(f"\nMapping latent space ({n} samples)...")
-        
-        n = min(len(self.flux), n)
-        idxs = np.random.choice(len(self.flux), n, replace=False)
-        
-        embeddings = []
-        labels = []
-        
-        self._register_hook()
-        
-        with torch.no_grad():
-            # Batch processing for efficiency
-            batch_size = 128
-            for i in tqdm(range(0, n, batch_size), desc="Extracting embeddings"):
-                batch_end = min(i + batch_size, n)
-                batch_idx = idxs[i:batch_end]
-                
-                f = torch.tensor(self.flux[batch_idx], dtype=torch.float32).to(self.device)
-                d = torch.tensor(self.delta_t[batch_idx], dtype=torch.float32).to(self.device)
-                l = torch.tensor(self.lengths[batch_idx], dtype=torch.long).to(self.device)
-                
-                # Forward pass
-                self.model(f, d, lengths=l)
-                
-                # Extract last valid embedding for each sequence
-                seq_emb = self.hook_output['gru_seq']  # (B, T, D)
-                
-                # Gather last valid timestep
-                last_idx = (l - 1).clamp(min=0).view(-1, 1, 1).expand(-1, 1, seq_emb.size(-1))
-                last_emb = seq_emb.gather(1, last_idx).squeeze(1)  # (B, D)
-                
-                embeddings.append(last_emb.cpu().numpy())
-                labels.extend(self.labels[batch_idx])
-        
-        self._remove_hook()
-        
-        embeddings = np.concatenate(embeddings, axis=0)
-        labels = np.array(labels)
-        
-        if len(embeddings) < 5:
-            print("  Insufficient samples for visualization")
-            return
-        
-        # Apply dimensionality reduction
-        print(f"  Applying {method.upper()} projection...")
-        if method == 'pca':
-            reducer = PCA(n_components=2)
-            proj = reducer.fit_transform(embeddings)
-            explained_var = reducer.explained_variance_ratio_
-            print(f"    Explained variance: {explained_var[0]:.3f}, {explained_var[1]:.3f}")
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        # Plot
-        plt.figure(figsize=(12, 9))
-        
-        for c in range(3):
-            mask = labels == c
-            if mask.sum() > 0:
-                plt.scatter(
-                    proj[mask, 0], proj[mask, 1], 
-                    c=COLORS[c], label=CLASS_NAMES[c], 
-                    alpha=0.6, s=20, edgecolors='none'
-                )
-        
-        plt.xlabel(f'{method.upper()} Component 1')
-        plt.ylabel(f'{method.upper()} Component 2')
-        plt.title(f'Latent Space Visualization ({n} samples)')
-        plt.legend(loc='best', framealpha=0.9)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(self.out_dir / f'latent_space_{method}.png', dpi=300)
-        plt.close()
-        
-        print(f"  Saved to: {self.out_dir / f'latent_space_{method}.png'}")
-
-    def plot_confusion_with_embeddings(self, n_per_class: int = 100):
-        """
-        Plot confusion matrix with latent space visualization of errors.
-        """
-        print(f"\nAnalyzing classification errors ({n_per_class} per class)...")
-        
-        # Get predictions
-        all_probs = []
-        
-        with torch.no_grad():
-            batch_size = 128
-            for i in tqdm(range(0, len(self.flux), batch_size), desc="Inference"):
-                batch_end = min(i + batch_size, len(self.flux))
-                
-                f = torch.tensor(self.flux[i:batch_end], dtype=torch.float32).to(self.device)
-                d = torch.tensor(self.delta_t[i:batch_end], dtype=torch.float32).to(self.device)
-                l = torch.tensor(self.lengths[i:batch_end], dtype=torch.long).to(self.device)
-                
-                output = self.model(f, d, lengths=l)
-                all_probs.append(output['probs'].cpu().numpy())
-        
-        probs = np.concatenate(all_probs, axis=0)
-        preds = probs.argmax(axis=1)
-        
-        # Compute confusion matrix
-        cm = confusion_matrix(self.labels, preds)
-        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-        
-        # Plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # Confusion matrix
-        sns.heatmap(
-            cm_norm, annot=True, fmt='.3f', cmap='Blues',
-            xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES,
-            ax=ax1, cbar_kws={'label': 'Fraction'}
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            self.flux[idx],
+            self.delta_t[idx],
+            self.lengths[idx],
+            self.labels[idx]
         )
-        ax1.set_title('Confusion Matrix')
-        ax1.set_ylabel('True Label')
-        ax1.set_xlabel('Predicted Label')
-        
-        # Error distribution
-        correct = (self.labels == preds)
-        error_counts = [np.sum(~correct & (self.labels == i)) for i in range(3)]
-        ax2.bar(CLASS_NAMES, error_counts, color=COLORS, alpha=0.7, edgecolor='black')
-        ax2.set_ylabel('Number of Errors')
-        ax2.set_title('Classification Errors by Class')
-        ax2.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
-        plt.savefig(self.out_dir / 'confusion_analysis.png', dpi=300)
-        plt.close()
-        
-        print(f"  Accuracy: {correct.mean():.4f}")
-        print(f"  Saved to: {self.out_dir / 'confusion_analysis.png'}")
 
 
-# =============================================================================
-# COMMAND LINE INTERFACE
-# =============================================================================
+def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> Dict[str, float]:
+    sample_flux = flux[:sample_size]
+    valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
+    
+    if len(valid_flux) == 0:
+        return {'median': 0.0, 'iqr': 1.0}
+    
+    median = float(np.median(valid_flux))
+    q75, q25 = np.percentile(valid_flux, [75, 25])
+    iqr = float(q75 - q25)
+    
+    if iqr < 1e-6:
+        iqr = 1.0
+    
+    return {'median': median, 'iqr': iqr}
+
+
+def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Tensor:
+    unique, counts = np.unique(labels, return_counts=True)
+    total = len(labels)
+    weights = total / (len(unique) * counts)
+    weight_tensor = torch.zeros(3, device=device)
+    weight_tensor[unique] = torch.from_numpy(weights).float()
+    return weight_tensor
+
+
+def train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    class_weights: torch.Tensor,
+    device: torch.device,
+    rank: int,
+    epoch: int,
+    logger: logging.Logger,
+    config: ModelConfig,
+    accumulation_steps: int = 1,
+    clip_norm: float = CLIP_NORM
+) -> Tuple[float, float]:
+    model.train()
+    
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    
+    iterator = tqdm(loader, desc=f"Epoch {epoch}", disable=(rank != 0))
+    
+    optimizer.zero_grad(set_to_none=True)
+    
+    # Prefetch to GPU stream
+    stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+    
+    for batch_idx, (flux, delta_t, lengths, labels) in enumerate(iterator):
+        # Non-blocking transfer with prefetch
+        with torch.cuda.stream(stream) if stream else torch.no_grad():
+            flux = flux.to(device, non_blocking=True)
+            delta_t = delta_t.to(device, non_blocking=True)
+            lengths = lengths.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+        
+        if stream:
+            torch.cuda.current_stream().wait_stream(stream)
+        
+        with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
+            output = model(flux, delta_t, lengths=lengths)
+            
+            if config.hierarchical:
+                loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+            else:
+                loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+            
+            loss = loss / accumulation_steps
+        
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+        
+        if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                optimizer.step()
+            
+            optimizer.zero_grad(set_to_none=True)
+        
+        with torch.no_grad():
+            pred = output['probs'].argmax(dim=-1)
+            correct += (pred == labels).sum().item()
+            total += labels.size(0)
+            total_loss += (loss.item() * accumulation_steps) * labels.size(0)
+        
+        if rank == 0 and batch_idx % 20 == 0:
+            iterator.set_postfix({
+                'loss': f'{loss.item() * accumulation_steps:.4f}',
+                'acc': f'{100.0 * correct / total:.2f}'
+            })
+    
+    # Memory cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return total_loss / total, correct / total
+
+
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    class_weights: torch.Tensor,
+    device: torch.device,
+    rank: int,
+    config: ModelConfig,
+    return_predictions: bool = False
+) -> Dict[str, Any]:
+    model.eval()
+    
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    
+    all_preds = [] if return_predictions else None
+    all_labels = [] if return_predictions else None
+    all_probs = [] if return_predictions else None
+    
+    # Prefetch stream
+    stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+    
+    for flux, delta_t, lengths, labels in tqdm(loader, disable=(rank != 0), desc="Eval"):
+        with torch.cuda.stream(stream) if stream else torch.no_grad():
+            flux = flux.to(device, non_blocking=True)
+            delta_t = delta_t.to(device, non_blocking=True)
+            lengths = lengths.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+        
+        if stream:
+            torch.cuda.current_stream().wait_stream(stream)
+        
+        with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
+            output = model(flux, delta_t, lengths=lengths)
+            
+            if config.hierarchical:
+                loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+            else:
+                loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+        
+        pred = output['probs'].argmax(dim=-1)
+        correct += (pred == labels).sum().item()
+        total += labels.size(0)
+        total_loss += loss.item() * labels.size(0)
+        
+        if return_predictions:
+            all_preds.append(pred.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+            all_probs.append(output['probs'].cpu().numpy())
+    
+    results = {
+        'loss': total_loss / total,
+        'accuracy': correct / total
+    }
+    
+    if return_predictions:
+        results['predictions'] = np.concatenate(all_preds)
+        results['labels'] = np.concatenate(all_labels)
+        results['probabilities'] = np.concatenate(all_probs)
+    
+    return results
+
+
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    epoch: int,
+    best_acc: float,
+    config: ModelConfig,
+    stats: Dict,
+    output_dir: Path,
+    is_best: bool = False
+) -> None:
+    if isinstance(model, DDP):
+        model_state = model.module.state_dict()
+    else:
+        model_state = model.state_dict()
+    
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model_state,
+        'optimizer_state_dict': optimizer.state_dict(),
+        'best_acc': best_acc,
+        'config': config.__dict__,
+        'stats': stats
+    }
+    
+    if scaler is not None:
+        checkpoint['scaler_state_dict'] = scaler.state_dict()
+    
+    if is_best:
+        torch.save(checkpoint, output_dir / 'best_model.pt')
+    else:
+        torch.save(checkpoint, output_dir / f'checkpoint_epoch_{epoch}.pt')
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Visualization suite for Roman microlensing classifier",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description='Train Roman microlensing classifier')
     
-    parser.add_argument('--experiment-name', required=True,
-                       help="Name of experiment (searches for model automatically)")
-    parser.add_argument('--data', required=True,
-                       help="Path to test data (.npz or .h5)")
-    parser.add_argument('--output-dir', required=True,
-                       help="Output directory for plots")
+    # Data
+    parser.add_argument('--data', type=str, required=True)
+    parser.add_argument('--output-dir', type=str, default='../results')
+    parser.add_argument('--experiment-name', type=str, default=None)
     
-    parser.add_argument('--n-latent', type=int, default=2000,
-                       help="Number of samples for latent space visualization")
-    parser.add_argument('--n-deep-dives', type=int, default=10,
-                       help="Number of deep dive analysis plots")
-    parser.add_argument('--device', default='cuda',
-                       help="Device: cuda or cpu")
+    # Architecture
+    parser.add_argument('--d-model', type=int, default=256)
+    parser.add_argument('--n-layers', type=int, default=4)
+    parser.add_argument('--dropout', type=float, default=0.3)
+    parser.add_argument('--window-size', type=int, default=5)
+    
+    # Model variants
+    parser.add_argument('--hierarchical', dest='hierarchical', action='store_true')
+    parser.add_argument('--no-hierarchical', dest='hierarchical', action='store_false')
+    parser.set_defaults(hierarchical=True)
+    
+    parser.add_argument('--feature-extraction', type=str, choices=['conv', 'mlp'], default='conv')
+    
+    parser.add_argument('--use-attention-pooling', dest='attention_pooling', action='store_true')
+    parser.add_argument('--no-attention-pooling', dest='attention_pooling', action='store_false')
+    parser.set_defaults(attention_pooling=True)
+    
+    parser.add_argument('--use-residual', dest='use_residual', action='store_true')
+    parser.add_argument('--no-residual', dest='use_residual', action='store_false')
+    parser.set_defaults(use_residual=True)
+    
+    parser.add_argument('--use-layer-norm', dest='use_layer_norm', action='store_true')
+    parser.add_argument('--no-layer-norm', dest='use_layer_norm', action='store_false')
+    parser.set_defaults(use_layer_norm=True)
+    
+    # Training
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight-decay', type=float, default=1e-3)
+    parser.add_argument('--warmup-epochs', type=int, default=5)
+    parser.add_argument('--clip-norm', type=float, default=1.0)
+    
+    # Optimization
+    parser.add_argument('--use-amp', dest='use_amp', action='store_true')
+    parser.add_argument('--no-amp', dest='use_amp', action='store_false')
+    parser.set_defaults(use_amp=True)
+    
+    parser.add_argument('--use-gradient-checkpointing', dest='use_gradient_checkpointing', action='store_true')
+    parser.add_argument('--no-gradient-checkpointing', dest='use_gradient_checkpointing', action='store_false')
+    parser.set_defaults(use_gradient_checkpointing=True)
+    
+    parser.add_argument('--use-class-weights', action='store_true', default=True)
+    parser.add_argument('--compile', action='store_true', default=False)
+    parser.add_argument('--compile-mode', type=str, default='default', choices=['default', 'reduce-overhead', 'max-autotune'])
+    
+    # Evaluation
+    parser.add_argument('--eval-every', type=int, default=5)
+    parser.add_argument('--save-every', type=int, default=10)
+    parser.add_argument('--early-stopping-patience', type=int, default=0)
+    
+    # Data handling
+    parser.add_argument('--nan-strategy', type=str, default='zero', choices=['zero', 'median'])
+    parser.add_argument('--num-workers', type=int, default=0)
     
     args = parser.parse_args()
     
-    # Find model path
-    print("Searching for experiment...")
-    search_roots = [Path('../results'), Path('results'), Path('.')]
-    exp_path = None
+    # Setup
+    rank, local_rank, world_size, is_ddp = setup_distributed()
+    device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
-    for root in search_roots:
-        if root.exists():
-            matches = list(root.glob(f"*{args.experiment-name}*"))
-            if matches:
-                exp_path = sorted(matches, key=lambda x: x.stat().st_mtime)[-1]
-                break
+    if args.experiment_name is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        args.experiment_name = f"d{args.d_model}_l{args.n_layers}_{timestamp}"
     
-    if not exp_path:
-        print(f"Error: Experiment '{args.experiment-name}' not found")
-        sys.exit(1)
+    output_dir = Path(args.output_dir) / args.experiment_name
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
     
-    model_file = exp_path / "best_model.pt"
-    if not model_file.exists():
-        print(f"Error: No best_model.pt found in {exp_path}")
-        sys.exit(1)
+    if is_ddp:
+        dist.barrier()
     
-    # Create visualizer
-    viz = RomanVisualizer(
-        model_path=str(model_file),
-        data_path=args.data,
-        output-dir=args.output-dir,
-        device=args.device
+    logger = setup_logging(rank, output_dir)
+    
+    if rank == 0:
+        logger.info(f"Seed: {SEED}")
+    
+    set_seed_everywhere(SEED, rank)
+    
+    # Load data
+    if rank == 0:
+        logger.info(f"Loading: {args.data}")
+    
+    data = load_compat(args.data)
+    flux = data['flux']
+    delta_t = data['delta_t']
+    labels = data['labels']
+    
+    if rank == 0:
+        logger.info(f"Samples: {len(labels)}")
+    
+    # Split
+    indices = np.arange(len(labels))
+    train_idx, val_idx = train_test_split(
+        indices, test_size=0.2, random_state=SEED, stratify=labels
     )
     
-    # Run visualizations
-    print("\n" + "=" * 80)
-    print("GENERATING VISUALIZATIONS")
-    print("=" * 80)
+    flux_train = flux[train_idx]
+    delta_t_train = delta_t[train_idx]
+    labels_train = labels[train_idx]
     
-    # Latent space
-    viz.plot_latent_space(n=args.n_latent)
+    flux_val = flux[val_idx]
+    delta_t_val = delta_t[val_idx]
+    labels_val = labels[val_idx]
     
-    # Confusion with embeddings
-    viz.plot_confusion_with_embeddings(n_per_class=100)
+    if rank == 0:
+        unique_train, counts_train = np.unique(labels_train, return_counts=True)
+        logger.info(f"Train: {len(labels_train)}, Val: {len(labels_val)}")
+        logger.info(f"Class distribution: {dict(zip(unique_train.tolist(), counts_train.tolist()))}")
     
-    # Deep dives
-    print(f"\nGenerating {args.n_deep_dives} deep analysis plots...")
-    n_samples = min(len(viz.flux), args.n_deep_dives)
-    indices = np.random.choice(len(viz.flux), n_samples, replace=False)
+    # Normalization
+    stats = compute_normalization_stats(flux_train)
+    if rank == 0:
+        logger.info(f"Norm: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
     
-    for idx in tqdm(indices, desc="Deep dives"):
-        viz.plot_deep_analysis(idx)
+    # Datasets
+    train_dataset = MicrolensingDataset(flux_train, delta_t_train, labels_train, stats, handle_nans=args.nan_strategy)
+    val_dataset = MicrolensingDataset(flux_val, delta_t_val, labels_val, stats, handle_nans=args.nan_strategy)
     
-    print("\n" + "=" * 80)
-    print(f"Visualization complete. Results saved to: {viz.out_dir}")
-    print("=" * 80)
+    # Samplers
+    if is_ddp:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=SEED)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+    else:
+        train_sampler = None
+        val_sampler = None
+    
+    # Loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size * 2,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None
+    )
+    
+    # Model
+    config = ModelConfig(
+        d_model=args.d_model,
+        n_layers=args.n_layers,
+        dropout=args.dropout,
+        window_size=args.window_size,
+        hierarchical=args.hierarchical,
+        use_residual=args.use_residual,
+        use_layer_norm=args.use_layer_norm,
+        feature_extraction=args.feature_extraction,
+        use_attention_pooling=args.attention_pooling,
+        use_amp=args.use_amp,
+        use_gradient_checkpointing=args.use_gradient_checkpointing
+    )
+    
+    model = RomanMicrolensingGRU(config, dtype=torch.float32).to(device)
+    
+    if rank == 0:
+        n_params = count_parameters(model)
+        logger.info(f"Parameters: {n_params:,}")
+        
+        effective_batch = args.batch_size * args.gradient_accumulation_steps * world_size
+        logger.info(f"Effective batch: {effective_batch}")
+    
+    # DDP
+    if is_ddp:
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            gradient_as_bucket_view=True,
+            find_unused_parameters=False,
+            broadcast_buffers=True
+        )
+    
+    # Compile
+    if args.compile and hasattr(torch, 'compile'):
+        if rank == 0:
+            logger.info(f"Compiling (mode={args.compile_mode})...")
+        model = torch.compile(model, mode=args.compile_mode)
+    
+    # Optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.999),
+        fused=torch.cuda.is_available()
+    )
+    
+    scaler = None
+    
+    # Scheduler
+    def lr_lambda(epoch):
+        if epoch < args.warmup_epochs:
+            return (epoch + 1) / args.warmup_epochs
+        return 1.0
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # Class weights
+    if args.use_class_weights:
+        class_weights = compute_class_weights(labels_train, device)
+        if rank == 0:
+            logger.info(f"Weights: {class_weights.cpu().numpy()}")
+    else:
+        class_weights = torch.ones(3, device=device)
+    
+    if is_ddp:
+        dist.barrier()
+    
+    # Training
+    if rank == 0:
+        logger.info("=" * 60)
+        logger.info("Training started")
+        logger.info("=" * 60)
+    
+    best_acc = 0.0
+    patience_counter = 0
+    
+    for epoch in range(1, args.epochs + 1):
+        if is_ddp:
+            train_loader.sampler.set_epoch(epoch)
+        
+        train_loss, train_acc = train_epoch(
+            model, train_loader, optimizer, scaler,
+            class_weights, device, rank, epoch, logger, config,
+            accumulation_steps=args.gradient_accumulation_steps,
+            clip_norm=args.clip_norm
+        )
+        
+        scheduler.step()
+        
+        should_eval = (epoch % args.eval_every == 0) or (epoch == 1) or (epoch == args.epochs)
+        
+        if should_eval:
+            val_results = evaluate(
+                model, val_loader, class_weights, device, rank, config,
+                return_predictions=(epoch == args.epochs and rank == 0)
+            )
+            
+            val_loss, val_acc = val_results['loss'], val_results['accuracy']
+            
+            if rank == 0:
+                logger.info(
+                    f"E{epoch:03d}/{args.epochs} | "
+                    f"TrL {train_loss:.4f} TrA {train_acc*100:.2f}% | "
+                    f"VaL {val_loss:.4f} VaA {val_acc*100:.2f}% | "
+                    f"LR {scheduler.get_last_lr()[0]:.2e}"
+                )
+                
+                if val_acc > best_acc:
+                    best_acc = val_acc
+                    patience_counter = 0
+                    save_checkpoint(
+                        model, optimizer, scaler, epoch, best_acc,
+                        config, stats, output_dir, is_best=True
+                    )
+                    logger.info(f"  Best: {best_acc*100:.2f}%")
+                else:
+                    patience_counter += 1
+                
+                if epoch % args.save_every == 0:
+                    save_checkpoint(
+                        model, optimizer, scaler, epoch, best_acc,
+                        config, stats, output_dir, is_best=False
+                    )
+        else:
+            if rank == 0:
+                logger.info(
+                    f"E{epoch:03d}/{args.epochs} | "
+                    f"TrL {train_loss:.4f} TrA {train_acc*100:.2f}% | "
+                    f"LR {scheduler.get_last_lr()[0]:.2e}"
+                )
+        
+        if args.early_stopping_patience > 0 and patience_counter >= args.early_stopping_patience:
+            if rank == 0:
+                logger.info(f"Early stop: epoch {epoch}")
+            break
+    
+    # Final evaluation
+    if rank == 0:
+        logger.info("=" * 60)
+        logger.info(f"Complete | Best: {best_acc*100:.2f}%")
+        logger.info("=" * 60)
+        
+        checkpoint = torch.load(output_dir / 'best_model.pt')
+        if is_ddp:
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        
+        final_results = evaluate(
+            model, val_loader, class_weights, device, rank, config,
+            return_predictions=True
+        )
+        
+        np.savez(
+            output_dir / 'final_predictions.npz',
+            predictions=final_results['predictions'],
+            labels=final_results['labels'],
+            probabilities=final_results['probabilities']
+        )
+        
+        cm = confusion_matrix(final_results['labels'], final_results['predictions'])
+        logger.info(f"Confusion matrix:\n{cm}")
+        np.save(output_dir / 'confusion_matrix.npy', cm)
+        
+        class_names = ['Flat', 'PSPL', 'Binary']
+        report = classification_report(
+            final_results['labels'], 
+            final_results['predictions'],
+            target_names=class_names
+        )
+        logger.info(f"Report:\n{report}")
+        
+        with open(output_dir / 'classification_report.txt', 'w') as f:
+            f.write(report)
+        
+        # Save config
+        with open(output_dir / 'config.json', 'w') as f:
+            json.dump(vars(args), f, indent=2, cls=NumpyEncoder)
+        
+        logger.info(f"Saved: {output_dir}")
+    
+    if is_ddp:
+        dist.destroy_process_group()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
