@@ -1,7 +1,5 @@
 # Gravitational Microlensing Event Classification
 
-**Causal Hybrid GRU-Transformer for Real-time Binary Lens Detection**
-
 MSc Thesis Project | University of Heidelberg | Prof. Dr. Joachim Wambsganß
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
@@ -12,22 +10,12 @@ MSc Thesis Project | University of Heidelberg | Prof. Dr. Joachim Wambsganß
 
 ## Overview
 
-This project implements a strictly causal hybrid architecture combining GRU and Transformer layers for real-time classification of gravitational microlensing events. The model distinguishes between baseline observations (no lensing), single-lens (PSPL) events, and binary-lens events with sub-millisecond inference latency.
-
-### Key Features
-
-- **Strict Causality**: No future observation peeking through explicit masking and incremental state management
-- **Hybrid Architecture**: GRU handles sequential dependencies, Transformer captures long-range patterns
-- **Temporal Encoding**: Continuous sinusoidal encoding based on observation intervals (Δt), not absolute timestamps
-- **Streaming Inference**: Supports real-time predictions with cached key-value states
-- **Anti-Bias Design**: Temporal invariance through relative time encoding and extensive validation checks
-
-### Classification Task
-
-**Three-class discrimination:**
-- **Class 0**: Baseline (no lensing event)
+Three-class classification of gravitational microlensing events using a GRU-based recurrent neural network:
+- **Class 0**: Baseline (flat light curve, no lensing)
 - **Class 1**: Point Source Point Lens (PSPL, single lens)
 - **Class 2**: Binary lens (planetary or stellar companion)
+
+The model uses depthwise separable convolutions, flash attention pooling, hierarchical classification, and processes variable-length sequences with causal masking. Temporal encoding based on observation intervals (Δt) rather than absolute timestamps.
 
 ---
 
@@ -71,205 +59,50 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 
 ## Quick Start
 
-### Minimal Test (5 minutes, single GPU)
-
-Validate the complete pipeline on a small dataset:
+Basic pipeline validation (single GPU, 5 minutes):
 
 ```bash
 cd code
 
 # 1. Generate test dataset (300 events)
-python simulate.py --preset quick_test
+python simulate.py --n_flat 100 --n_pspl 100 --n_binary 100 --output ../data/test.h5
 
-# 2. Train model (5 epochs)
-python train.py \
-    --data ../data/dataset.npz \
-    --epochs 5 \
-    --batch_size 32
+# 2. Train model (5 epochs, no convergence expected)
+python train.py --data ../data/test.h5 --epochs 5 --batch-size 32
 
 # 3. Evaluate
-python evaluate.py \
-    --experiment_name results_* \
-    --data ../data/dataset.npz
+python evaluate.py --experiment-name results_* --data ../data/test.h5
 ```
-
-### Full Workflow
-
-```bash
-# 1. Generate dataset
-python simulate.py \
-    --n_flat 10000 \
-    --n_pspl 10000 \
-    --n_binary 10000 \
-    --binary_preset distinct \
-    --output ../data/dataset.npz
-
-# 2. Train model
-python train.py \
-    --data ../data/dataset.npz \
-    --epochs 50 \
-    --batch_size 64 \
-    --lr 1e-4
-
-# 3. Evaluate with diagnostics
-python evaluate.py \
-    --experiment_name results_* \
-    --data ../data/dataset.npz
-
-# 4. Optional: Visualize model internals
-python visualize.py \
-    --experiment_name results_* \
-    --data ../data/dataset.npz
-```
-
----
-
-## Architecture
-
-### Causal Hybrid Model
-
-The architecture implements a strictly causal design that prevents temporal information leakage:
-
-```
-Input: [B, N]
-  ├─ Flux: Light curve measurements (normalized)
-  └─ Δt: Time intervals between observations
-    ↓
-Embedding Layer
-  ├─ Flux embedding: Linear(1 → d_model)
-  ├─ Layer normalization + Padding mask enforcement
-  └─ Temporal encoding: Continuous sinusoidal (Δt-based)
-    ↓
-GRU Encoder (1-2 layers)
-  ├─ Packed sequences (handles variable lengths)
-  ├─ State caching for incremental inference
-  └─ Layer normalization + Dropout + Padding mask
-    ↓
-Transformer Encoder (2-4 layers)
-  ├─ Strict causal attention (with padding mask caching)
-  │  • Sliding window (size 64)
-  │  • Multi-head attention (8 heads)
-  │  • No future peeking (col_idx ≤ row_idx)
-  ├─ Feed-forward network (4× expansion)
-  ├─ Layer normalization + residual connections
-  └─ Padding mask enforcement after each block
-    ↓
-Classification Head
-  ├─ Extract final valid timestep output
-  ├─ Hidden layer: Linear(d_model → d_model) + GELU
-  └─ Output layer: Linear(d_model → 3 classes)
-    ↓
-Output
-  ├─ Logits: [B, 3] (or [B, SeqLen, 3] if return_all_timesteps=True)
-  ├─ Probabilities: Softmax with temperature scaling
-  └─ Predictions: argmax(probabilities)
-```
-
-**Default specifications:**
-- d_model: 128
-- n_heads: 8
-- n_gru_layers: 1
-- n_transformer_layers: 2
-- Feed-forward dimension: 512 (4× d_model)
-- Attention window: 64 observations
-- Dropout: 0.1
-
-### Design Principles
-
-**1. Strict Causality**
-- Causal attention mask: `col_idx ≤ row_idx` (keys must exist before queries)
-- Sliding window prevents O(N²) complexity while maintaining locality
-- Padding mask cached in incremental state to prevent "ghost" signals
-- Post-normalization masking eliminates LayerNorm shift artifacts on padding tokens
-
-**2. Temporal Encoding**
-- Continuous sinusoidal encoding based on Δt (observation intervals)
-- Prevents model from using absolute timestamps as shortcuts
-- Handles irregular cadences naturally (no interpolation needed)
-- Log-scale normalization for wide range of timescales
-
-**3. Hybrid Architecture Benefits**
-- GRU: Efficient sequential processing, handles variable-length sequences
-- Transformer: Captures long-range dependencies, parallel training
-- Complementary strengths: Local (GRU) + Global (Transformer) context
-
-**4. Streaming Inference**
-- Incremental state management with key-value caching
-- GRU hidden state preservation across observations
-- Padding mask history tracking for correct attention computation
-- Enables real-time classification as new observations arrive
-
-**5. Anti-Bias Safeguards**
-- Temperature clamping (0.5-5.0) prevents confidence collapse
-- GRU state freezing for completed sequences in streaming mode
-- Explicit padding mask re-application after every normalization layer
 
 ---
 
 ## Data Generation
 
-### Simulation Parameters
-
-Generate synthetic microlensing events using VBBinaryLensing (or fallback approximations):
+### Simulation Command
 
 ```bash
 python simulate.py \
-    --n_flat 50000 \
-    --n_pspl 50000 \
-    --n_binary 50000 \
+    --n_flat 100000 \
+    --n_pspl 500000 \
+    --n_binary 500000 \
     --binary_preset distinct \
-    --cadence_mask_prob 0.05 \
-    --mag_error_std 0.05 \
-    --output ../data/dataset.npz \
+    --output ../data/raw/dataset.h5 \
+    --num_workers 32 \
     --seed 42
 ```
 
-**Key arguments:**
-- `--n_flat/pspl/binary`: Number of events per class
-- `--binary_preset`: Binary lens topology (see below)
-- `--cadence_mask_prob`: Fraction of missing observations (0.0-1.0)
-- `--mag_error_std`: Photometric uncertainty (magnitudes)
-- `--seed`: Random seed for reproducibility
-- `--num_workers`: Parallel processes for generation
+**Binary Lens Presets:**
 
-### Binary Lens Topologies
+| Preset | Mass Ratio (q) | Separation (s) | Impact (u₀) | Description |
+|--------|----------------|----------------|-------------|-------------|
+| `distinct` | 0.1 - 1.0 | 0.90 - 1.10 | 0.0001 - 0.4 | Resonant caustics, guaranteed crossings |
+| `planetary` | 10⁻⁴ - 10⁻² | 0.5 - 2.0 | 0.001 - 0.3 | Exoplanet detection regime |
+| `stellar` | 0.3 - 1.0 | 0.3 - 3.0 | 0.001 - 0.3 | Binary star systems |
+| `baseline` | 10⁻⁴ - 1.0 | 0.1 - 3.0 | 0.001 - 1.0 | Full parameter space |
 
-| Preset | Mass Ratio (q) | Separation (s) | Description |
-|--------|----------------|----------------|-------------|
-| `distinct` | 0.1 - 1.0 | 0.90 - 1.10 | Resonant caustics (s≈1), guaranteed crossings |
-| `planetary` | 10⁻⁴ - 10⁻² | 0.5 - 2.0 | Exoplanet detection regime |
-| `stellar` | 0.3 - 1.0 | 0.3 - 3.0 | Binary star systems |
-| `baseline` | 10⁻⁴ - 1.0 | 0.1 - 3.0 | Full parameter space |
-
-**Anti-Bias Sampling Strategy:**
-- PSPL and Binary share identical t₀ ranges to prevent temporal shortcuts
-- Log-uniform sampling for u₀ (impact parameter) favors high-magnification events
-- Ensures high-mag PSPLs exist to prevent "high mag = binary" bias
-
-### Observational Presets
-
-**Cadence studies:**
-
-| Preset | Missing % | Description |
-|--------|-----------|-------------|
-| `cadence_05` | 5% | Space-based high cadence |
-| `cadence_15` | 15% | High-quality ground surveys |
-| `cadence_30` | 30% | Typical ground surveys |
-| `cadence_50` | 50% | Sparse monitoring |
-
-**Photometric error studies:**
-
-| Preset | σ (mag) | Description |
-|--------|---------|-------------|
-| `error_003` | 0.03 | JWST-quality |
-| `error_005` | 0.05 | Roman/HST quality |
-| `error_010` | 0.10 | Professional observatories |
-| `error_015` | 0.15 | Wide-field surveys |
-
-**List all presets:**
-```bash
-python simulate.py --list_presets
-```
+**Output:** `<output>.h5` (HDF5 format, ~3-4 GB per 1M events)
+- Datasets: `flux`, `delta_t`, `labels`, `timestamps`
+- Structured parameters: `params_flat`, `params_pspl`, `params_binary`
 
 ---
 
@@ -279,116 +112,118 @@ python simulate.py --list_presets
 
 ```bash
 python train.py \
-    --data ../data/dataset.npz \
+    --data ../data/raw/dataset.h5 \
+    --experiment-name my_experiment \
     --epochs 50 \
-    --batch_size 64 \
-    --lr 1e-4
+    --batch-size 64 \
+    --lr 1e-3 \
+    --weight-decay 1e-3 \
+    --warmup-epochs 5
 ```
 
 ### Distributed Training (Multi-GPU)
 
-**Single node:**
+**SLURM Environment (bwHPC):**
+
 ```bash
-export MASTER_ADDR=localhost
+# Allocate resources
+salloc --partition=gpu_a100_short --nodes=12 --gres=gpu:4 --exclusive --time=00:30:00
+
+# Setup environment
+cd ~/Thesis/code
+conda activate microlens
+
+export PYTHONWARNINGS="ignore"
+export TORCH_SHOW_CPP_STACKTRACES=0
+export TORCH_DISTRIBUTED_DEBUG=OFF
+export TORCH_CPP_LOG_LEVEL=ERROR
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG=NONE
+export RCCL_DEBUG=NONE
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n 1)
 export MASTER_PORT=29500
 
-torchrun --nproc_per_node=4 train.py \
-    --data ../data/dataset.npz \
-    --batch_size 64
-```
-
-**Multi-node (SLURM):**
-```bash
-salloc --partition=gpu --nodes=8 --gres=gpu:4 --time=05:00:00
-
-export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
-export MASTER_PORT=29500
-
+# Distributed training
 srun torchrun \
-    --nnodes=8 \
-    --nproc_per_node=4 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    --nnodes=12 \
+    --nproc-per-node=4 \
+    --rdzv-backend=c10d \
+    --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT \
+    --rdzv-id=train-$(date +%s) \
+    --rdzv-conf=timeout=5000 \
     train.py \
-        --data ../data/dataset.npz \
-        --epochs 50
+        --data ../data/raw/baseline.h5 \
+        --experiment-name baseline \
+        --epochs 50 \
+        --batch-size 512 \
+        --lr 1e-3 \
+        --weight-decay 1e-3 \
+        --warmup-epochs 5 \
+        --eval-every 5 \
+        --save-every 10
 ```
 
-### Training Features
+**Training Outputs** (saved in `results/<experiment-name>_<timestamp>/`):
+- `best_model.pt` - Best checkpoint (highest validation accuracy)
+- `checkpoint_epoch_N.pt` - Periodic checkpoints
+- `training.log` - Training log with loss/accuracy per epoch
+- `final_predictions.npz` - Predictions on validation set
+- `confusion_matrix.npy` - Final confusion matrix
+- `classification_report.txt` - Per-class metrics
 
-**Optimization:**
-- AdamW optimizer (β₁=0.9, β₂=0.999)
-- Weight decay: 1e-4
-- ReduceLROnPlateau scheduler (factor=0.5, patience=5)
-- Gradient clipping (max norm: 1.0)
-- Mixed precision training (AMP)
-- Gradient accumulation (4 steps)
-
-**Regularization:**
-- Dropout: 0.1
-- Early stopping (patience: 15 epochs)
+**Training Features:**
+- AdamW optimizer with linear warmup
+- Gradient clipping (max norm 1.0)
+- Mixed precision training (AMP) with bfloat16
+- Gradient accumulation (default 1 step)
+- ReduceLROnPlateau scheduler
+- Early stopping (configurable patience)
 - Class-balanced loss weighting
-- Loss spike detection with automatic learning rate reduction
-
-**Robustness:**
-- NaN gradient detection and skipping
-- Rank-0 only logging (clean DDP output)
-- Graceful distributed cleanup on exit
-
-**Causality Auditing:**
-- Periodic early detection checks (every 5 epochs)
-- Accuracy at 20%, 50%, 100% completeness
-- Validates that predictions stabilize progressively
+- DDP with gradient-as-bucket-view optimization
 
 ---
 
 ## Evaluation
 
-### Comprehensive Analysis
+### Standard Evaluation
 
 ```bash
 python evaluate.py \
-    --experiment_name results_* \
-    --data ../data/test.npz \
-    --batch_size 128
+    --experiment-name baseline \
+    --data ../data/raw/test.h5 \
+    --batch-size 512 \
+    --n-samples 100000 \
+    --early-detection \
+    --n-evolution-per-type 10
 ```
 
-### Generated Outputs
+**Evaluation Outputs** (saved in `results/<experiment-name>_*/eval_<dataset>_<timestamp>/`):
+- `evaluation_summary.json` - Overall metrics and configuration
+- `confusion_matrix.png` - Normalized confusion matrix heatmap
+- `roc_curves.png` - One-vs-rest ROC curves with AUC scores
+- `calibration.png` - Reliability diagram with confidence histograms
+- `u0_dependency.png` - Binary accuracy vs. impact parameter (if params available)
+- `temporal_bias_check.png` - t₀ distribution comparison (KS-test)
+- `fine_early_detection.png` - Accuracy vs. observation completeness (50 points)
+- `evolution_<class>_<idx>.png` - Per-event classification trajectories (light curve + probabilities + confidence)
 
-**Diagnostic plots:**
-1. **roc_curve.png**: One-vs-rest ROC curves with per-class AUC
-2. **confusion_matrix.png**: Normalized confusion matrix heatmap
-3. **calibration.png**: Reliability diagram + confidence histograms
-4. **fine_early_detection.png**: Accuracy vs observation completeness (50 points)
-5. **evolution_[type]_[idx].png**: Per-event classification trajectory with:
-   - Light curve with observation markers
-   - Class probability evolution over time
-   - Confidence progression
-6. **temporal_bias_check.png**: t₀ distribution comparison (KS-test)
-7. **u0_dependency.png**: Binary accuracy vs impact parameter
-
-**Quantitative metrics (summary.json):**
+**Metrics Computed:**
 - Overall accuracy, precision, recall, F1-score
 - Per-class metrics (Flat, PSPL, Binary)
 - AUROC (macro and weighted)
-- Model configuration snapshot
+- Calibration error
+- Early detection accuracy at multiple completeness fractions
 
-### Early Detection Analysis
+### Batch Evaluation Across Datasets
 
-The evaluation automatically computes fine-grained accuracy across 50 observation completeness fractions (5%-100%). This validates:
-- Model doesn't require full light curves for classification
-- Predictions stabilize as more data arrives (causal consistency)
-- No sudden accuracy jumps that would indicate temporal shortcuts
-
-### Physical Detection Limits
-
-**Impact parameter (u₀) dependency:**
-Binary lens detectability is fundamentally limited by source-lens separation:
-- **u₀ < 0.15**: Strong caustic signatures, high accuracy achievable
-- **u₀ ~ 0.2-0.3**: Weak caustic features, moderate accuracy
-- **u₀ > 0.3**: Morphologically PSPL-like, low accuracy (physically unavoidable)
-
-This analysis confirms the model respects astrophysical constraints rather than exploiting data artifacts.
+```bash
+# Evaluate on multiple test sets
+python evaluate.py --data ../data/raw/baseline.h5   --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
+python evaluate.py --data ../data/raw/stellar.h5    --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
+python evaluate.py --data ../data/raw/planetary.h5  --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
+python evaluate.py --data ../data/raw/distinct.h5   --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
+```
 
 ---
 
@@ -396,44 +231,154 @@ This analysis confirms the model respects astrophysical constraints rather than 
 
 ### Model Internals
 
-The `visualize.py` script provides detailed visualization of model behavior:
-
 ```bash
 python visualize.py \
-    --experiment_name results_* \
-    --data ../data/test.npz \
-    --n_examples 3
+    --experiment-name baseline \
+    --data ../data/raw/test.h5 \
+    --output-dir ../reports/figures/baseline_viz \
+    --n-latent 2000 \
+    --n-deep-dives 20
 ```
 
-**Generated visualizations:**
-1. **attention_patterns_event*.png**: Attention weight matrices per layer
-2. **temporal_encoding_event*.png**: Δt encoding analysis
-3. **classification_evolution_event*.png**: High-resolution prediction trajectories
-4. **binary_vs_pspl_comparison.png**: Class separation over time
-5. **embedding_space_pca.png**: Final layer embeddings in 2D
-6. **confidence_evolution_by_class.png**: Mean confidence trajectories with std bands
+**Visualization Outputs** (saved in `<output-dir>/`):
+- `attention_patterns_event*.png` - Attention weight matrices per layer
+- `temporal_encoding_event*.png` - Δt encoding analysis
+- `classification_evolution_event*.png` - High-resolution prediction trajectories
+- `binary_vs_pspl_comparison.png` - Class separation over time
+- `embedding_space_pca.png` - Final layer embeddings in 2D
+- `confidence_evolution_by_class.png` - Mean confidence trajectories with std bands
+
+### Batch Visualization
+
+```bash
+# Visualize multiple datasets
+python visualize.py --data ../data/raw/baseline.h5   --experiment-name baseline --output-dir ../reports/figures/baseline_viz   --n-latent 2000 --n-deep-dives 20
+python visualize.py --data ../data/raw/stellar.h5    --experiment-name baseline --output-dir ../reports/figures/stellar_viz    --n-latent 2000 --n-deep-dives 20
+python visualize.py --data ../data/raw/planetary.h5  --experiment-name baseline --output-dir ../reports/figures/planetary_viz  --n-latent 2000 --n-deep-dives 20
+python visualize.py --data ../data/raw/distinct.h5   --experiment-name baseline --output-dir ../reports/figures/distinct_viz   --n-latent 2000 --n-deep-dives 20
+```
+
+---
+
+## Parallel Data Generation
+
+Generate multiple datasets simultaneously on SLURM:
+
+```bash
+cd ~/Thesis/code
+conda activate microlens
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMBA_NUM_THREADS=1
+
+# Launch 4 parallel jobs
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
+  --binary_preset distinct --output ../data/raw/distinct.h5 \
+  --num_workers 32 --seed 42 > log_distinct.txt 2>&1 &
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
+  --binary_preset stellar --output ../data/raw/stellar.h5 \
+  --num_workers 32 --seed 43 > log_stellar.txt 2>&1 &
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
+  --binary_preset planetary --output ../data/raw/planetary.h5 \
+  --num_workers 32 --seed 44 > log_planetary.txt 2>&1 &
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
+  --binary_preset baseline --output ../data/raw/baseline.h5 \
+  --num_workers 32 --seed 45 > log_baseline.txt 2>&1 &
+
+# Wait for all jobs
+wait
+echo "All datasets generated."
+```
+
+---
+
+## Architecture
+
+### Model: RomanMicrolensingGRU
+
+```
+Input: Flux [B, N], Time Intervals Δt [B, N]
+  │
+  ├─ Flux Embedding: Linear(1 → d_model/2)
+  └─ Temporal Encoding: Sinusoidal (Δt-based)
+  │
+Input Mixing: Linear(d_model → d_model) + LayerNorm + SiLU + Dropout
+  │
+Feature Extraction: Depthwise Separable Conv (2 blocks)
+  │
+Window Processing: Depthwise Separable Conv (causal padding)
+  │
+Multi-scale: Concatenate [features, windowed] → [B, N, 2×d_model]
+  │
+Recurrent Core: Stacked GRU (CuDNN-fused, multiple layers)
+  │
+Final Normalization: LayerNorm
+  │
+Pooling: Flash Attention Pooling (or sequence-end extraction)
+  │
+Hierarchical Classification:
+  ├─ Shared Trunk: Linear + LayerNorm + SiLU + Dropout
+  ├─ Stage 1: Flat vs. Deviation (2 classes)
+  └─ Stage 2: PSPL vs. Binary (2 classes)
+  │
+Output: Logits [B, 3], Probabilities [B, 3]
+```
+
+**Default Configuration:**
+- d_model: 64
+- n_layers: 2
+- dropout: 0.3
+- window_size: 5
+- max_seq_len: 2400
+- Hierarchical: True
+- Attention pooling: True
+- Feature extraction: Depthwise separable convolutions
+- Activation: SiLU (Swish)
+
+**Parameter Count:** ~200K (varies with d_model and n_layers)
 
 ---
 
 ## Project Structure
 
 ```
-thesis-microlensing/
+Thesis/
 ├── code/
-│   ├── simulate.py          # Dataset generation
-│   ├── train.py             # Distributed training
-│   ├── evaluate.py          # Comprehensive evaluation
-│   ├── visualize.py         # Model visualization
-│   └── transformer.py       # Causal hybrid architecture
+│   ├── simulate.py          # VBBinaryLensing-based data generation
+│   ├── train.py             # DDP training with AMP and gradient accumulation
+│   ├── evaluate.py          # Comprehensive metrics, u₀ analysis, early detection
+│   ├── visualize.py         # Model internals and embedding space
+│   └── model.py             # RomanMicrolensingGRU architecture
 │
 ├── data/
-│   └── *.npz                # Generated datasets
+│   ├── raw/                 # Generated datasets (*.h5)
+│   └── processed/           # (unused, for future preprocessing)
 │
 ├── results/
-│   └── results_*/           # Training outputs per experiment
-│       ├── best_model.pt    # Best checkpoint (highest val accuracy)
-│       ├── summary.json     # Metrics summary
-│       └── eval_*/          # Evaluation outputs with timestamp
+│   └── <experiment>_*/      # Training outputs per experiment
+│       ├── best_model.pt    # Best checkpoint
+│       ├── training.log     # Training log
+│       ├── eval_*/          # Evaluation outputs (timestamped)
+│       └── checkpoint_*.pt  # Periodic checkpoints
+│
+├── reports/
+│   └── figures/             # Visualization outputs
+│
+├── docs/
+│   └── RESEARCH_GUIDE.md    # Detailed experimental methodology
 │
 ├── environment.yml          # Conda environment
 ├── README.md
@@ -442,132 +387,122 @@ thesis-microlensing/
 
 ---
 
-## Methodological Notes
+## Model Configuration Options
 
-### Temporal Bias Prevention
-
-**Problem:** Models can exploit data artifacts (e.g., peak always at t=0) rather than learning physical signatures.
-
-**Solutions implemented:**
-1. **Wide t₀ sampling:** PSPL and Binary events share identical t₀ ranges
-2. **Relative time encoding:** Model receives Δt (intervals), not absolute timestamps
-3. **KS-test validation:** Compares t₀ distributions between classes
-4. **Evolution auditing:** Checks prediction stability over observation phases
-
-### Causality Enforcement
-
-**Problem:** Transformers can attend to future observations during training if not properly masked.
-
-**Solutions implemented:**
-1. **Strict causal mask:** `col_idx ≤ row_idx` in attention (keys ≤ queries in time)
-2. **Sliding window:** Limits context to recent 64 observations
-3. **Padding mask caching:** Prevents attention to padding in incremental inference
-4. **Post-normalization masking:** Eliminates "ghost" signals from LayerNorm on padding
-5. **Verification tests:** Online vs batch consistency checks
-
-### Data Quality Safeguards
-
-**Simulation:**
-- Numba JIT acceleration for Δt computation (>10× speedup)
-- VBBinaryLensing for accurate binary magnification (fallback approximation if unavailable)
-- Photometric noise applied to flux (not magnitude) for physical realism
-
-**Preprocessing:**
-- Log1p normalization handles wide dynamic range
-- NaN/Inf sanitization with explicit clamping
-- Sequence length computed from padding mask, not assumed
-
----
-
-## Experimental Workflows
-
-### Topology Study
-
-Compare performance across binary lens parameter spaces:
-
+**Architecture variants:**
 ```bash
-for topology in distinct planetary stellar baseline; do
-    python simulate.py --preset ${topology} \
-        --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --output ../data/topology_${topology}.npz
-    
-    python train.py \
-        --data ../data/topology_${topology}.npz \
-        --epochs 50
-    
-    python evaluate.py \
-        --experiment_name results_* \
-        --data ../data/topology_${topology}.npz
-done
+# Default: Hierarchical with attention pooling
+python train.py --data <data> --hierarchical --attention-pooling
+
+# Flat classification (no hierarchy)
+python train.py --data <data> --no-hierarchical
+
+# Without attention pooling (use sequence-end)
+python train.py --data <data> --no-attention-pooling
+
+# Change feature extraction method
+python train.py --data <data> --feature-extraction mlp  # or 'conv' (default)
+
+# Disable residual connections
+python train.py --data <data> --no-residual
+
+# Disable layer normalization
+python train.py --data <data> --no-layer-norm
 ```
 
-### Cadence Study
-
-Assess robustness to observation frequency:
-
+**Optimization options:**
 ```bash
-for cadence in 05 15 30 50; do
-    python simulate.py --preset cadence_${cadence} \
-        --n_flat 30000 --n_pspl 30000 --n_binary 30000 \
-        --output ../data/cadence_${cadence}.npz
-    
-    python train.py \
-        --data ../data/cadence_${cadence}.npz \
-        --epochs 50
-    
-    python evaluate.py \
-        --experiment_name results_* \
-        --data ../data/cadence_${cadence}.npz
-done
-```
+# Disable mixed precision
+python train.py --data <data> --no-amp
 
-### Error Study
+# Disable gradient checkpointing
+python train.py --data <data> --no-gradient-checkpointing
 
-Evaluate photometric noise tolerance:
-
-```bash
-for error in 003 005 010 015; do
-    python simulate.py --preset error_${error} \
-        --n_flat 30000 --n_pspl 30000 --n_binary 30000 \
-        --output ../data/error_${error}.npz
-    
-    python train.py \
-        --data ../data/error_${error}.npz \
-        --epochs 50
-    
-    python evaluate.py \
-        --experiment_name results_* \
-        --data ../data/error_${error}.npz
-done
+# Enable torch.compile (PyTorch 2.0+)
+python train.py --data <data> --compile --compile-mode max-autotune
 ```
 
 ---
 
-## Limitations and Future Work
+## Troubleshooting
 
-### Current Limitations
+### GPU Out-of-Memory
+```bash
+# Reduce batch size
+--batch-size 32
 
-1. **Training data:** Synthetic simulations may not capture all observational systematics
-2. **High mass ratios:** q → 1 binary systems difficult to distinguish from PSPL
-3. **Extreme noise:** Performance degrades beyond σ > 0.20 mag
-4. **Sparse cadences:** Accuracy drops for >50% missing observations
+# Enable gradient checkpointing (trades compute for memory)
+--use-gradient-checkpointing
 
-### Planned Improvements
+# Disable mixed precision
+--no-amp
+```
 
-**Architecture:**
-- Caustic-aware feature extraction modules
-- Explicit u₀ regression head for uncertainty quantification
-- Multi-scale temporal attention (short/long timescales)
+### Training Divergence (NaN Loss)
+- Check data normalization: `python -c "import h5py; f=h5py.File('data.h5'); print(f['flux'][:100].mean(), f['flux'][:100].std())"`
+- Reduce learning rate: `--lr 5e-4`
+- Increase warmup: `--warmup-epochs 10`
+- Code automatically skips NaN batches; if >10% skipped, investigate data quality
 
-**Training:**
-- Curriculum learning (simple → complex topologies)
-- Data augmentation (synthetic noise, gap patterns)
-- Semi-supervised learning with unlabeled real survey data
+### Distributed Training Hangs
+```bash
+# Verify master node accessibility
+echo $MASTER_ADDR
+ping $MASTER_ADDR
 
-**Deployment:**
-- Model quantization (INT8) for faster inference
-- ONNX export for production pipelines
-- Integration with survey alert systems (LSST, ZTF)
+# Check SLURM communication
+srun --nodes=2 hostname
+
+# Increase NCCL timeout
+export NCCL_TIMEOUT=3600
+
+# Verify CUDA devices
+srun --nodes=2 --gres=gpu:4 python -c "import torch; print(torch.cuda.device_count())"
+```
+
+### Missing u₀ Analysis Plots
+```bash
+# Verify parameters exist in dataset
+python -c "import h5py; f=h5py.File('data.h5'); print(list(f.keys()))"
+
+# Parameters should include: params_flat, params_pspl, params_binary
+# If missing, regenerate data with simulate.py (parameters are auto-saved)
+```
+
+### Data Quality Check
+```bash
+python -c "
+import h5py
+import numpy as np
+
+with h5py.File('data.h5', 'r') as f:
+    flux = f['flux'][:]
+    delta_t = f['delta_t'][:]
+    labels = f['labels'][:]
+    
+    print(f'Flux shape: {flux.shape}')
+    print(f'Flux range: [{flux.min():.3f}, {flux.max():.3f}]')
+    print(f'NaN count: {np.isnan(flux).sum()}')
+    print(f'Label distribution: {np.bincount(labels)}')
+"
+```
+
+---
+
+## Physical Parameter Ranges
+
+**Observational Configuration:**
+- Temporal sampling: ~12.1 minutes (Roman-like cadence)
+- Missing observations: 5% (uniform random)
+- Photometric error: 0.05 mag (Gaussian)
+- Mission duration: 200 days
+- Sequence length: 2400 observations max
+
+**Microlensing Parameters:**
+- Einstein timescale (t_E): 5-30 days
+- Peak time (t₀): 0.2-0.8 × mission duration
+- Source baseline magnitude: 18-24 AB mag
+- AB zeropoint: 3631 Jy
 
 ---
 
@@ -575,7 +510,7 @@ done
 
 ```bibtex
 @mastersthesis{bhatia2025microlensing,
-  title={Gravitational Microlensing Event Classification with Causal Transformers},
+  title={Gravitational Microlensing Event Classification with Recurrent Neural Networks},
   author={Bhatia, Kunal},
   year={2025},
   school={University of Heidelberg},
@@ -591,39 +526,20 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ---
 
-## Acknowledgments
-
-- **Supervisor**: Prof. Dr. Joachim Wambsganß (University of Heidelberg)
-- **VBBinaryLensing**: Valerio Bozza
-- **Computing resources**: bwHPC (BW 3.0), AMD MI300 and NVIDIA A100 clusters
-- **Survey collaborations**: OGLE, MOA, KMTNet teams
-
----
-
-## Technical Support
-
-**For issues:**
-- Implementation questions → GitHub Issues
-- Methodology questions → Thesis document
-- Collaboration inquiries → Contact via institutional email
-
----
-
 ## References
 
-**Key publications:**
+**Key Publications:**
 1. Bozza, V. (2010). "VBBinaryLensing: A C++ library for microlensing." MNRAS, 408, 2188-2196.
 2. Zhu, W., et al. (2017). "Mass Measurements from Space-based Microlensing." ApJ, 849, L31.
 3. Johnson, S. A., et al. (2020). "Nancy Grace Roman Space Telescope Predictions." AJ, 160, 123.
 
-**Survey resources:**
+**Survey Resources:**
 - OGLE: http://ogle.astrouw.edu.pl/
 - MOA: https://www.massey.ac.nz/~iabond/moa/
 - Nancy Grace Roman: https://roman.gsfc.nasa.gov/
-- LSST: https://www.lsst.org/
 
 ---
 
 **Version**: 1.0  
-**Last updated**: December 2025  
-**Status**: Active development
+**Last Updated**: December 2024  
+**Status**: Active Development
