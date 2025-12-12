@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Event Classifier - Neural Network Architecture (ULTRA-OPTIMIZED)
-===================================================================================
+Roman Microlensing Event Classifier - Neural Network Architecture 
+=================================================================
 
 High-performance strictly causal CNN-GRU architecture for Nancy Grace Roman
 Space Telescope gravitational microlensing event classification.
