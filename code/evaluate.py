@@ -724,7 +724,7 @@ class RomanEvaluator:
 
     def verify_causal_inference(self):
         """
-        ✅ GOD MODE: Verify that model maintains causality in streaming mode.
+        Verify that model maintains causality in streaming mode.
         Tests that predictions at timestep T only depend on observations <= T.
         """
         print("\nVerifying causal inference...")
