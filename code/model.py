@@ -1,25 +1,3 @@
-"""
-Roman Microlensing Event Classifier - Neural Network Architecture
-
-Optimized CNN-GRU architecture for Nancy Grace Roman Space Telescope
-gravitational microlensing event classification.
-
-Architecture:
-    - Multi-scale depthwise separable CNN feature extraction
-    - Unidirectional (causal) GRU for temporal modeling
-    - Flash Attention 2 pooling (branch-free for DDP compatibility)
-    - Classification head with proper initialization
-
-Key Properties:
-    - CAUSAL architecture: predictions use only past/present observations
-    - Variable-length support (10-2400 timesteps)
-    - DDP-safe: no data-dependent branching in forward pass
-    - Suitable for REAL-TIME detection during ongoing events
-
-Author: Kunal Deshmukh
-Institution: University of Heidelberg / MPIA
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
