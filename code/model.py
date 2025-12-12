@@ -25,10 +25,10 @@ Causality Guarantees:
     - Attention pooling respects sequence masks causally
     - No global pooling operations that would see future data
 
-Author: Kunal Deshmukh
-Institution: University of Heidelberg / MPIA
+Author: Kunal Bhatia
+Institution: University of Heidelberg 
 Thesis: "From Light Curves to Labels: Machine Learning in Microlensing"
-Version: 3.0 (Production-Ready)
+Version: 1.0
 """
 
 from __future__ import annotations
