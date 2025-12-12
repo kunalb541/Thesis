@@ -149,13 +149,10 @@ def set_seed_everywhere(seed: int, rank: int = 0) -> None:
 # DATA UTILS (OPTIMIZED FOR LAZY HDF5 LOADING)
 # =============================================================================
 
-# REMOVED load_compat(path) as it is no longer used for the main data load
-
 def load_labels_and_split(data_path: Path) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
     Loads only the 'labels' and 'flux' metadata (for normalization) 
     eagerly to perform the train/val index split.
-    The large 'flux' and 'delta_t' arrays remain on disk.
     """
     logger = logging.getLogger("TRAIN")
     
@@ -164,18 +161,25 @@ def load_labels_and_split(data_path: Path) -> Tuple[np.ndarray, np.ndarray, Dict
         labels = f['labels'][:]
         flux_data = f['flux']
         
-        # 2. Compute normalization stats from the training data (robust sampling)
+        # 2. Perform train/val split on indices
         indices = np.arange(len(labels))
-        _, val_idx = train_test_split(
+        train_idx, val_idx = train_test_split(
             indices, test_size=0.2, shuffle=True, random_state=SEED, stratify=labels
         )
-        train_idx = np.setdiff1d(indices, val_idx) # Get train indices
         
-        # Sample a small fraction of flux data from the training set for statistics
+        # 3. Compute normalization stats from the training data (robust sampling)
         sample_size = min(100000, len(train_idx))
-        sample_indices = np.random.choice(train_idx, size=sample_size, replace=False)
-        sample_flux = flux_data[sample_indices]
         
+        # Step 1: Generate random indices from the training set indices
+        sample_indices_unsorted = np.random.choice(train_idx, size=sample_size, replace=False)
+        
+        # Step 2: SORT the indices to satisfy the HDF5 requirement for fancy indexing
+        sample_indices_sorted = np.sort(sample_indices_unsorted) # <-- FIX FOR HDF5
+
+        # Step 3: LAZY LOAD - Read only the single slice needed (now sorted)
+        sample_flux = flux_data[sample_indices_sorted] 
+        
+        # Step 4: Compute stats using the loaded flux (order doesn't matter)
         valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
         
         if len(valid_flux) == 0:
@@ -600,12 +604,14 @@ def main():
         val_sampler = None
     
     # Loaders
+    WORKER_COUNT = 8
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=0,
+        num_workers=WORKER_COUNT,
         pin_memory=True,
         persistent_workers=False
     )
@@ -615,7 +621,7 @@ def main():
         batch_size=args.batch_size * 2,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=0,
+        num_workers=WORKER_COUNT,
         pin_memory=True,
         persistent_workers=False
     )
