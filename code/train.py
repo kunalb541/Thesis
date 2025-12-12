@@ -647,7 +647,7 @@ def main():
         logger.info(f"DataLoader workers per GPU: {args.num_workers}")
         logger.info(f"Total DataLoader workers: {args.num_workers * world_size}")
     
-    # Create model
+    # Create model with optimal dtype for A100
     config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
@@ -662,7 +662,9 @@ def main():
         use_gradient_checkpointing=args.use_gradient_checkpointing
     )
     
-    model = RomanMicrolensingGRU(config, dtype=torch.float32).to(device)
+    # Use bfloat16 for AMP on A100 (better than float16)
+    amp_dtype = torch.bfloat16 if args.use_amp and torch.cuda.is_available() else torch.float32
+    model = RomanMicrolensingGRU(config, dtype=amp_dtype).to(device)
     
     if rank == 0:
         n_params = count_parameters(model)
