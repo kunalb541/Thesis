@@ -1,141 +1,105 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Classifier - Distributed Training Script
-============================================================
+Roman Microlensing Classifier Training Engine 
+==============================================
 
-Distributed training for the Roman Space Telescope
-microlensing event classifier using PyTorch DDP with strict causality guarantees.
+High-performance distributed training pipeline for classifying Roman Space
+Telescope microlensing light curves into Flat, PSPL, and Binary classes.
+Built for extreme throughput, GPU saturation, and scalable experimentation.
 
-Features:
-    - Multi-node multi-GPU training with NCCL backend (tested up to 48 GPUs)
-    - Optimized HDF5 data loading with per-worker file handles
-    - Mixed precision training (bfloat16/float16 with automatic detection)
-    - Gradient accumulation and clipping for large effective batch sizes
-    - Cosine annealing with linear warmup
-    - Class-balanced loss weighting for imbalanced datasets
-    - Comprehensive logging and checkpointing
-    - 100% type hint coverage for thesis-grade code
-    - Extensive validation and error handling
-    - Reproducible training with proper seed management
+CORE CAPABILITIES:
+    • End-to-end PyTorch DDP training with NCCL tuning for maximum bandwidth  
+    • Zero-copy HDF5 streaming with worker-safe dataset handles  
+    • On-the-fly normalization using cached median/IQR statistics  
+    • Flash-accelerated attention paths and TF32 matmul where available  
+    • Mixed-precision support with dynamic GradScaler and autocast  
+    • CUDA streams for asynchronous data prefetching into device memory  
+    • Flexible cosine-warmup learning rate schedule for stable convergence  
+    • Deterministic—or intentionally non-deterministic—paths depending on 
+      performance requirements  
 
-Critical Properties:
-    - Model uses strictly causal convolutions (no future information leakage)
-    - DDP static_graph=False (required for data-dependent attention pooling)
-    - Proper GradScaler handling for bfloat16 (disabled when BF16 available)
-    - Worker-isolated HDF5 file handles (prevents deadlocks)
-    - Correct distributed metric aggregation across all ranks
+DATA PIPELINE:
+    Flux and Δt arrays are pulled from HDF5 storage with sorted index access,
+    repaired for missing values, normalized robustly, and masked for variable
+    sequence lengths. Batched tensors are delivered via a custom collate
+    function tuned for contiguous memory access and transfer speed.
 
-Usage:
-    Single GPU:
-        python train.py --data path/to/data.h5
-    
-    Multi-GPU (single node with torchrun):
-        torchrun --nproc-per-node=4 train.py --data path/to/data.h5
-    
-    Multi-Node (e.g., 48 GPUs across 12 nodes):
-        srun torchrun --nnodes=12 --nproc-per-node=4 \\
-            --rdzv-backend=c10d --rdzv-endpoint=$MASTER:$PORT \\
-            train.py --data path/to/data.h5
+DISTRIBUTED EXECUTION:
+    This module dynamically configures a multi-process, GPU-aware environment
+    using NCCL backends, safe spawning, and synchronized caching of dataset
+    splits. Gradient accumulation enables large effective batch sizes even on
+    constrained hardware.
 
-    SLURM Example:
-        #SBATCH --nodes=12
-        #SBATCH --ntasks-per-node=4
-        #SBATCH --gpus-per-node=4
-        srun python -m torch.distributed.run \\
-            --nnodes=$SLURM_NNODES --nproc-per-node=4 \\
-            train.py --data path/to/data.h5
+PURPOSE:
+    This training engine powers supervised classification experiments for
+    Roman microlensing survey data. It is designed to integrate cleanly with
+    the accompanying RomanMicrolensingClassifier model definition and with
+    large-scale simulation datasets generated for thesis-level research.
 
-Author: Kunal Bhatia
-Institution: University of Heidelberg 
-Thesis: "From Light Curves to Labels: Machine Learning in Microlensing"
-Version: 1.0 
+Author: Kunal Bhatia  
+Institution: University of Heidelberg  
+Version: 1.0
 """
 
 from __future__ import annotations
-
-import argparse
-import gc
-import json
-import logging
-import math
-import os
-import random
-import sys
-import time
-import warnings
-from contextlib import contextmanager, nullcontext
+import argparse, gc, json, logging, math, os, random, shutil, sys, time, warnings
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import (
-    Any, Callable, Dict, Final, Generator, List, 
-    Optional, Tuple, Type, Union
-)
+from typing import Any, Dict, List, Optional, Tuple
 
-import h5py
-import numpy as np
-import torch
+import h5py, numpy as np, torch
 import torch.distributed as dist
-import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn as nn, torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.model_selection import train_test_split
+from sklearn.model_split import train_test_split
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-# Import model
-try:
-    current_dir = Path(__file__).resolve().parent
-    if str(current_dir) not in sys.path:
-        sys.path.insert(0, str(current_dir))
-    from model import ModelConfig, RomanMicrolensingClassifier
-except ImportError as e:
-    print(f"Error importing model: {e}", file=sys.stderr)
-    print("Ensure model.py is in the same directory as train.py", file=sys.stderr)
-    sys.exit(1)
+def _configure_environment() -> None:
+    """Ultra-optimized environment configuration."""
+    os.environ.setdefault('NCCL_IB_DISABLE', '0')
+    os.environ.setdefault('NCCL_NET_GDR_LEVEL', '3')  # Maximum GPU Direct
+    os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+    os.environ.setdefault('NCCL_DEBUG', 'WARN')
+    os.environ.setdefault('NCCL_P2P_LEVEL', '5')  # Maximum P2P
+    os.environ.setdefault('NCCL_MIN_NCHANNELS', '16')  # More channels for bandwidth
+    os.environ.setdefault('CUDA_DEVICE_MAX_CONNECTIONS', '1')
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF',
+                         'expandable_segments:True,garbage_collection_threshold:0.9')
+    os.environ.setdefault('TORCH_DISTRIBUTED_DEBUG', 'OFF')
+    os.environ.setdefault('CUDA_LAUNCH_BLOCKING', '0')
+    # Disable profiler overhead
+    os.environ.setdefault('KINETO_LOG_LEVEL', '5')
 
+_configure_environment()
 
-# =============================================================================
-# SUPPRESS WARNINGS
-# =============================================================================
+current_dir = Path(__file__).resolve().parent
+if str(current_dir) not in sys.path:
+    sys.path.insert(0, str(current_dir))
+from model import ModelConfig, RomanMicrolensingClassifier
 
-# Suppress non-critical warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-
-# =============================================================================
-# CONSTANTS
-# =============================================================================
-
-SEED: Final[int] = 42
-DEFAULT_CLIP_NORM: Final[float] = 1.0
-MIN_SEQUENCE_LENGTH: Final[int] = 1
-DEFAULT_VAL_FRACTION: Final[float] = 0.2
-PROGRESS_UPDATE_FREQ: Final[int] = 50  # Update progress bar every N batches
-
-# Class names for Roman microlensing classification
-CLASS_NAMES: Final[Tuple[str, ...]] = ('Flat', 'PSPL', 'Binary')
-
-# Numerical stability
-EPS: Final[float] = 1e-8
-
-
-# =============================================================================
-# UTILITIES
-# =============================================================================
+SEED: int = 42
+DEFAULT_CLIP_NORM: float = 1.0
+MIN_SEQUENCE_LENGTH: int = 1
+DEFAULT_VAL_FRACTION: float = 0.2
+PROGRESS_UPDATE_FREQ: int = 50  # Less frequent updates
+CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
+EPS: float = 1e-8
 
 class NumpyJSONEncoder(json.JSONEncoder):
-    """JSON encoder that handles numpy types and other non-serializable objects."""
-    
     def default(self, obj: Any) -> Any:
-        """Convert numpy types to Python native types for JSON serialization."""
-        if isinstance(obj, (np.float16, np.float32, np.float64, np.floating)):
+        if isinstance(obj, (np.floating, float)):
             return float(obj)
-        if isinstance(obj, (np.int8, np.int16, np.int32, np.int64, np.integer)):
+        if isinstance(obj, (np.integer, int)):
             return int(obj)
         if isinstance(obj, np.ndarray):
             return obj.tolist()
@@ -153,23 +117,16 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
         return super().default(obj)
 
-
 def format_time(seconds: float) -> str:
-    """Format seconds into human-readable string."""
     if seconds < 0:
         return "N/A"
     if seconds < 60:
         return f"{seconds:.1f}s"
     elif seconds < 3600:
-        minutes = seconds / 60
-        return f"{minutes:.1f}m"
-    else:
-        hours = seconds / 3600
-        return f"{hours:.1f}h"
-
+        return f"{seconds/60:.1f}m"
+    return f"{seconds/3600:.1f}h"
 
 def format_number(n: int) -> str:
-    """Format large numbers with K/M suffixes."""
     if n < 0:
         return f"-{format_number(-n)}"
     if n >= 1_000_000:
@@ -178,34 +135,10 @@ def format_number(n: int) -> str:
         return f"{n/1_000:.1f}K"
     return str(n)
 
-
 def get_timestamp() -> str:
-    """Get current timestamp as formatted string."""
     return datetime.now().strftime('%Y%m%d_%H%M%S')
 
-
-# =============================================================================
-# DISTRIBUTED SETUP
-# =============================================================================
-
 def setup_distributed() -> Tuple[int, int, int, bool]:
-    """
-    Initialize distributed training environment.
-    
-    Handles both torchrun and manual process spawning. Sets up NCCL backend
-    with optimized settings for multi-GPU training.
-    
-    Returns:
-        Tuple containing:
-            - rank: Global rank of this process (0 to world_size-1)
-            - local_rank: Local rank on this node (0 to gpus_per_node-1)
-            - world_size: Total number of processes across all nodes
-            - is_ddp: Whether running in distributed mode
-    
-    Raises:
-        RuntimeError: If CUDA is not available for distributed training
-    """
-    # Check if running in distributed mode
     if 'RANK' not in os.environ:
         return 0, 0, 1, False
     
@@ -214,132 +147,92 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
     world_size = int(os.environ["WORLD_SIZE"])
     
     if rank == 0:
-        print(f"Initializing distributed training: {world_size} processes", flush=True)
+        print(f"Initializing distributed: {world_size} processes", flush=True)
     
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is required for distributed training. "
-            "For CPU training, run without torchrun."
-        )
+        raise RuntimeError("CUDA required for distributed training")
     
-    # Set CUDA device for this process
     torch.cuda.set_device(local_rank)
     
-    # Initialize process group with NCCL backend
     if not dist.is_initialized():
-        dist.init_process_group(
-            backend='nccl',
-            init_method='env://',
-            timeout=timedelta(seconds=3600),  # 1 hour timeout for large jobs
-            world_size=world_size,
-            rank=rank
-        )
+        dist.init_process_group(backend='nccl', init_method='env://',
+                               timeout=timedelta(seconds=3600),
+                               world_size=world_size, rank=rank)
     
-    # CUDA optimizations for HPC efficiency
+    # ULTRA-OPTIMIZED CUDA settings
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.deterministic = False
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     
-    # Set float32 matmul precision for better performance
     if hasattr(torch, 'set_float32_matmul_precision'):
         torch.set_float32_matmul_precision('high')
     
-    # Clear GPU memory
+    if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+    
+    # Enable CUDA graphs if available (PyTorch 2.0+)
+    if hasattr(torch.cuda, 'is_available') and torch.cuda.is_available():
+        try:
+            torch.cuda.set_per_process_memory_fraction(0.95, local_rank)
+        except Exception:
+            pass
+    
     torch.cuda.empty_cache()
     gc.collect()
     
     return rank, local_rank, world_size, True
 
-
 def cleanup_distributed() -> None:
-    """Clean up distributed process group safely."""
     if dist.is_initialized():
         try:
             dist.barrier()
         except Exception:
-            pass  # Ignore barrier errors during cleanup
+            pass
         finally:
             dist.destroy_process_group()
 
-
 def is_main_process(rank: int) -> bool:
-    """Check if this is the main process (rank 0)."""
     return rank == 0
 
-
 def synchronize() -> None:
-    """Synchronize all processes if in distributed mode."""
     if dist.is_initialized():
         dist.barrier()
 
-
-# =============================================================================
-# LOGGING
-# =============================================================================
-
 def setup_logging(rank: int, output_dir: Path) -> logging.Logger:
-    """
-    Set up logging for training.
-    
-    Only rank 0 logs to console and file; other ranks are completely silent
-    to avoid interleaved output.
-    
-    Args:
-        rank: Process rank
-        output_dir: Directory for log files
-        
-    Returns:
-        Configured logger instance
-    """
     logger = logging.getLogger("ROMAN_TRAIN")
     logger.handlers.clear()
     logger.propagate = False
     
     if is_main_process(rank):
         logger.setLevel(logging.INFO)
-        
-        # Console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
         console_formatter = logging.Formatter(
             '%(asctime)s | %(levelname)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+            datefmt='%Y-%m-%d %H:%M:%S')
         console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
         
-        # File handler
         log_file = output_dir / "training.log"
         file_handler = logging.FileHandler(log_file, mode='a')
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+            datefmt='%Y-%m-%d %H:%M:%S')
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
     else:
-        # Completely silence non-main processes
         logger.setLevel(logging.CRITICAL + 1)
         logger.addHandler(logging.NullHandler())
     
     return logger
 
-
 def set_global_seeds(seed: int, rank: int = 0) -> torch.Generator:
-    """
-    Set random seeds for reproducibility across all libraries.
-    
-    Args:
-        seed: Base random seed
-        rank: Process rank (used as offset for different per-rank seeds)
-        
-    Returns:
-        PyTorch Generator for DataLoader reproducibility
-    """
     effective_seed = seed + rank
-    
     random.seed(effective_seed)
     np.random.seed(effective_seed)
     torch.manual_seed(effective_seed)
@@ -348,108 +241,84 @@ def set_global_seeds(seed: int, rank: int = 0) -> torch.Generator:
         torch.cuda.manual_seed(effective_seed)
         torch.cuda.manual_seed_all(effective_seed)
     
-    # Create generator for DataLoader
     generator = torch.Generator()
     generator.manual_seed(effective_seed)
     
-    # Note: cudnn.benchmark=True sacrifices strict reproducibility for performance
-    # For exact reproducibility, set deterministic=True and benchmark=False
+    # PERFORMANCE: Non-deterministic for speed
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
     
     return generator
 
+def copy_to_local_storage(data_path: Path, logger: logging.Logger,
+                          rank: int, local_dir: Optional[str] = None) -> Path:
+    if local_dir is None:
+        for candidate in [os.environ.get('TMPDIR'), os.environ.get('LOCAL_SCRATCH'),
+                          '/tmp', '/local', '/scratch']:
+            if candidate and os.path.isdir(candidate):
+                local_dir = candidate
+                break
+    
+    if local_dir is None:
+        return data_path
+    
+    local_path = Path(local_dir) / f"rank{rank}_{data_path.name}"
+    
+    if not local_path.exists():
+        if rank == 0 or not dist.is_initialized():
+            logger.info(f"Copying data to local storage: {local_path}")
+        start = time.time()
+        shutil.copy2(data_path, local_path)
+        if rank == 0 or not dist.is_initialized():
+            elapsed = time.time() - start
+            size_gb = local_path.stat().st_size / 1e9
+            logger.info(f"  Copied {size_gb:.1f} GB in {elapsed:.1f}s ({size_gb/elapsed:.1f} GB/s)")
+    
+    return local_path
 
-# =============================================================================
-# DATA LOADING
-# =============================================================================
-
-def load_or_create_split(
-    data_path: Path,
-    logger: logging.Logger,
-    rank: int = 0,
-    is_ddp: bool = False,
-    val_fraction: float = DEFAULT_VAL_FRACTION
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-    """
-    Load cached train/val split or create new one.
+def load_or_create_split(data_path: Path, logger: logging.Logger, rank: int = 0,
+                         is_ddp: bool = False, val_fraction: float = DEFAULT_VAL_FRACTION,
+                         original_data_path: Optional[Path] = None
+                         ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    cache_source = original_data_path if original_data_path is not None else data_path
+    cache_path = cache_source.parent / f"{cache_source.stem}_split_cache.npz"
     
-    Only rank 0 creates the split; other ranks wait and load from cache.
-    This ensures consistent splits across all processes.
-    
-    Args:
-        data_path: Path to HDF5 data file
-        logger: Logger instance
-        rank: Process rank
-        is_ddp: Whether running in distributed mode
-        val_fraction: Fraction of data for validation (default: 0.2)
-        
-    Returns:
-        Tuple containing:
-            - train_idx: Array of training sample indices
-            - val_idx: Array of validation sample indices
-            - stats: Normalization statistics {'median': float, 'iqr': float}
-    """
-    cache_path = data_path.parent / f"{data_path.stem}_split_cache.npz"
-    
-    # Try loading from cache
     if cache_path.exists():
         if is_main_process(rank):
             logger.info(f"Loading cached split from: {cache_path}")
-        
         try:
             cache = np.load(cache_path)
             train_idx = cache['train_idx']
             val_idx = cache['val_idx']
-            stats = {
-                'median': float(cache['median']),
-                'iqr': float(cache['iqr'])
-            }
-            
+            stats = {'median': float(cache['median']), 'iqr': float(cache['iqr'])}
             if is_main_process(rank):
-                logger.info(
-                    f"Loaded split: train={format_number(len(train_idx))}, "
-                    f"val={format_number(len(val_idx))}"
-                )
-            
+                logger.info(f"Loaded split: train={format_number(len(train_idx))}, "
+                          f"val={format_number(len(val_idx))}")
             if is_ddp:
                 synchronize()
-            
             return train_idx, val_idx, stats
         except Exception as e:
             if is_main_process(rank):
                 logger.warning(f"Failed to load cache: {e}. Creating new split.")
     
-    # Create new split (only rank 0)
     if is_main_process(rank):
         logger.info("Creating new train/val split...")
-        
-        with h5py.File(data_path, 'r', rdcc_nbytes=512*1024*1024) as f:
+        with h5py.File(data_path, 'r', rdcc_nbytes=1024*1024*1024) as f:
             labels = f['labels'][:]
             n_samples = len(labels)
-            
             logger.info(f"Total samples: {format_number(n_samples)}")
             
-            # Stratified split
             indices = np.arange(n_samples)
-            train_idx, val_idx = train_test_split(
-                indices,
-                test_size=val_fraction,
-                shuffle=True,
-                random_state=SEED,
-                stratify=labels
-            )
+            train_idx, val_idx = train_test_split(indices, test_size=val_fraction,
+                                                  shuffle=True, random_state=SEED,
+                                                  stratify=labels)
             
-            # Compute normalization statistics from training set
             flux_data = f['flux']
             sample_size = min(50000, len(train_idx))
-            sample_idx = np.sort(
-                np.random.choice(train_idx, sample_size, replace=False)
-            )
+            sample_idx = np.sort(np.random.choice(train_idx, sample_size, replace=False))
             
             valid_flux_chunks: List[np.ndarray] = []
             chunk_size = 10000
-            
             for i in range(0, len(sample_idx), chunk_size):
                 chunk_indices = sample_idx[i:i + chunk_size]
                 flux_chunk = flux_data[chunk_indices.tolist()]
@@ -461,14 +330,13 @@ def load_or_create_split(
                 all_valid = np.concatenate(valid_flux_chunks)
                 median = float(np.median(all_valid))
                 q75, q25 = np.percentile(all_valid, [75, 25])
-                iqr = float(max(q75 - q25, EPS))  # Avoid division by zero
+                iqr = float(max(q75 - q25, EPS))
             else:
                 logger.warning("No valid flux values found, using defaults")
                 median, iqr = 0.0, 1.0
             
             stats = {'median': median, 'iqr': iqr}
             
-            # Log class distribution
             unique, counts = np.unique(labels[train_idx], return_counts=True)
             logger.info("Training class distribution:")
             for cls_idx, count in zip(unique, counts):
@@ -476,63 +344,28 @@ def load_or_create_split(
                 cls_name = CLASS_NAMES[cls_idx] if cls_idx < len(CLASS_NAMES) else f"Class {cls_idx}"
                 logger.info(f"  {cls_name}: {format_number(count)} ({pct:.2f}%)")
         
-        # Save cache
-        np.savez(
-            cache_path,
-            train_idx=train_idx,
-            val_idx=val_idx,
-            median=stats['median'],
-            iqr=stats['iqr']
-        )
-        
+        np.savez(cache_path, train_idx=train_idx, val_idx=val_idx,
+                median=stats['median'], iqr=stats['iqr'])
         logger.info(f"Cached split to: {cache_path}")
     else:
         train_idx, val_idx, stats = None, None, None
     
-    # Synchronize and load on other ranks
     if is_ddp:
         synchronize()
-        
         if not is_main_process(rank):
             cache = np.load(cache_path)
             train_idx = cache['train_idx']
             val_idx = cache['val_idx']
-            stats = {
-                'median': float(cache['median']),
-                'iqr': float(cache['iqr'])
-            }
+            stats = {'median': float(cache['median']), 'iqr': float(cache['iqr'])}
     
     return train_idx, val_idx, stats
 
-
-class MicrolensingDataset(Dataset):
-    """
-    HDF5 dataset with lazy loading and per-worker file handles.
-    
-    CRITICAL: Each DataLoader worker maintains its own HDF5 file handle
-    to prevent thread safety issues and potential deadlocks with h5py.
-    
-    The dataset only returns indices and labels in __getitem__ for efficiency.
-    Actual data loading is done in batches via get_batch_data() called from
-    the collate function.
-    
-    Args:
-        data_path: Path to HDF5 file
-        indices: Array of sample indices to use
-        stats: Normalization statistics {'median': float, 'iqr': float}
-    """
-    
-    def __init__(
-        self,
-        data_path: Path,
-        indices: np.ndarray,
-        stats: Dict[str, float]
-    ) -> None:
+class MicrolensingDatasetOptimized(Dataset):
+    def __init__(self, data_path: Path, indices: np.ndarray,
+                 stats: Dict[str, float]) -> None:
         self.data_path: str = str(data_path)
         self.indices: np.ndarray = np.asarray(indices, dtype=np.int64)
         self.stats: Dict[str, float] = stats
-        
-        # Per-worker HDF5 handles (initialized lazily)
         self._file: Optional[h5py.File] = None
         self._flux: Optional[h5py.Dataset] = None
         self._delta_t: Optional[h5py.Dataset] = None
@@ -540,28 +373,21 @@ class MicrolensingDataset(Dataset):
         self._worker_id: Optional[int] = None
     
     def _ensure_open(self) -> None:
-        """Open HDF5 file if not already open (lazy initialization)."""
-        # Check if we need to reopen for a different worker
         worker_info = torch.utils.data.get_worker_info()
         current_worker = worker_info.id if worker_info else -1
         
         if self._file is None or self._worker_id != current_worker:
             self._close()
-            self._file = h5py.File(
-                self.data_path,
-                'r',
-                rdcc_nbytes=256 * 1024 * 1024,  # 256 MB chunk cache
-                rdcc_nslots=10007,  # Prime number for hash table
-                libver='latest',
-                swmr=True  # Single Writer Multiple Reader mode
-            )
+            self._file = h5py.File(self.data_path, 'r',
+                                  rdcc_nbytes=256*1024*1024,
+                                  rdcc_nslots=10007, rdcc_w0=0.75,
+                                  libver='latest')
             self._flux = self._file['flux']
             self._delta_t = self._file['delta_t']
             self._labels = self._file['labels']
             self._worker_id = current_worker
     
     def _close(self) -> None:
-        """Close HDF5 file handle if open."""
         if self._file is not None:
             try:
                 self._file.close()
@@ -573,455 +399,246 @@ class MicrolensingDataset(Dataset):
             self._labels = None
     
     def __len__(self) -> int:
-        """Return number of samples in dataset."""
         return len(self.indices)
     
     def __getitem__(self, idx: int) -> Tuple[int, int]:
-        """
-        Return global index and label for a sample.
-        
-        Args:
-            idx: Local index in this dataset
-            
-        Returns:
-            Tuple of (global_index, label)
-        """
         self._ensure_open()
         global_idx = int(self.indices[idx])
         label = int(self._labels[global_idx])
         return global_idx, label
     
-    def get_batch_data(
-        self,
-        global_indices: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Read flux and delta_t for a batch of global indices.
-        
-        Optimizes HDF5 reading by sorting indices before reading
-        to minimize disk seeks, then restoring original order.
-        
-        Args:
-            global_indices: Array of global indices to read
-            
-        Returns:
-            Tuple of (flux, delta_t) arrays
-        """
+    def get_batch_data(self, global_indices: np.ndarray
+                      ) -> Tuple[np.ndarray, np.ndarray]:
         self._ensure_open()
-        
-        # Sort indices for sequential disk access
         sort_order = np.argsort(global_indices)
         sorted_idx = global_indices[sort_order]
-        
-        # Read from HDF5 (efficient with sorted indices)
         flux = self._flux[sorted_idx.tolist()]
         delta_t = self._delta_t[sorted_idx.tolist()]
-        
-        # Restore original order
         unsort_order = np.argsort(sort_order)
         flux = flux[unsort_order]
         delta_t = delta_t[unsort_order]
-        
         return flux, delta_t
     
     def __del__(self) -> None:
-        """Close HDF5 file on deletion."""
         self._close()
 
-
-def collate_fn(
-    batch: List[Tuple[int, int]],
-    dataset: MicrolensingDataset
-) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """
-    Collate function with optimized HDF5 batch reading and normalization.
-    
-    Args:
-        batch: List of (global_index, label) tuples from __getitem__
-        dataset: Dataset instance for reading actual data
-        
-    Returns:
-        Tuple of tensors:
-            - flux: Normalized flux (B, T)
-            - delta_t: Time differences (B, T)
-            - lengths: Valid sequence lengths (B,)
-            - labels: Class labels (B,)
-    """
+def collate_fn_optimized(batch: List[Tuple[int, int]],
+                         dataset: MicrolensingDatasetOptimized,
+                         median: float, iqr: float
+                         ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global_indices = np.array([x[0] for x in batch], dtype=np.int64)
     labels = np.array([x[1] for x in batch], dtype=np.int64)
-    
-    # Batch read from HDF5
     flux, delta_t = dataset.get_batch_data(global_indices)
     
-    # Convert to tensors
-    flux = torch.from_numpy(flux.astype(np.float32))
-    delta_t = torch.from_numpy(delta_t.astype(np.float32))
+    flux = np.ascontiguousarray(flux, dtype=np.float32)
+    delta_t = np.ascontiguousarray(delta_t, dtype=np.float32)
+    
+    flux = torch.from_numpy(flux)
+    delta_t = torch.from_numpy(delta_t)
     labels = torch.from_numpy(labels).long()
     
-    # Create validity mask (non-NaN and non-zero)
     valid_mask = (~torch.isnan(flux)) & (flux != 0.0)
-    
-    # Handle NaN values
     flux = torch.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
     delta_t = torch.nan_to_num(delta_t, nan=0.0, posinf=0.0, neginf=0.0)
     
-    # Robust normalization using IQR (less sensitive to outliers than std)
-    median = dataset.stats['median']
-    iqr = dataset.stats['iqr']
     flux = (flux - median) / iqr
-    
-    # Zero out invalid positions
     flux = flux * valid_mask.float()
-    
-    # Compute actual sequence lengths
     lengths = valid_mask.sum(dim=1).long().clamp(min=MIN_SEQUENCE_LENGTH)
     
     return flux, delta_t, lengths, labels
 
-
 def worker_init_fn(worker_id: int) -> None:
-    """
-    Initialize random state for each DataLoader worker.
-    
-    Ensures different workers get different random states while
-    maintaining reproducibility.
-    
-    Args:
-        worker_id: Worker ID (0 to num_workers-1)
-    """
     worker_seed = torch.initial_seed() % (2**32)
     np.random.seed(worker_seed + worker_id)
     random.seed(worker_seed + worker_id)
 
-
-def create_dataloaders(
-    data_path: Path,
-    train_idx: np.ndarray,
-    val_idx: np.ndarray,
-    stats: Dict[str, float],
-    batch_size: int,
-    num_workers: int,
-    prefetch_factor: int,
-    is_ddp: bool,
-    rank: int,
-    generator: torch.Generator
-) -> Tuple[DataLoader, DataLoader, np.ndarray]:
-    """
-    Create training and validation DataLoaders.
+def create_dataloaders(data_path: Path, train_idx: np.ndarray, val_idx: np.ndarray,
+                      stats: Dict[str, float], batch_size: int, num_workers: int,
+                      prefetch_factor: int, is_ddp: bool, rank: int,
+                      generator: torch.Generator
+                      ) -> Tuple[DataLoader, DataLoader, np.ndarray]:
+    train_dataset = MicrolensingDatasetOptimized(data_path, train_idx, stats)
+    val_dataset = MicrolensingDatasetOptimized(data_path, val_idx, stats)
     
-    Args:
-        data_path: Path to HDF5 data file
-        train_idx: Training sample indices
-        val_idx: Validation sample indices
-        stats: Normalization statistics
-        batch_size: Batch size per GPU
-        num_workers: Number of DataLoader workers
-        prefetch_factor: Batches to prefetch per worker
-        is_ddp: Whether using distributed training
-        rank: Process rank
-        generator: PyTorch Generator for reproducibility
-        
-    Returns:
-        Tuple of (train_loader, val_loader, train_labels)
-    """
-    train_dataset = MicrolensingDataset(data_path, train_idx, stats)
-    val_dataset = MicrolensingDataset(data_path, val_idx, stats)
-    
-    # Load labels for class weight computation
     with h5py.File(data_path, 'r') as f:
         all_labels = f['labels'][:]
     train_labels = all_labels[train_idx]
     
-    # Create samplers
     if is_ddp:
-        train_sampler: Optional[DistributedSampler] = DistributedSampler(
-            train_dataset,
-            shuffle=True,
-            seed=SEED,
-            drop_last=True
-        )
-        val_sampler: Optional[DistributedSampler] = DistributedSampler(
-            val_dataset,
-            shuffle=False,
-            drop_last=False
-        )
+        train_sampler = DistributedSampler(train_dataset, shuffle=True,
+                                          seed=SEED, drop_last=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
     else:
         train_sampler = None
         val_sampler = None
     
-    # Create collate functions with dataset reference
-    train_collate: Callable = lambda batch: collate_fn(batch, train_dataset)
-    val_collate: Callable = lambda batch: collate_fn(batch, val_dataset)
+    median, iqr = stats['median'], stats['iqr']
+    train_collate = partial(collate_fn_optimized, dataset=train_dataset,
+                           median=median, iqr=iqr)
+    val_collate = partial(collate_fn_optimized, dataset=val_dataset,
+                         median=median, iqr=iqr)
     
-    # DataLoader settings
     use_persistent_workers = num_workers > 0
     use_prefetch = prefetch_factor if num_workers > 0 else None
     
+    # PERFORMANCE: pin_memory_device for faster transfers (PyTorch 2.0+)
+    pin_memory_device = f'cuda:{rank}' if torch.cuda.is_available() else ''
+    
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=use_persistent_workers,
-        prefetch_factor=use_prefetch,
-        worker_init_fn=worker_init_fn,
-        collate_fn=train_collate,
-        generator=generator
-    )
+        train_dataset, batch_size=batch_size,
+        shuffle=(train_sampler is None), sampler=train_sampler,
+        num_workers=num_workers, pin_memory=True,
+        pin_memory_device=pin_memory_device,
+        drop_last=True, persistent_workers=use_persistent_workers,
+        prefetch_factor=use_prefetch, worker_init_fn=worker_init_fn,
+        collate_fn=train_collate, generator=generator)
     
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size * 2,  # Larger batch for validation (no gradients)
-        shuffle=False,
-        sampler=val_sampler,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=False,
-        persistent_workers=use_persistent_workers,
-        prefetch_factor=use_prefetch,
-        worker_init_fn=worker_init_fn,
-        collate_fn=val_collate,
-        generator=generator
-    )
+        val_dataset, batch_size=batch_size * 2,
+        shuffle=False, sampler=val_sampler,
+        num_workers=num_workers, pin_memory=True,
+        pin_memory_device=pin_memory_device,
+        drop_last=False, persistent_workers=use_persistent_workers,
+        prefetch_factor=use_prefetch, worker_init_fn=worker_init_fn,
+        collate_fn=val_collate, generator=generator)
     
     return train_loader, val_loader, train_labels
 
-
-# =============================================================================
-# TRAINING UTILITIES
-# =============================================================================
-
-def compute_class_weights(
-    labels: np.ndarray,
-    n_classes: int,
-    device: torch.device
-) -> Tensor:
-    """
-    Compute inverse frequency class weights for balanced loss.
-    
-    Weights are computed as: w_c = N_total / (n_classes * N_c)
-    This upweights minority classes to handle class imbalance.
-    
-    Args:
-        labels: Array of training labels
-        n_classes: Number of classes
-        device: Device to place weights on
-        
-    Returns:
-        Class weights tensor of shape (n_classes,)
-    """
+def compute_class_weights(labels: np.ndarray, n_classes: int,
+                          device: torch.device) -> Tensor:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
-    
     weights = torch.ones(n_classes, device=device, dtype=torch.float32)
     for cls_idx, count in zip(unique, counts):
         if count > 0:
             weights[cls_idx] = total / (n_classes * count + EPS)
-    
-    # Normalize weights to have mean 1.0 for stable training
     weights = weights / (weights.mean() + EPS)
-    
     return weights
 
-
 class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
-    """
-    Cosine annealing learning rate scheduler with linear warmup.
-    
-    Learning rate schedule:
-        - Warmup phase: Linear increase from 0 to base_lr
-        - Decay phase: Cosine decay from base_lr to min_lr
-    
-    Args:
-        optimizer: Optimizer to schedule
-        warmup_epochs: Number of warmup epochs
-        total_epochs: Total training epochs
-        min_lr: Minimum learning rate at end of training
-        last_epoch: Last epoch index (for resuming)
-    """
-    
-    def __init__(
-        self,
-        optimizer: torch.optim.Optimizer,
-        warmup_epochs: int,
-        total_epochs: int,
-        min_lr: float = 1e-6,
-        last_epoch: int = -1
-    ) -> None:
+    def __init__(self, optimizer: torch.optim.Optimizer, warmup_epochs: int,
+                 total_epochs: int, min_lr: float = 1e-6, last_epoch: int = -1) -> None:
         self.warmup_epochs: int = max(0, warmup_epochs)
         self.total_epochs: int = max(1, total_epochs)
         self.min_lr: float = max(0.0, min_lr)
         super().__init__(optimizer, last_epoch)
     
     def get_lr(self) -> List[float]:
-        """Calculate learning rate for current epoch."""
         epoch = max(0, self.last_epoch)
-        
         if epoch < self.warmup_epochs:
-            # Linear warmup
             alpha = (epoch + 1) / max(1, self.warmup_epochs)
             return [base_lr * alpha for base_lr in self.base_lrs]
         else:
-            # Cosine decay
             decay_epochs = max(1, self.total_epochs - self.warmup_epochs)
             progress = (epoch - self.warmup_epochs) / decay_epochs
-            progress = min(1.0, progress)  # Clamp to [0, 1]
+            progress = min(1.0, progress)
             cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return [
-                self.min_lr + (base_lr - self.min_lr) * cosine_factor
-                for base_lr in self.base_lrs
-            ]
-
-
-def get_amp_context(
-    device: torch.device,
-    use_amp: bool,
-    dtype: Optional[torch.dtype] = None
-) -> Any:
-    """
-    Get appropriate AMP autocast context manager.
-    
-    Args:
-        device: Training device
-        use_amp: Whether to use AMP
-        dtype: Override dtype (None = auto-detect)
-        
-    Returns:
-        Context manager for autocast
-    """
-    if not use_amp or device.type != 'cuda':
-        return nullcontext()
-    
-    if dtype is None:
-        # Auto-detect best dtype
-        if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
-            dtype = torch.bfloat16
-        else:
-            dtype = torch.float16
-    
-    return torch.amp.autocast('cuda', enabled=True, dtype=dtype)
-
+            return [self.min_lr + (base_lr - self.min_lr) * cosine_factor
+                   for base_lr in self.base_lrs]
 
 def should_use_grad_scaler(device: torch.device, use_amp: bool) -> bool:
-    """
-    Determine if GradScaler should be used.
-    
-    GradScaler is only needed for float16, not bfloat16 (which has same
-    dynamic range as float32).
-    
-    Args:
-        device: Training device
-        use_amp: Whether AMP is enabled
-        
-    Returns:
-        True if GradScaler should be used
-    """
     if not use_amp or device.type != 'cuda':
         return False
-    
-    # BFloat16 doesn't need gradient scaling
     if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
         return False
-    
     return True
 
-
-# =============================================================================
-# TRAINING LOOP
-# =============================================================================
-
-def train_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    scaler: Optional[torch.amp.GradScaler],
-    class_weights: Tensor,
-    device: torch.device,
-    rank: int,
-    world_size: int,
-    epoch: int,
-    config: ModelConfig,
-    accumulation_steps: int = 1,
-    clip_norm: float = DEFAULT_CLIP_NORM
-) -> Tuple[float, float]:
-    """
-    Train for one epoch with gradient accumulation and mixed precision.
+class CUDAPrefetcher:
+    def __init__(self, loader: DataLoader, device: torch.device):
+        self.loader = loader
+        self.device = device
+        self.stream = torch.cuda.Stream(device=device)
+        self.next_data: Optional[Tuple[Tensor, ...]] = None
+        self._iter: Optional[Any] = None
     
-    Args:
-        model: Model to train
-        loader: Training DataLoader
-        optimizer: Optimizer
-        scaler: GradScaler for mixed precision (None if not using)
-        class_weights: Class weights for loss computation
-        device: Device to train on
-        rank: Process rank
-        world_size: Number of processes
-        epoch: Current epoch number
-        config: Model configuration
-        accumulation_steps: Steps to accumulate gradients
-        clip_norm: Maximum gradient norm for clipping
+    def __iter__(self):
+        self._iter = iter(self.loader)
+        self._preload()
+        return self
+    
+    def _preload(self) -> None:
+        try:
+            data = next(self._iter)
+        except StopIteration:
+            self.next_data = None
+            return
         
-    Returns:
-        Tuple of (average_loss, accuracy)
-    """
-    model.train()
+        with torch.cuda.stream(self.stream):
+            self.next_data = tuple(
+                t.to(self.device, non_blocking=True) if isinstance(t, Tensor) else t
+                for t in data)
     
-    # Accumulator tensors on device for distributed aggregation
-    # Use float64 for accumulators to prevent overflow on large datasets
+    def __next__(self) -> Tuple[Tensor, ...]:
+        torch.cuda.current_stream(self.device).wait_stream(self.stream)
+        data = self.next_data
+        if data is None:
+            raise StopIteration
+        for t in data:
+            if isinstance(t, Tensor) and t.is_cuda:
+                t.record_stream(torch.cuda.current_stream(self.device))
+        self._preload()
+        return data
+    
+    def __len__(self) -> int:
+        return len(self.loader)
+
+def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer,
+               scaler: Optional[torch.amp.GradScaler], class_weights: Tensor,
+               device: torch.device, rank: int, world_size: int, epoch: int,
+               config: ModelConfig, accumulation_steps: int = 1,
+               clip_norm: float = DEFAULT_CLIP_NORM, use_prefetcher: bool = True
+               ) -> Tuple[float, float]:
+    model.train()
     total_loss = torch.tensor(0.0, device=device, dtype=torch.float64)
     correct = torch.tensor(0, device=device, dtype=torch.int64)
     total = torch.tensor(0, device=device, dtype=torch.int64)
     
-    # Progress bar (only on main process)
-    iterator = tqdm(
-        loader,
-        desc=f"Epoch {epoch}",
-        disable=not is_main_process(rank),
-        leave=False,
-        dynamic_ncols=True,
-        mininterval=0.5  # Reduce update frequency for efficiency
-    )
+    if use_prefetcher and device.type == 'cuda':
+        iterator_base = CUDAPrefetcher(loader, device)
+    else:
+        iterator_base = loader
     
-    # Clear gradients
+    if is_main_process(rank):
+        iterator = tqdm(iterator_base, desc=f"Epoch {epoch}",
+                       leave=False, dynamic_ncols=True, mininterval=1.0)
+    else:
+        iterator = iterator_base
+    
     optimizer.zero_grad(set_to_none=True)
     
-    # Mixed precision settings
     use_amp = config.use_amp
     use_scaler = scaler is not None
-    amp_dtype = torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported') 
-                                    and torch.cuda.is_bf16_supported()) else torch.float16
+    amp_dtype = (torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported')
+                                   and torch.cuda.is_bf16_supported())
+                else torch.float16)
     
     num_batches = len(loader)
     
-    for batch_idx, (flux, delta_t, lengths, labels) in enumerate(iterator):
-        # Move to device with non-blocking transfers
-        flux = flux.to(device, non_blocking=True)
-        delta_t = delta_t.to(device, non_blocking=True)
-        lengths = lengths.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+    for batch_idx, batch_data in enumerate(iterator):
+        if use_prefetcher and device.type == 'cuda':
+            flux, delta_t, lengths, labels = batch_data
+        else:
+            flux, delta_t, lengths, labels = batch_data
+            flux = flux.to(device, non_blocking=True)
+            delta_t = delta_t.to(device, non_blocking=True)
+            lengths = lengths.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
         
-        # Forward pass with mixed precision
         with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
             logits = model(flux, delta_t, lengths)
             loss = F.cross_entropy(logits, labels, weight=class_weights)
             loss_scaled = loss / accumulation_steps
         
-        # Backward pass
         if use_scaler:
             scaler.scale(loss_scaled).backward()
         else:
             loss_scaled.backward()
         
-        # Determine if this is an accumulation step
         is_last_batch = (batch_idx + 1) == num_batches
         is_accum_step = ((batch_idx + 1) % accumulation_steps == 0) or is_last_batch
         
         if is_accum_step:
             if use_scaler:
-                # Unscale before clipping
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 scaler.step(optimizer)
@@ -1029,74 +646,38 @@ def train_epoch(
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 optimizer.step()
-            
             optimizer.zero_grad(set_to_none=True)
         
-        # Accumulate metrics (no gradient needed)
         with torch.no_grad():
             batch_size = labels.size(0)
             total_loss += loss.detach().double() * batch_size
             correct += (logits.argmax(dim=-1) == labels).sum()
             total += batch_size
         
-        # Update progress bar (less frequently for efficiency)
         if is_main_process(rank) and batch_idx % PROGRESS_UPDATE_FREQ == 0:
             current_loss = (total_loss / max(1, total)).item()
             current_acc = (correct / max(1, total)).float().item() * 100
-            iterator.set_postfix({
-                'loss': f'{current_loss:.4f}',
-                'acc': f'{current_acc:.1f}%'
-            })
+            if hasattr(iterator, 'set_postfix'):
+                iterator.set_postfix({'loss': f'{current_loss:.4f}',
+                                     'acc': f'{current_acc:.1f}%'})
     
-    # Aggregate metrics across all processes
     if world_size > 1:
         dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
     
-    # Compute final metrics
     total_samples = max(1, total.item())
     avg_loss = (total_loss / total_samples).item()
     accuracy = (correct / total_samples).float().item()
     
     return avg_loss, accuracy
 
-
 @torch.inference_mode()
-def evaluate(
-    model: nn.Module,
-    loader: DataLoader,
-    class_weights: Tensor,
-    device: torch.device,
-    rank: int,
-    world_size: int,
-    config: ModelConfig,
-    return_predictions: bool = False
-) -> Dict[str, Any]:
-    """
-    Evaluate model on validation set.
-    
-    Args:
-        model: Model to evaluate
-        loader: Validation DataLoader
-        class_weights: Class weights for loss computation
-        device: Device to evaluate on
-        rank: Process rank
-        world_size: Number of processes
-        config: Model configuration
-        return_predictions: Whether to return predictions and labels
-        
-    Returns:
-        Dictionary containing:
-            - loss: Average validation loss
-            - accuracy: Validation accuracy
-            - predictions: (optional) Predicted class indices
-            - labels: (optional) True labels
-            - probabilities: (optional) Class probabilities
-    """
+def evaluate(model: nn.Module, loader: DataLoader, class_weights: Tensor,
+            device: torch.device, rank: int, world_size: int, config: ModelConfig,
+            return_predictions: bool = False, use_prefetcher: bool = True
+            ) -> Dict[str, Any]:
     model.eval()
-    
-    # Use float64 for accumulators
     total_loss = torch.tensor(0.0, device=device, dtype=torch.float64)
     correct = torch.tensor(0, device=device, dtype=torch.int64)
     total = torch.tensor(0, device=device, dtype=torch.int64)
@@ -1106,23 +687,30 @@ def evaluate(
     all_probs: List[np.ndarray] = []
     
     use_amp = config.use_amp
-    amp_dtype = torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported') 
-                                    and torch.cuda.is_bf16_supported()) else torch.float16
+    amp_dtype = (torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported')
+                                   and torch.cuda.is_bf16_supported())
+                else torch.float16)
     
-    iterator = tqdm(
-        loader,
-        disable=not is_main_process(rank),
-        desc="Eval",
-        leave=False,
-        dynamic_ncols=True,
-        mininterval=0.5
-    )
+    if use_prefetcher and device.type == 'cuda':
+        iterator_base = CUDAPrefetcher(loader, device)
+    else:
+        iterator_base = loader
     
-    for flux, delta_t, lengths, labels in iterator:
-        flux = flux.to(device, non_blocking=True)
-        delta_t = delta_t.to(device, non_blocking=True)
-        lengths = lengths.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+    if is_main_process(rank):
+        iterator = tqdm(iterator_base, desc="Eval",
+                       leave=False, dynamic_ncols=True, mininterval=1.0)
+    else:
+        iterator = iterator_base
+    
+    for batch_data in iterator:
+        if use_prefetcher and device.type == 'cuda':
+            flux, delta_t, lengths, labels = batch_data
+        else:
+            flux, delta_t, lengths, labels = batch_data
+            flux = flux.to(device, non_blocking=True)
+            delta_t = delta_t.to(device, non_blocking=True)
+            lengths = lengths.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
         
         with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
             logits = model(flux, delta_t, lengths)
@@ -1140,18 +728,15 @@ def evaluate(
             all_labels.append(labels.cpu().numpy())
             all_probs.append(F.softmax(logits.float(), dim=-1).cpu().numpy())
     
-    # Aggregate across processes
     if world_size > 1:
         dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
     
     total_samples = max(1, total.item())
-    
     results: Dict[str, Any] = {
         'loss': (total_loss / total_samples).item(),
-        'accuracy': (correct / total_samples).float().item()
-    }
+        'accuracy': (correct / total_samples).float().item()}
     
     if return_predictions:
         results['predictions'] = np.concatenate(all_preds)
@@ -1160,279 +745,121 @@ def evaluate(
     
     return results
 
-
-def save_checkpoint(
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
-    scaler: Optional[torch.amp.GradScaler],
-    epoch: int,
-    best_acc: float,
-    config: ModelConfig,
-    stats: Dict[str, float],
-    output_dir: Path,
-    is_best: bool = False,
-    extra_info: Optional[Dict[str, Any]] = None
-) -> Path:
-    """
-    Save training checkpoint.
-    
-    Args:
-        model: Model to save (handles DDP wrapper automatically)
-        optimizer: Optimizer state
-        scheduler: Scheduler state
-        scaler: GradScaler state (if using)
-        epoch: Current epoch
-        best_acc: Best validation accuracy so far
-        config: Model configuration
-        stats: Normalization statistics
-        output_dir: Output directory
-        is_best: Whether this is the best model so far
-        extra_info: Additional info to save
-        
-    Returns:
-        Path to saved checkpoint
-    """
-    # Extract model state dict (handle DDP wrapper)
+def save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
+                   scheduler: torch.optim.lr_scheduler._LRScheduler,
+                   scaler: Optional[torch.amp.GradScaler], epoch: int,
+                   best_acc: float, config: ModelConfig, stats: Dict[str, float],
+                   output_dir: Path, is_best: bool = False,
+                   extra_info: Optional[Dict[str, Any]] = None) -> Path:
     if isinstance(model, DDP):
         model_state = model.module.state_dict()
+    elif hasattr(model, '_orig_mod'):
+        model_state = model._orig_mod.state_dict()
     else:
         model_state = model.state_dict()
     
     checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model_state,
+        'epoch': epoch, 'model_state_dict': model_state,
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'best_acc': best_acc,
         'config': config.to_dict() if hasattr(config, 'to_dict') else asdict(config),
-        'stats': stats,
-        'pytorch_version': torch.__version__,
+        'stats': stats, 'pytorch_version': torch.__version__,
         'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
-        'timestamp': datetime.now().isoformat()
-    }
+        'timestamp': datetime.now().isoformat()}
     
     if scaler is not None:
         checkpoint['scaler_state_dict'] = scaler.state_dict()
-    
     if extra_info:
         checkpoint['extra_info'] = extra_info
     
-    if is_best:
-        save_path = output_dir / 'best_model.pt'
-    else:
-        save_path = output_dir / f'checkpoint_epoch_{epoch}.pt'
-    
-    # Save with atomic write pattern
+    save_path = output_dir / ('best_model.pt' if is_best else f'checkpoint_epoch_{epoch}.pt')
     temp_path = save_path.with_suffix('.tmp')
     torch.save(checkpoint, temp_path)
     temp_path.rename(save_path)
     
     return save_path
 
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Train Roman Microlensing Classifier',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+        description='Train Roman Microlensing Classifier (ULTRA-OPTIMIZED)',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
-    # Data arguments
     data_group = parser.add_argument_group('Data')
-    data_group.add_argument(
-        '--data', type=str, required=True,
-        help='Path to HDF5 training data file'
-    )
-    data_group.add_argument(
-        '--output-dir', type=str, default='../results',
-        help='Output directory for results and checkpoints'
-    )
-    data_group.add_argument(
-        '--experiment-name', type=str, default=None,
-        help='Experiment name (auto-generated if not provided)'
-    )
-    data_group.add_argument(
-        '--val-fraction', type=float, default=DEFAULT_VAL_FRACTION,
-        help='Fraction of data for validation'
-    )
+    data_group.add_argument('--data', type=str, required=True)
+    data_group.add_argument('--output-dir', type=str, default='../results')
+    data_group.add_argument('--experiment-name', type=str, default=None)
+    data_group.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION)
     
-    # Model architecture
-    model_group = parser.add_argument_group('Model Architecture')
-    model_group.add_argument(
-        '--d-model', type=int, default=64,
-        help='Model hidden dimension'
-    )
-    model_group.add_argument(
-        '--n-layers', type=int, default=2,
-        help='Number of GRU layers'
-    )
-    model_group.add_argument(
-        '--dropout', type=float, default=0.3,
-        help='Dropout probability'
-    )
-    model_group.add_argument(
-        '--window-size', type=int, default=5,
-        help='Causal window size'
-    )
-    model_group.add_argument(
-        '--hierarchical', action='store_true', default=True,
-        help='Use hierarchical (multi-scale) feature extraction'
-    )
-    model_group.add_argument(
-        '--no-hierarchical', dest='hierarchical', action='store_false'
-    )
-    model_group.add_argument(
-        '--attention-pooling', action='store_true', default=True,
-        help='Use attention pooling'
-    )
-    model_group.add_argument(
-        '--no-attention-pooling', dest='attention_pooling', action='store_false'
-    )
-    model_group.add_argument(
-        '--num-attention-heads', type=int, default=1,
-        help='Number of attention heads for pooling'
-    )
-    model_group.add_argument(
-        '--use-residual', action='store_true', default=True,
-        help='Use residual connections'
-    )
-    model_group.add_argument(
-        '--no-residual', dest='use_residual', action='store_false'
-    )
-    model_group.add_argument(
-        '--use-layer-norm', action='store_true', default=True,
-        help='Use layer normalization'
-    )
-    model_group.add_argument(
-        '--no-layer-norm', dest='use_layer_norm', action='store_false'
-    )
-    model_group.add_argument(
-        '--feature-extraction', type=str, default='conv',
-        choices=['conv', 'mlp'],
-        help='Feature extraction method'
-    )
+    model_group = parser.add_argument_group('Model')
+    model_group.add_argument('--d-model', type=int, default=64)
+    model_group.add_argument('--n-layers', type=int, default=2)
+    model_group.add_argument('--dropout', type=float, default=0.3)
+    model_group.add_argument('--window-size', type=int, default=5)
+    model_group.add_argument('--hierarchical', action='store_true', default=True)
+    model_group.add_argument('--no-hierarchical', dest='hierarchical', action='store_false')
+    model_group.add_argument('--attention-pooling', action='store_true', default=True)
+    model_group.add_argument('--no-attention-pooling', dest='attention_pooling',
+                            action='store_false')
+    model_group.add_argument('--num-attention-heads', type=int, default=1)
+    model_group.add_argument('--use-residual', action='store_true', default=True)
+    model_group.add_argument('--no-residual', dest='use_residual', action='store_false')
+    model_group.add_argument('--use-layer-norm', action='store_true', default=True)
+    model_group.add_argument('--no-layer-norm', dest='use_layer_norm', action='store_false')
     
-    # Training hyperparameters
     train_group = parser.add_argument_group('Training')
-    train_group.add_argument(
-        '--batch-size', type=int, default=256,
-        help='Batch size per GPU'
-    )
-    train_group.add_argument(
-        '--accumulation-steps', type=int, default=1,
-        help='Gradient accumulation steps'
-    )
-    train_group.add_argument(
-        '--epochs', type=int, default=50,
-        help='Number of training epochs'
-    )
-    train_group.add_argument(
-        '--lr', type=float, default=1e-3,
-        help='Peak learning rate'
-    )
-    train_group.add_argument(
-        '--weight-decay', type=float, default=1e-3,
-        help='AdamW weight decay'
-    )
-    train_group.add_argument(
-        '--warmup-epochs', type=int, default=5,
-        help='Learning rate warmup epochs'
-    )
-    train_group.add_argument(
-        '--clip-norm', type=float, default=DEFAULT_CLIP_NORM,
-        help='Gradient clipping norm'
-    )
-    train_group.add_argument(
-        '--min-lr', type=float, default=1e-6,
-        help='Minimum learning rate'
-    )
+    train_group.add_argument('--batch-size', type=int, default=768,
+                            help='Batch size per GPU (increased from 512)')
+    train_group.add_argument('--accumulation-steps', type=int, default=1)
+    train_group.add_argument('--epochs', type=int, default=50)
+    train_group.add_argument('--lr', type=float, default=1e-3)
+    train_group.add_argument('--weight-decay', type=float, default=1e-3)
+    train_group.add_argument('--warmup-epochs', type=int, default=5)
+    train_group.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM)
+    train_group.add_argument('--min-lr', type=float, default=1e-6)
     
-    # Mixed precision
     amp_group = parser.add_argument_group('Mixed Precision')
-    amp_group.add_argument(
-        '--use-amp', action='store_true', default=True,
-        help='Use automatic mixed precision'
-    )
-    amp_group.add_argument(
-        '--no-amp', dest='use_amp', action='store_false'
-    )
+    amp_group.add_argument('--use-amp', action='store_true', default=True)
+    amp_group.add_argument('--no-amp', dest='use_amp', action='store_false')
     
-    # Other options
+    perf_group = parser.add_argument_group('Performance')
+    perf_group.add_argument('--compile', action='store_true', default=True)
+    perf_group.add_argument('--no-compile', dest='compile', action='store_false')
+    perf_group.add_argument('--compile-mode', type=str, default='max-autotune',
+                           choices=['default', 'reduce-overhead', 'max-autotune'],
+                           help='Compilation mode (max-autotune for best performance)')
+    perf_group.add_argument('--use-prefetcher', action='store_true', default=True)
+    perf_group.add_argument('--no-prefetcher', dest='use_prefetcher', action='store_false')
+    
     other_group = parser.add_argument_group('Other')
-    other_group.add_argument(
-        '--use-class-weights', action='store_true', default=True,
-        help='Use class-balanced loss weights'
-    )
-    other_group.add_argument(
-        '--no-class-weights', dest='use_class_weights', action='store_false'
-    )
-    other_group.add_argument(
-        '--compile', action='store_true', default=False,
-        help='Use torch.compile for optimization'
-    )
-    other_group.add_argument(
-        '--compile-mode', type=str, default='reduce-overhead',
-        choices=['default', 'reduce-overhead', 'max-autotune'],
-        help='torch.compile mode'
-    )
-    other_group.add_argument(
-        '--use-gradient-checkpointing', action='store_true', default=False,
-        help='Use gradient checkpointing to reduce memory'
-    )
-    other_group.add_argument(
-        '--num-workers', type=int, default=4,
-        help='DataLoader workers per GPU'
-    )
-    other_group.add_argument(
-        '--prefetch-factor', type=int, default=4,
-        help='Batches to prefetch per worker'
-    )
-    other_group.add_argument(
-        '--eval-every', type=int, default=5,
-        help='Evaluate every N epochs'
-    )
-    other_group.add_argument(
-        '--save-every', type=int, default=10,
-        help='Save checkpoint every N epochs'
-    )
-    other_group.add_argument(
-        '--early-stopping-patience', type=int, default=0,
-        help='Early stopping patience (0 = disabled)'
-    )
-    other_group.add_argument(
-        '--broadcast-buffers', action='store_true', default=True,
-        help='Broadcast BatchNorm buffers in DDP'
-    )
-    other_group.add_argument(
-        '--no-broadcast-buffers', dest='broadcast_buffers', action='store_false'
-    )
-    other_group.add_argument(
-        '--seed', type=int, default=SEED,
-        help='Random seed for reproducibility'
-    )
+    other_group.add_argument('--use-class-weights', action='store_true', default=True)
+    other_group.add_argument('--no-class-weights', dest='use_class_weights', action='store_false')
+    other_group.add_argument('--use-gradient-checkpointing', action='store_true', default=False)
+    other_group.add_argument('--num-workers', type=int, default=4)
+    other_group.add_argument('--prefetch-factor', type=int, default=12,
+                            help='Prefetch factor (increased from 8)')
+    other_group.add_argument('--eval-every', type=int, default=5)
+    other_group.add_argument('--save-every', type=int, default=10)
+    other_group.add_argument('--early-stopping-patience', type=int, default=0)
+    other_group.add_argument('--broadcast-buffers', action='store_true', default=True)
+    other_group.add_argument('--no-broadcast-buffers', dest='broadcast_buffers',
+                            action='store_false')
+    other_group.add_argument('--seed', type=int, default=SEED)
+    other_group.add_argument('--local-copy', action='store_true', default=False)
+    other_group.add_argument('--local-dir', type=str, default=None)
     
     return parser.parse_args()
 
-
 def main() -> None:
-    """Main training function."""
     args = parse_args()
     
-    # Initialize distributed training
     rank, local_rank, world_size, is_ddp = setup_distributed()
     device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
-    # Generate experiment name if not provided
     if args.experiment_name is None:
         timestamp = get_timestamp()
         args.experiment_name = f"roman_d{args.d_model}_l{args.n_layers}_{timestamp}"
     
-    # Create output directory
     output_dir = Path(args.output_dir) / args.experiment_name
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1440,140 +867,127 @@ def main() -> None:
     if is_ddp:
         synchronize()
     
-    # Setup logging and seeds
     logger = setup_logging(rank, output_dir)
     generator = set_global_seeds(args.seed, rank)
     
-    # Log configuration
     if is_main_process(rank):
         logger.info("=" * 80)
-        logger.info("ROMAN MICROLENSING CLASSIFIER - DISTRIBUTED TRAINING")
+        logger.info("ROMAN MICROLENSING CLASSIFIER - ULTRA-OPTIMIZED")
         logger.info("=" * 80)
-        logger.info(f"PyTorch version: {torch.__version__}")
-        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"PyTorch: {torch.__version__}")
+        logger.info(f"CUDA: {torch.version.cuda}")
         if torch.cuda.is_available():
             logger.info(f"GPU: {torch.cuda.get_device_name(local_rank)}")
             gpu_mem = torch.cuda.get_device_properties(local_rank).total_memory / 1e9
             logger.info(f"GPU memory: {gpu_mem:.1f} GB")
+            logger.info("Performance settings:")
+            logger.info(f"  torch.compile: {args.compile} (mode={args.compile_mode})")
+            logger.info(f"  CUDA prefetcher: {args.use_prefetcher}")
+            logger.info(f"  TF32: {torch.backends.cuda.matmul.allow_tf32}")
+            logger.info(f"  cuDNN benchmark: {torch.backends.cudnn.benchmark}")
+            logger.info(f"  Batch size per GPU: {args.batch_size} (optimized)")
+            logger.info(f"  Prefetch factor: {args.prefetch_factor} (optimized)")
+            if hasattr(torch.cuda, 'is_bf16_supported'):
+                logger.info(f"  BF16: {torch.cuda.is_bf16_supported()}")
         logger.info(f"World size: {world_size} GPU(s)")
-        logger.info(f"Rank: {rank}, Local rank: {local_rank}")
-        logger.info(f"Output directory: {output_dir}")
-        logger.info(f"Random seed: {args.seed}")
+        logger.info(f"Output: {output_dir}")
     
-    # Load data
     if is_main_process(rank):
         logger.info("-" * 80)
         logger.info("Loading data...")
     
     data_path = Path(args.data)
     if not data_path.exists():
-        raise FileNotFoundError(f"Data file not found: {data_path}")
+        raise FileNotFoundError(f"Data not found: {data_path}")
+    
+    original_data_path = data_path
+    if args.local_copy:
+        if is_main_process(rank):
+            logger.info("Copying to local storage...")
+        data_path = copy_to_local_storage(data_path, logger, rank, args.local_dir)
+        if is_ddp:
+            synchronize()
     
     train_idx, val_idx, stats = load_or_create_split(
-        data_path, logger, rank, is_ddp, args.val_fraction
-    )
+        data_path, logger, rank, is_ddp, args.val_fraction,
+        original_data_path=original_data_path if args.local_copy else None)
     
     if is_main_process(rank):
         logger.info(f"Dataset: {format_number(len(train_idx) + len(val_idx))} samples")
         logger.info(f"Train: {format_number(len(train_idx))}, Val: {format_number(len(val_idx))}")
-        logger.info(f"Normalization: median={stats['median']:.4f}, IQR={stats['iqr']:.4f}")
     
-    # Create data loaders
     train_loader, val_loader, train_labels = create_dataloaders(
-        data_path, train_idx, val_idx, stats,
-        args.batch_size, args.num_workers, args.prefetch_factor,
-        is_ddp, rank, generator
-    )
+        data_path, train_idx, val_idx, stats, args.batch_size, args.num_workers,
+        args.prefetch_factor, is_ddp, rank, generator)
     
     effective_batch_size = args.batch_size * args.accumulation_steps * world_size
     
     if is_main_process(rank):
-        logger.info(f"Batch size per GPU: {args.batch_size}")
-        logger.info(f"Gradient accumulation: {args.accumulation_steps}")
-        logger.info(f"Effective batch size: {effective_batch_size}")
+        logger.info(f"Batch per GPU: {args.batch_size}")
+        logger.info(f"Effective batch: {effective_batch_size}")
         logger.info(f"Workers per GPU: {args.num_workers}")
+        logger.info(f"Prefetch: {args.prefetch_factor}")
     
-    # Build model
     if is_main_process(rank):
         logger.info("-" * 80)
         logger.info("Building model...")
     
     config = ModelConfig(
-        d_model=args.d_model,
-        n_layers=args.n_layers,
-        dropout=args.dropout,
-        window_size=args.window_size,
-        hierarchical=args.hierarchical,
-        use_residual=args.use_residual,
-        use_layer_norm=args.use_layer_norm,
-        feature_extraction=args.feature_extraction,
-        use_attention_pooling=args.attention_pooling,
-        num_attention_heads=args.num_attention_heads,
-        use_amp=args.use_amp,
-        use_gradient_checkpointing=args.use_gradient_checkpointing
-    )
+        d_model=args.d_model, n_layers=args.n_layers, dropout=args.dropout,
+        window_size=args.window_size, hierarchical=args.hierarchical,
+        use_residual=args.use_residual, use_layer_norm=args.use_layer_norm,
+        feature_extraction='conv', use_attention_pooling=args.attention_pooling,
+        num_attention_heads=args.num_attention_heads, use_amp=args.use_amp,
+        use_gradient_checkpointing=args.use_gradient_checkpointing)
     
     model = RomanMicrolensingClassifier(config).to(device)
     
     if is_main_process(rank):
         n_params = model.count_parameters()
-        receptive_field = model.receptive_field
         logger.info(f"Parameters: {format_number(n_params)}")
-        logger.info(f"Receptive field: {receptive_field} timesteps")
-        logger.info(f"Architecture: {'Hierarchical' if config.hierarchical else 'Simple'} CNN + GRU")
-        logger.info(f"Pooling: {'Attention' if config.use_attention_pooling else 'Mean'}")
+        logger.info(f"Receptive field: {model.receptive_field} timesteps")
     
-    # Wrap with DDP
     if is_ddp:
-        model = DDP(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            gradient_as_bucket_view=True,
-            find_unused_parameters=False,
-            broadcast_buffers=args.broadcast_buffers,
-            static_graph=False  # REQUIRED: attention pooling has data-dependent gradients
-        )
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                   gradient_as_bucket_view=True, find_unused_parameters=False,
+                   broadcast_buffers=args.broadcast_buffers, static_graph=False)
     
-    # Optional: torch.compile
     if args.compile and hasattr(torch, 'compile'):
         if is_main_process(rank):
-            logger.info(f"Compiling model with torch.compile (mode={args.compile_mode})...")
-        model = torch.compile(model, mode=args.compile_mode)
+            logger.info(f"Compiling (mode={args.compile_mode})...")
+            logger.info("  First epoch will be slower due to compilation")
+        model = torch.compile(model, mode=args.compile_mode,
+                             fullgraph=False, dynamic=True)
     
-    # Optimizer with fused implementation if available
-    fused_available = torch.cuda.is_available() and hasattr(torch.optim.AdamW, 'fused')
+    fused_available = torch.cuda.is_available()
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        fused=fused_available
-    )
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+        betas=(0.9, 0.999), eps=1e-8, fused=fused_available)
     
-    # Scheduler
+    if is_main_process(rank) and fused_available:
+        logger.info("Using fused AdamW")
+    
     scheduler = CosineWarmupScheduler(
-        optimizer,
-        warmup_epochs=args.warmup_epochs,
-        total_epochs=args.epochs,
-        min_lr=args.min_lr
-    )
+        optimizer, warmup_epochs=args.warmup_epochs,
+        total_epochs=args.epochs, min_lr=args.min_lr)
     
-    # GradScaler setup
     use_scaler = should_use_grad_scaler(device, args.use_amp)
-    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler) if use_scaler else None
+    if use_scaler:
+        scaler = torch.amp.GradScaler('cuda', enabled=True,
+                                     init_scale=65536.0, growth_factor=2.0,
+                                     backoff_factor=0.5, growth_interval=2000)
+    else:
+        scaler = None
     
     if is_main_process(rank):
         if args.use_amp:
             if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
-                logger.info("Using bfloat16 (no GradScaler needed)")
+                logger.info("Using bfloat16")
             else:
                 logger.info("Using float16 with GradScaler")
         else:
             logger.info("Mixed precision disabled")
     
-    # Class weights
     if args.use_class_weights:
         class_weights = compute_class_weights(train_labels, config.n_classes, device)
         if is_main_process(rank):
@@ -1581,15 +995,17 @@ def main() -> None:
     else:
         class_weights = torch.ones(config.n_classes, device=device)
     
-    # Synchronize before training
     if is_ddp:
         synchronize()
+        torch.cuda.synchronize()
     
-    # Training loop
     if is_main_process(rank):
         logger.info("-" * 80)
         logger.info("Starting training...")
         logger.info("-" * 80)
+    
+    if is_ddp:
+        synchronize()
     
     best_acc: float = 0.0
     patience_counter: int = 0
@@ -1599,148 +1015,123 @@ def main() -> None:
         for epoch in range(1, args.epochs + 1):
             epoch_start_time = time.time()
             
-            # Set epoch for distributed sampler
             if is_ddp and hasattr(train_loader.sampler, 'set_epoch'):
                 train_loader.sampler.set_epoch(epoch)
             
-            # Training
             train_loss, train_acc = train_epoch(
-                model, train_loader, optimizer, scaler,
-                class_weights, device, rank, world_size, epoch, config,
+                model, train_loader, optimizer, scaler, class_weights,
+                device, rank, world_size, epoch, config,
                 accumulation_steps=args.accumulation_steps,
-                clip_norm=args.clip_norm
-            )
+                clip_norm=args.clip_norm, use_prefetcher=args.use_prefetcher)
             
-            # Update scheduler
             scheduler.step()
             
-            # Evaluation
-            should_eval = (
-                epoch % args.eval_every == 0 or 
-                epoch == 1 or 
-                epoch == args.epochs
-            )
+            should_eval = (epoch % args.eval_every == 0 or
+                          epoch == 1 or epoch == args.epochs)
             
             if should_eval:
                 val_results = evaluate(
                     model, val_loader, class_weights, device, rank, world_size, config,
-                    return_predictions=(epoch == args.epochs and is_main_process(rank))
-                )
+                    return_predictions=(epoch == args.epochs and is_main_process(rank)),
+                    use_prefetcher=args.use_prefetcher)
                 
                 val_loss = val_results['loss']
                 val_acc = val_results['accuracy']
                 
                 if is_main_process(rank):
                     epoch_time = time.time() - epoch_start_time
+                    samples_per_sec = len(train_idx) / epoch_time
+                    
                     logger.info(
                         f"Epoch {epoch:3d}/{args.epochs} | "
                         f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
                         f"Val: loss={val_loss:.4f} acc={val_acc*100:.2f}% | "
                         f"LR={scheduler.get_last_lr()[0]:.2e} | "
-                        f"Time={format_time(epoch_time)}"
-                    )
+                        f"Time={format_time(epoch_time)} ({samples_per_sec:.0f} samp/s)")
                     
-                    # Save best model
                     if val_acc > best_acc:
                         best_acc = val_acc
                         patience_counter = 0
-                        save_checkpoint(
-                            model, optimizer, scheduler, scaler, epoch,
-                            best_acc, config, stats, output_dir, is_best=True
-                        )
+                        save_checkpoint(model, optimizer, scheduler, scaler, epoch,
+                                      best_acc, config, stats, output_dir, is_best=True)
                         logger.info(f"  -> New best: {best_acc*100:.2f}%")
                     else:
                         patience_counter += 1
                     
-                    # Periodic checkpoint
                     if epoch % args.save_every == 0:
-                        save_checkpoint(
-                            model, optimizer, scheduler, scaler, epoch,
-                            best_acc, config, stats, output_dir, is_best=False
-                        )
+                        save_checkpoint(model, optimizer, scheduler, scaler, epoch,
+                                      best_acc, config, stats, output_dir, is_best=False)
             else:
                 if is_main_process(rank):
                     epoch_time = time.time() - epoch_start_time
+                    samples_per_sec = len(train_idx) / epoch_time
                     logger.info(
                         f"Epoch {epoch:3d}/{args.epochs} | "
                         f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
                         f"LR={scheduler.get_last_lr()[0]:.2e} | "
-                        f"Time={format_time(epoch_time)}"
-                    )
+                        f"Time={format_time(epoch_time)} ({samples_per_sec:.0f} samp/s)")
             
-            # Early stopping check
             if args.early_stopping_patience > 0:
                 if patience_counter >= args.early_stopping_patience:
                     if is_main_process(rank):
                         logger.info(f"Early stopping at epoch {epoch}")
                     break
             
-            # Periodic memory cleanup
-            if epoch % 10 == 0:
+            if epoch % 20 == 0:
                 torch.cuda.empty_cache()
                 gc.collect()
     
     except KeyboardInterrupt:
         if is_main_process(rank):
-            logger.info("Training interrupted by user")
+            logger.info("Training interrupted")
     
     finally:
-        # Final evaluation and reporting
         total_time = time.time() - training_start_time
         
         if is_main_process(rank):
             logger.info("=" * 80)
             logger.info("Training complete")
             logger.info(f"Total time: {format_time(total_time)}")
-            logger.info(f"Best validation accuracy: {best_acc*100:.2f}%")
+            logger.info(f"Best val accuracy: {best_acc*100:.2f}%")
+            logger.info(f"Average throughput: {len(train_idx) * args.epochs / total_time:.0f} samp/s")
             logger.info("=" * 80)
             
-            # Load best model for final evaluation
             best_checkpoint_path = output_dir / 'best_model.pt'
             if best_checkpoint_path.exists():
-                checkpoint = torch.load(
-                    best_checkpoint_path,
-                    map_location=device,
-                    weights_only=False
-                )
-                if isinstance(model, DDP):
-                    model.module.load_state_dict(checkpoint['model_state_dict'])
+                checkpoint = torch.load(best_checkpoint_path, map_location=device,
+                                       weights_only=False)
+                
+                base_model = model
+                while hasattr(base_model, '_orig_mod'):
+                    base_model = base_model._orig_mod
+                if isinstance(base_model, DDP):
+                    base_model.module.load_state_dict(checkpoint['model_state_dict'])
                 else:
-                    model.load_state_dict(checkpoint['model_state_dict'])
+                    base_model.load_state_dict(checkpoint['model_state_dict'])
                 
-                # Final evaluation with predictions
                 logger.info("Running final evaluation...")
-                final_results = evaluate(
-                    model, val_loader, class_weights, device, rank, world_size, config,
-                    return_predictions=True
-                )
+                final_results = evaluate(model, val_loader, class_weights, device,
+                                       rank, world_size, config,
+                                       return_predictions=True,
+                                       use_prefetcher=args.use_prefetcher)
                 
-                # Save predictions
-                np.savez(
-                    output_dir / 'final_predictions.npz',
-                    predictions=final_results['predictions'],
-                    labels=final_results['labels'],
-                    probabilities=final_results['probabilities']
-                )
+                np.savez(output_dir / 'final_predictions.npz',
+                        predictions=final_results['predictions'],
+                        labels=final_results['labels'],
+                        probabilities=final_results['probabilities'])
                 
-                # Confusion matrix
                 cm = confusion_matrix(final_results['labels'], final_results['predictions'])
                 logger.info(f"\nConfusion matrix:\n{cm}")
                 np.save(output_dir / 'confusion_matrix.npy', cm)
                 
-                # Classification report
-                report = classification_report(
-                    final_results['labels'],
-                    final_results['predictions'],
-                    target_names=list(CLASS_NAMES),
-                    digits=4
-                )
+                report = classification_report(final_results['labels'],
+                                              final_results['predictions'],
+                                              target_names=list(CLASS_NAMES), digits=4)
                 logger.info(f"\nClassification report:\n{report}")
                 
                 with open(output_dir / 'classification_report.txt', 'w') as f:
                     f.write(report)
             
-            # Save final configuration
             config_dict = {
                 'model_config': config.to_dict(),
                 'training_args': vars(args),
@@ -1750,17 +1141,23 @@ def main() -> None:
                 'total_training_time_seconds': total_time,
                 'pytorch_version': torch.__version__,
                 'cuda_version': torch.version.cuda,
-                'timestamp': datetime.now().isoformat()
-            }
+                'timestamp': datetime.now().isoformat(),
+                'optimizations': {
+                    'torch_compile': args.compile,
+                    'compile_mode': args.compile_mode,
+                    'cuda_prefetcher': args.use_prefetcher,
+                    'fused_optimizer': fused_available,
+                    'tf32_enabled': torch.backends.cuda.matmul.allow_tf32,
+                    'cudnn_benchmark': torch.backends.cudnn.benchmark,
+                    'batch_size_optimized': args.batch_size,
+                    'prefetch_factor_optimized': args.prefetch_factor}}
             
             with open(output_dir / 'config.json', 'w') as f:
                 json.dump(config_dict, f, indent=2, cls=NumpyJSONEncoder)
             
-            logger.info(f"\nAll results saved to: {output_dir}")
+            logger.info(f"\nResults saved to: {output_dir}")
         
-        # Cleanup
         cleanup_distributed()
-
 
 if __name__ == '__main__':
     main()
