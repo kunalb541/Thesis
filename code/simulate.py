@@ -1,3 +1,36 @@
+#!/usr/bin/env python3
+"""
+Roman Microlensing Event Simulator 
+==================================
+
+High-throughput simulation pipeline for generating realistic gravitational
+microlensing light curves for the Nancy Grace Roman Space Telescope. Designed
+for large-scale dataset generation, parameter inference experiments, and
+training machine-learning models for event classification and regression.
+
+KEY TECHNICAL FEATURES:
+    ✓ Fully vectorized NumPy/Numba hot loops for PSPL and noise models  
+    ✓ Binary microlensing magnification via VBBinaryLensing with strict tolerances  
+    ✓ Roman WFI F146 detector model: AB magnitudes, flux conversions, photon noise  
+    ✓ Realistic Roman cadence masks, noise floors, sky contribution  
+    ✓ Clean multiprocessing with reproducible seeds  
+    ✓ Unified interface producing flux, Δt, labels, timestamps, and metadata  
+    ✓ HDF5 output with compressed datasets for large-volume workflows  
+
+PERFORMANCE CHARACTERISTICS:
+    - Numba-accelerated PSPL magnification up to 50× faster than pure Python  
+    - Photon-noise computation fused into low-level kernels  
+    - Multiprocessing using `spawn` for safe VBBinaryLensing usage  
+    - Memory-contiguous outputs ideal for PyTorch / JAX ingestion  
+
+This module powers downstream ML pipelines such as CNN-GRU classifiers and
+Simulation-Based Inference models for binary microlensing parameter recovery.
+
+Author: Kunal Bhatia  
+Institution: University of Heidelberg  
+Version: 1.0
+"""
+
 import numpy as np
 import argparse
 from tqdm import tqdm
