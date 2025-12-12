@@ -1,0 +1,32 @@
+[
+  {
+    "fraction": 0.2,
+    "max_sequence_length": 463,
+    "accuracy": 0.359,
+    "f1_macro": 0.22892802557746417
+  },
+  {
+    "fraction": 0.4,
+    "max_sequence_length": 927,
+    "accuracy": 0.577,
+    "f1_macro": 0.557255055761708
+  },
+  {
+    "fraction": 0.6000000000000001,
+    "max_sequence_length": 1390,
+    "accuracy": 0.763,
+    "f1_macro": 0.7633173501127377
+  },
+  {
+    "fraction": 0.8,
+    "max_sequence_length": 1854,
+    "accuracy": 0.955,
+    "f1_macro": 0.9551111493518517
+  },
+  {
+    "fraction": 1.0,
+    "max_sequence_length": 2318,
+    "accuracy": 0.974,
+    "f1_macro": 0.9739687475367184
+  }
+]
