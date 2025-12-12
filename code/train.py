@@ -564,47 +564,32 @@ def main():
     
     set_seed_everywhere(SEED, rank)
     
-    # Load data
+    # LAZY Load and Split
     if rank == 0:
-        logger.info(f"Loading data: {args.data}")
+        logger.info(f"Loading data indices, splitting, and computing stats: {args.data}")
     
-    data = load_compat(args.data)
-    flux = data['flux']
-    delta_t = data['delta_t']
-    labels = data['labels']
+    # The new function loads only labels, splits indices, and computes stats fast.
+    train_idx, val_idx, stats = load_labels_and_split(Path(args.data))
     
     if rank == 0:
-        logger.info(f"Dataset size: {len(labels)} samples")
-    
-    # Split
-    indices = np.arange(len(labels))
-    train_idx, val_idx = train_test_split(
-        indices, test_size=0.2, random_state=SEED, stratify=labels
-    )
-    
-    flux_train = flux[train_idx]
-    delta_t_train = delta_t[train_idx]
-    labels_train = labels[train_idx]
-    
-    flux_val = flux[val_idx]
-    delta_t_val = delta_t[val_idx]
-    labels_val = labels[val_idx]
-    
-    if rank == 0:
-        logger.info(f"Split: train={len(labels_train)}, val={len(labels_val)}")
-        
-        # Class distribution
-        unique_train, counts_train = np.unique(labels_train, return_counts=True)
-        logger.info(f"Training class distribution: {dict(zip(unique_train, counts_train))}")
-    
-    # Normalization
-    stats = compute_normalization_stats(flux_train)
-    if rank == 0:
+        logger.info(f"Dataset size: {len(train_idx) + len(val_idx)} samples")
+        logger.info(f"Split: train={len(train_idx)}, val={len(val_idx)}")
         logger.info(f"Normalization: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
-    
+        
+        # --- NOTE: Class distribution logging must be moved or done inside the new load_labels_and_split
+        # I have moved the class distribution logging logic into load_labels_and_split above.
+        
     # Datasets
-    train_dataset = MicrolensingDataset(flux_train, delta_t_train, labels_train, stats)
-    val_dataset = MicrolensingDataset(flux_val, delta_t_val, labels_val, stats)
+    # Use the new lazy dataset, which holds the file path and indices, not the data itself.
+    train_dataset = MicrolensingLazyDataset(Path(args.data), train_idx, stats)
+    val_dataset = MicrolensingLazyDataset(Path(args.data), val_idx, stats)
+    
+    # --- IMPORTANT: Get all labels for class weights ---
+    # We must load all labels from the training set *now* for class weights, 
+    # as compute_class_weights needs them.
+    with h5py.File(args.data, 'r') as f:
+        all_labels = f['labels'][:]
+    labels_train_for_weights = all_labels[train_idx]
     
     # Samplers
     if is_ddp:
@@ -695,9 +680,9 @@ def main():
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
-    # Class weights
     if args.use_class_weights:
-        class_weights = compute_class_weights(labels_train, device)
+        # Use the labels loaded specifically for weight computation
+        class_weights = compute_class_weights(labels_train_for_weights, device) 
         if rank == 0:
             logger.info(f"Class weights: {class_weights.cpu().numpy()}")
     else:
