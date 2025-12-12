@@ -19,6 +19,7 @@ import warnings
 import random
 import h5py
 import os
+import gc
 from typing import Dict, Any, Tuple, Optional
 
 try:
@@ -31,33 +32,18 @@ try:
 
 except ImportError as e:
     print(f"Error importing model: {e}")
-    def count_parameters(model): return 0
+    sys.exit(1)
 
 warnings.filterwarnings("ignore")
 
-def load_compat(path):
-    """Hybrid loader for NPZ and HDF5."""
-    import h5py
-    import numpy as np
-    path = str(path)
-    if path.endswith('.h5') or path.endswith('.hdf5'):
-        with h5py.File(path, 'r') as f:
-            # Load all datasets into memory to mimic np.load dictionary behavior
-            return {k: f[k][:] for k in f.keys()}
-    return np.load(path, allow_pickle=True)
-
-
-
 
 # =============================================================================
-# TRAINING CONFIGURATION
+# CONFIGURATION
 # =============================================================================
 CLIP_NORM = 1.0
 DEFAULT_LR = 3e-4
 WARMUP_EPOCHS = 5
 SEED = 42
-
-# Physical constants from simulate.py
 AB_ZEROPOINT_JY = 3631.0
 MISSION_DURATION_DAYS = 1826.25
 
@@ -74,30 +60,36 @@ class NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
+def load_compat(path):
+    """Load data from NPZ or HDF5 format."""
+    path = str(path)
+    if path.endswith('.h5') or path.endswith('.hdf5'):
+        with h5py.File(path, 'r') as f:
+            return {k: f[k][:] for k in f.keys()}
+    return np.load(path, allow_pickle=True)
+
+
 # =============================================================================
-# DISTRIBUTED TRAINING SETUP
+# DISTRIBUTED SETUP
 # =============================================================================
 def setup_distributed() -> Tuple[int, int, int, bool]:
-    """Initialize distributed training if environment variables are set."""
+    """Initialize distributed training environment."""
     if 'RANK' in os.environ:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         
-        print(f"[Rank {rank}] Setting up distributed training: world_size={world_size}, local_rank={local_rank}", flush=True)
+        if rank == 0:
+            print(f"Initializing distributed: {world_size} processes", flush=True)
         
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
-            print(f"[Rank {rank}] CUDA device set to {local_rank}", flush=True)
             
-            print(f"[Rank {rank}] Initializing process group...", flush=True)
-            # Add explicit timeout for large multi-node setups
             dist.init_process_group(
                 backend='nccl', 
                 init_method='env://',
-                timeout=timedelta(seconds=1800)  # 30 minutes for 12 nodes
+                timeout=timedelta(seconds=1800)
             )
-            print(f"[Rank {rank}] Process group initialized successfully!", flush=True)
             
             # Performance optimizations
             torch.backends.cudnn.benchmark = True
@@ -105,84 +97,67 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             
+            # Memory optimizations
+            torch.cuda.empty_cache()
+            gc.collect()
+            
             return rank, local_rank, world_size, True
     
     return 0, 0, 1, False
 
 
 def setup_logging(rank: int, output_dir: Path):
-    """Setup logging to both console and file."""
+    """Configure logging system."""
     logger = logging.getLogger("TRAIN")
-    logger.setLevel(logging.INFO)
-    
-    # Clear existing handlers
-    logger.handlers.clear()
-    
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
     
     if rank == 0:
-        # File handler only for rank 0
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        
         file_handler = logging.FileHandler(output_dir / "training.log")
         file_handler.setLevel(logging.INFO)
-        logger.addHandler(file_handler)
         
         formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+        console_handler.setFormatter(formatter)
+        file_handler.setFormatter(formatter)
+        
+        logger.addHandler(console_handler)
+        logger.addHandler(file_handler)
     else:
-        formatter = logging.Formatter('%(asctime)s | Rank %(rank)s | %(levelname)s | %(message)s')
-    
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    if rank != 0:
-        logger = logging.LoggerAdapter(logger, {'rank': rank})
+        logger.setLevel(logging.CRITICAL)
     
     return logger
 
 
 def set_seed_everywhere(seed: int, rank: int = 0) -> None:
-    """
-    GOD MODE: Set all random seeds for perfect reproducibility.
-    
-    Args:
-        seed: Base random seed
-        rank: Process rank (for rank-specific seeds if needed)
-    """
-    # Python
+    """Set random seeds for reproducibility."""
     random.seed(seed + rank)
-    
-    # NumPy
     np.random.seed(seed + rank)
-    
-    # PyTorch CPU
     torch.manual_seed(seed + rank)
     
-    # PyTorch CUDA
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed + rank)
         torch.cuda.manual_seed_all(seed + rank)
     
-    # CuDNN
-    torch.backends.cudnn.deterministic = False  # Keep False for performance
-    torch.backends.cudnn.benchmark = True  # Auto-tune kernels
-    
-    if rank == 0:
-        print(f"🎲 GOD MODE: All random seeds set to {seed}")
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 # =============================================================================
-# DATASET WITH PHYSICAL REALISM
+# DATASET
 # =============================================================================
 class MicrolensingDataset(Dataset):
     """
-    Dataset for Roman Space Telescope microlensing events.
+    Roman Space Telescope microlensing event dataset.
     
     Handles:
-    - Physical AB magnitude system
-    - NaN values from flux-to-magnitude conversion
-    - Causal delta_t encoding
-    - Proper normalization (Median/IQR)
+    - AB magnitude system normalization
+    - NaN values from photometric conversions
+    - Causal temporal encoding
+    - Variable sequence lengths
     """
     
     def __init__(
@@ -193,24 +168,13 @@ class MicrolensingDataset(Dataset):
         stats: Optional[Dict] = None,
         handle_nans: str = 'zero'
     ):
-        """
-        Args:
-            flux: (N, T) magnitude array (AB system)
-            delta_t: (N, T) causal time differences
-            labels: (N,) class labels
-            stats: Dict with 'median' and 'iqr' for normalization
-            handle_nans: Strategy for NaN handling
-        """
-        # Convert to tensors
         self.flux = torch.from_numpy(np.ascontiguousarray(flux)).float()
         self.delta_t = torch.from_numpy(np.ascontiguousarray(delta_t)).float()
         self.labels = torch.from_numpy(np.ascontiguousarray(labels)).long()
         
-        # Identify valid observations (non-zero, non-NaN)
         self.padding_mask = (~torch.isnan(self.flux)) & (self.flux != 0.0)
         self.lengths = self.padding_mask.sum(dim=1).long().clamp(min=1)
         
-        # Handle NaN values
         if handle_nans == 'zero':
             self.flux = torch.nan_to_num(self.flux, nan=0.0)
         elif handle_nans == 'median':
@@ -224,10 +188,8 @@ class MicrolensingDataset(Dataset):
                         self.flux[i]
                     )
         
-        # Handle delta_t NaNs
         self.delta_t = torch.nan_to_num(self.delta_t, nan=0.0)
         
-        # Apply normalization if statistics provided
         if stats is not None:
             median = stats['median']
             iqr = stats['iqr']
@@ -254,16 +216,7 @@ class MicrolensingDataset(Dataset):
 
 
 def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> Dict[str, float]:
-    """
-    Compute median and IQR for flux normalization.
-    
-    Args:
-        flux: (N, T) flux array
-        sample_size: Number of events to sample for statistics
-        
-    Returns:
-        Dict with 'median' and 'iqr'
-    """
+    """Compute robust normalization statistics using median and IQR."""
     sample_flux = flux[:sample_size]
     valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
     
@@ -281,7 +234,7 @@ def compute_normalization_stats(flux: np.ndarray, sample_size: int = 10000) -> D
 
 
 def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Tensor:
-    """Compute class weights for balanced training."""
+    """Compute inverse frequency class weights for balanced training."""
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     weights = total / (len(unique) * counts)
@@ -291,7 +244,7 @@ def compute_class_weights(labels: np.ndarray, device: torch.device) -> torch.Ten
 
 
 # =============================================================================
-# TRAINING FUNCTIONS
+# TRAINING LOOP
 # =============================================================================
 def train_epoch(
     model: nn.Module,
@@ -303,9 +256,11 @@ def train_epoch(
     rank: int,
     epoch: int,
     logger: logging.Logger,
-    config: ModelConfig
+    config: ModelConfig,
+    accumulation_steps: int = 1,
+    clip_norm: float = CLIP_NORM
 ) -> Tuple[float, float]:
-    """Train for one epoch."""
+    """Execute one training epoch with gradient accumulation."""
     model.train()
     
     total_loss = 0.0
@@ -314,61 +269,51 @@ def train_epoch(
     
     iterator = tqdm(loader, desc=f"Epoch {epoch}", disable=(rank != 0))
     
+    optimizer.zero_grad(set_to_none=True)
+    
     for batch_idx, (flux, delta_t, lengths, labels) in enumerate(iterator):
-        # Move to device
         flux = flux.to(device, non_blocking=True)
         delta_t = delta_t.to(device, non_blocking=True)
         lengths = lengths.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         
-        # Forward pass with AMP
         with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
             output = model(flux, delta_t, lengths=lengths)
-            
-            if config.hierarchical:
-                loss = F.cross_entropy(
-                    output['logits'], 
-                    labels, 
-                    weight=class_weights
-                )
-            else:
-                loss = F.cross_entropy(
-                    output['logits'],
-                    labels,
-                    weight=class_weights
-                )
-        
-        # Backward pass
-        optimizer.zero_grad(set_to_none=True)  # GOD MODE: Memory optimization
+            loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
+            loss = loss / accumulation_steps
         
         if scaler is not None:
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
-            scaler.step(optimizer)
-            scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
-            optimizer.step()
         
-        # Metrics
+        if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                optimizer.step()
+            
+            optimizer.zero_grad(set_to_none=True)
+        
         with torch.no_grad():
             pred = output['probs'].argmax(dim=-1)
             correct += (pred == labels).sum().item()
             total += labels.size(0)
-            total_loss += loss.item() * labels.size(0)
+            total_loss += (loss.item() * accumulation_steps) * labels.size(0)
         
-        if rank == 0:
+        if rank == 0 and batch_idx % 10 == 0:
             iterator.set_postfix({
-                'loss': loss.item(),
-                'acc': 100.0 * correct / total
+                'loss': f'{loss.item() * accumulation_steps:.4f}',
+                'acc': f'{100.0 * correct / total:.2f}%'
             })
     
-    avg_loss = total_loss / total
-    accuracy = correct / total
+    torch.cuda.empty_cache()
     
-    return avg_loss, accuracy
+    return total_loss / total, correct / total
 
 
 def evaluate(
@@ -380,7 +325,7 @@ def evaluate(
     config: ModelConfig,
     return_predictions: bool = False
 ) -> Dict[str, Any]:
-    """Evaluate model."""
+    """Evaluate model on validation set."""
     model.eval()
     
     total_loss = 0.0
@@ -400,19 +345,7 @@ def evaluate(
             
             with torch.amp.autocast(device_type="cuda", enabled=config.use_amp, dtype=torch.bfloat16):
                 output = model(flux, delta_t, lengths=lengths)
-                
-                if config.hierarchical:
-                    loss = F.cross_entropy(
-                        output['logits'],
-                        labels,
-                        weight=class_weights
-                    )
-                else:
-                    loss = F.cross_entropy(
-                        output['logits'],
-                        labels,
-                        weight=class_weights
-                    )
+                loss = F.cross_entropy(output['logits'], labels, weight=class_weights)
             
             pred = output['probs'].argmax(dim=-1)
             correct += (pred == labels).sum().item()
@@ -420,19 +353,19 @@ def evaluate(
             total_loss += loss.item() * labels.size(0)
             
             if return_predictions:
-                all_preds.extend(pred.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-                all_probs.extend(output['probs'].cpu().numpy())
+                all_preds.append(pred.cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+                all_probs.append(output['probs'].cpu().numpy())
     
     results = {
         'loss': total_loss / total,
-        'accuracy': correct / total,
+        'accuracy': correct / total
     }
     
     if return_predictions:
-        results['predictions'] = np.array(all_preds)
-        results['labels'] = np.array(all_labels)
-        results['probabilities'] = np.array(all_probs)
+        results['predictions'] = np.concatenate(all_preds)
+        results['labels'] = np.concatenate(all_labels)
+        results['probabilities'] = np.concatenate(all_probs)
     
     return results
 
@@ -449,19 +382,18 @@ def save_checkpoint(
     is_best: bool = False
 ) -> None:
     """Save model checkpoint."""
-    # GOD MODE: Strip DDP wrapper for clean save
     if isinstance(model, DDP):
         model_state = model.module.state_dict()
     else:
         model_state = model.state_dict()
     
     checkpoint = {
+        'epoch': epoch,
         'model_state_dict': model_state,
         'optimizer_state_dict': optimizer.state_dict(),
-        'epoch': epoch,
-        'best_accuracy': best_acc,
+        'best_acc': best_acc,
         'config': config.__dict__,
-        'normalization_stats': stats,
+        'stats': stats
     }
     
     if scaler is not None:
@@ -474,121 +406,145 @@ def save_checkpoint(
 
 
 # =============================================================================
-# MAIN TRAINING LOOP
+# MAIN
 # =============================================================================
 def main():
     parser = argparse.ArgumentParser(description='Train Roman microlensing classifier')
     
-    # Data arguments
-    parser.add_argument('--data', type=str, required=True, help='Path to training data (.npz)')
-    parser.add_argument('--output-dir', type=str, default='../results', help='Output directory')
+    # Data
+    parser.add_argument('--data', type=str, required=True, help='Path to training data')
+    parser.add_argument('--output-dir', type=str, default='experiments', help='Output directory')
     parser.add_argument('--experiment-name', type=str, default=None, help='Experiment name')
     
-    # Model arguments
-    parser.add_argument('--d-model', type=int, default=64, help='Hidden dimension')
-    parser.add_argument('--n-layers', type=int, default=2, help='Number of GRU layers')
-    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    # Model architecture
+    parser.add_argument('--d-model', type=int, default=256, help='Hidden dimension')
+    parser.add_argument('--n-layers', type=int, default=4, help='Number of recurrent layers')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout probability')
+    parser.add_argument('--window-size', type=int, default=5, help='Causal window size')
     
-    # Hierarchical classification (default: True)
-    parser.add_argument('--hierarchical', dest='hierarchical',
-                        action='store_true', help='Enable hierarchical classification')
-    parser.add_argument('--no-hierarchical', dest='hierarchical',
-                        action='store_false', help='Disable hierarchical classification')
+    # Model variants
+    parser.add_argument('--hierarchical', dest='hierarchical', action='store_true', 
+                        help='Use hierarchical classification')
+    parser.add_argument('--no-hierarchical', dest='hierarchical', action='store_false')
     parser.set_defaults(hierarchical=True)
     
-    # Feature extraction (default: conv)
-    parser.add_argument('--feature-extraction', dest='feature_extraction',
-                        type=str, choices=['mlp', 'conv'], default='conv',
-                        help='Feature extraction method (default: conv)')
-    parser.add_argument('--no-feature-extraction', dest='feature_extraction',
-                        action='store_const', const=None,
-                        help='Disable feature extraction entirely')
+    parser.add_argument('--feature-extraction', type=str, choices=['conv', 'mlp'], default='conv',
+                        help='Feature extraction method')
     
-    # Attention pooling (default: True)
-    parser.add_argument('--use-attention-pooling', dest='attention_pooling',
-                        action='store_true', help='Enable attention pooling')
-    parser.add_argument('--no-attention-pooling', dest='attention_pooling',
-                        action='store_false', help='Disable attention pooling')
+    parser.add_argument('--attention-pooling', dest='attention_pooling', action='store_true',
+                        help='Use attention pooling')
+    parser.add_argument('--no-attention-pooling', dest='attention_pooling', action='store_false')
     parser.set_defaults(attention_pooling=True)
     
-    # Training arguments
+    parser.add_argument('--use-residual', dest='use_residual', action='store_true',
+                        help='Use residual connections')
+    parser.add_argument('--no-residual', dest='use_residual', action='store_false')
+    parser.set_defaults(use_residual=True)
+    
+    parser.add_argument('--use-layer-norm', dest='use_layer_norm', action='store_true',
+                        help='Use layer normalization')
+    parser.add_argument('--no-layer-norm', dest='use_layer_norm', action='store_false')
+    parser.set_defaults(use_layer_norm=True)
+    
+    # Training
     parser.add_argument('--batch-size', type=int, default=256, help='Batch size per GPU')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=DEFAULT_LR, help='Learning rate')
-    parser.add_argument('--weight-decay', type=float, default=0.01, help='Weight decay')
-    parser.add_argument('--warmup-epochs', type=int, default=WARMUP_EPOCHS, help='Warmup epochs')
-    parser.add_argument('--clip-norm', type=float, default=CLIP_NORM, help='Gradient clipping')
-    parser.add_argument('--use-amp', action='store_true', default=True, help='Use automatic mixed precision')
-    parser.add_argument('--gradient-accumulation-steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--accumulation-steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--weight-decay', type=float, default=1e-3, help='Weight decay')
+    parser.add_argument('--warmup-epochs', type=int, default=5, help='Warmup epochs')
+    parser.add_argument('--clip-norm', type=float, default=1.0, help='Gradient clipping norm')
     
-    # Optimization arguments
-    parser.add_argument('--use-class-weights', action='store_true', help='Use class weighting')
-    parser.add_argument('--compile', action='store_true', help='Use torch.compile (PyTorch 2.0+)')
+    # Optimization
+    parser.add_argument('--use-amp', dest='use_amp', action='store_true', 
+                        help='Use automatic mixed precision')
+    parser.add_argument('--no-amp', dest='use_amp', action='store_false')
+    parser.set_defaults(use_amp=True)
     
-    # Evaluation arguments
+    parser.add_argument('--use-gradient-checkpointing', dest='use_gradient_checkpointing', 
+                        action='store_true', help='Use gradient checkpointing')
+    parser.add_argument('--no-gradient-checkpointing', dest='use_gradient_checkpointing', 
+                        action='store_false')
+    parser.set_defaults(use_gradient_checkpointing=True)
+    
+    parser.add_argument('--use-class-weights', action='store_true', default=True,
+                        help='Use class weighting')
+    parser.add_argument('--compile', action='store_true', default=False,
+                        help='Use torch.compile')
+    
+    # Evaluation
     parser.add_argument('--eval-every', type=int, default=5, help='Evaluate every N epochs')
     parser.add_argument('--save-every', type=int, default=10, help='Save checkpoint every N epochs')
-    parser.add_argument('--early-stopping-patience', type=int, default=0, help='Early stopping patience (0=disabled)')
+    parser.add_argument('--early-stopping-patience', type=int, default=0, 
+                        help='Early stopping patience (0=disabled)')
     
     args = parser.parse_args()
     
-    # Setup distributed training
+    # Setup
     rank, local_rank, world_size, is_ddp = setup_distributed()
     device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
-    # Create output directory
     if args.experiment_name is None:
-        args.experiment_name = f"gru_d{args.d_model}_l{args.n_layers}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        args.experiment_name = f"d{args.d_model}_l{args.n_layers}_{timestamp}"
     
     output_dir = Path(args.output_dir) / args.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Setup logging
+    if is_ddp:
+        dist.barrier()
+    
     logger = setup_logging(rank, output_dir)
     
-    # Set random seed
+    if rank == 0:
+        logger.info(f"Random seed: {SEED}")
+    
     set_seed_everywhere(SEED, rank)
     
     # Load data
     if rank == 0:
-        logger.info(f"Loading data from {args.data}")
+        logger.info(f"Loading data: {args.data}")
     
-    print(f"[Rank {rank}] Loading data...", flush=True)
     data = load_compat(args.data)
     flux = data['flux']
     delta_t = data['delta_t']
     labels = data['labels']
-    print(f"[Rank {rank}] Data loaded: {len(flux)} samples", flush=True)
-    
-    # Synchronize all processes after data loading
-    if is_ddp:
-        print(f"[Rank {rank}] Waiting at barrier after data load...", flush=True)
-        dist.barrier()
-        print(f"[Rank {rank}] Passed data load barrier", flush=True)
-    
-    # GOD MODE: Validate batch size for DDP
-    if is_ddp and args.batch_size * world_size > len(flux):
-        logger.warning(f"Batch size too large: {args.batch_size} * {world_size} GPUs > {len(flux)} samples")
-    
-    # Split data
-    flux_train, flux_val, delta_t_train, delta_t_val, labels_train, labels_val = train_test_split(
-        flux, delta_t, labels, test_size=0.2, random_state=SEED, stratify=labels
-    )
-    
-    # Compute normalization stats
-    stats = compute_normalization_stats(flux_train)
     
     if rank == 0:
-        logger.info(f"Normalization stats: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
+        logger.info(f"Dataset size: {len(labels)} samples")
     
-    # Create datasets
-    print(f"[Rank {rank}] Creating datasets...", flush=True)
+    # Split
+    indices = np.arange(len(labels))
+    train_idx, val_idx = train_test_split(
+        indices, test_size=0.2, random_state=SEED, stratify=labels
+    )
+    
+    flux_train = flux[train_idx]
+    delta_t_train = delta_t[train_idx]
+    labels_train = labels[train_idx]
+    
+    flux_val = flux[val_idx]
+    delta_t_val = delta_t[val_idx]
+    labels_val = labels[val_idx]
+    
+    if rank == 0:
+        logger.info(f"Split: train={len(labels_train)}, val={len(labels_val)}")
+        
+        # Class distribution
+        unique_train, counts_train = np.unique(labels_train, return_counts=True)
+        logger.info(f"Training class distribution: {dict(zip(unique_train, counts_train))}")
+    
+    # Normalization
+    stats = compute_normalization_stats(flux_train)
+    if rank == 0:
+        logger.info(f"Normalization: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
+    
+    # Datasets
     train_dataset = MicrolensingDataset(flux_train, delta_t_train, labels_train, stats)
     val_dataset = MicrolensingDataset(flux_val, delta_t_val, labels_val, stats)
-    print(f"[Rank {rank}] Datasets created", flush=True)
     
-    # Create dataloaders
-    print(f"[Rank {rank}] Creating dataloaders...", flush=True)
+    # Samplers
     if is_ddp:
         train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=SEED)
         val_sampler = DistributedSampler(val_dataset, shuffle=False)
@@ -596,6 +552,7 @@ def main():
         train_sampler = None
         val_sampler = None
     
+    # Loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -615,51 +572,50 @@ def main():
         pin_memory=True,
         persistent_workers=False
     )
-    print(f"[Rank {rank}] Dataloaders created", flush=True)
     
-    # Create model
-    print(f"[Rank {rank}] Creating model...", flush=True)
+    # Model
     config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
         dropout=args.dropout,
+        window_size=args.window_size,
         hierarchical=args.hierarchical,
+        use_residual=args.use_residual,
+        use_layer_norm=args.use_layer_norm,
         feature_extraction=args.feature_extraction,
         use_attention_pooling=args.attention_pooling,
         use_amp=args.use_amp,
-        use_gradient_checkpointing=True
+        use_gradient_checkpointing=args.use_gradient_checkpointing
     )
     
     model = RomanMicrolensingGRU(config, dtype=torch.float32).to(device)
-    print(f"[Rank {rank}] Model created and moved to device", flush=True)
     
     if rank == 0:
-        logger.info(f"Model parameters: {count_parameters(model):,}")
-        logger.info(f"Configuration: {config}")
+        n_params = count_parameters(model)
+        logger.info(f"Model parameters: {n_params:,}")
+        logger.info(f"Architecture: {config}")
+        
+        effective_batch = args.batch_size * args.accumulation_steps * world_size
+        logger.info(f"Effective batch size: {effective_batch}")
     
-    # Wrap in DDP
+    # DDP
     if is_ddp:
-        print(f"[Rank {rank}] Wrapping model in DDP...", flush=True)
-        # GOD MODE: broadcast_buffers defaults to True
-        # Set to False if model has complex non-learnable buffers for efficiency
         model = DDP(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
             gradient_as_bucket_view=True,
             find_unused_parameters=False,
-            broadcast_buffers=True  # Set False for efficiency if buffers are deterministic
+            broadcast_buffers=True
         )
-        print(f"[Rank {rank}] Model wrapped in DDP successfully", flush=True)
     
-    # Compile model
+    # Compile
     if args.compile and hasattr(torch, 'compile'):
         if rank == 0:
-            logger.info("Compiling model with torch.compile...")
-        model = torch.compile(model)
+            logger.info("Compiling model...")
+        model = torch.compile(model, mode='default')
     
-    # Optimizer and scheduler
-    print(f"[Rank {rank}] Creating optimizer and scheduler...", flush=True)
+    # Optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -667,18 +623,15 @@ def main():
         betas=(0.9, 0.999)
     )
     
-    # GOD MODE: BF16 doesn't need GradScaler (only FP16 does)
-    # We use torch.bfloat16 which has wider dynamic range
-    scaler = None  # No gradient scaling needed for BF16
+    scaler = None
     
-    # Learning rate scheduler
+    # Scheduler
     def lr_lambda(epoch):
         if epoch < args.warmup_epochs:
             return (epoch + 1) / args.warmup_epochs
         return 1.0
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    print(f"[Rank {rank}] Optimizer and scheduler created", flush=True)
     
     # Class weights
     if args.use_class_weights:
@@ -688,36 +641,31 @@ def main():
     else:
         class_weights = torch.ones(3, device=device)
     
-    # Final barrier before training
     if is_ddp:
-        print(f"[Rank {rank}] Waiting at barrier before training...", flush=True)
         dist.barrier()
-        print(f"[Rank {rank}] All processes ready to train!", flush=True)
     
-    # Training loop
+    # Training
     if rank == 0:
         logger.info("=" * 80)
-        logger.info("STARTING TRAINING")
+        logger.info("Training started")
         logger.info("=" * 80)
     
     best_acc = 0.0
     patience_counter = 0
     
     for epoch in range(1, args.epochs + 1):
-        # Set epoch for distributed sampler
         if is_ddp:
             train_loader.sampler.set_epoch(epoch)
         
-        # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, optimizer, scaler,
-            class_weights, device, rank, epoch, logger, config
+            class_weights, device, rank, epoch, logger, config,
+            accumulation_steps=args.accumulation_steps,
+            clip_norm=args.clip_norm
         )
         
-        # Step scheduler
         scheduler.step()
         
-        # Evaluate
         should_eval = (epoch % args.eval_every == 0) or (epoch == 1) or (epoch == args.epochs)
         
         if should_eval:
@@ -726,31 +674,27 @@ def main():
                 return_predictions=(epoch == args.epochs and rank == 0)
             )
             
-            val_loss = val_results['loss']
-            val_acc = val_results['accuracy']
+            val_loss, val_acc = val_results['loss'], val_results['accuracy']
             
             if rank == 0:
                 logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
-                    f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
-                    f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | "
-                    f"LR: {scheduler.get_last_lr()[0]:.2e}"
+                    f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
+                    f"Val: loss={val_loss:.4f} acc={val_acc*100:.2f}% | "
+                    f"LR={scheduler.get_last_lr()[0]:.2e}"
                 )
                 
-                # Save best model
                 if val_acc > best_acc:
                     best_acc = val_acc
                     patience_counter = 0
-                    
                     save_checkpoint(
                         model, optimizer, scaler, epoch, best_acc,
                         config, stats, output_dir, is_best=True
                     )
-                    logger.info(f"  New best accuracy: {best_acc:.4f}")
+                    logger.info(f"New best: {best_acc*100:.2f}%")
                 else:
                     patience_counter += 1
                 
-                # Regular checkpoint
                 if epoch % args.save_every == 0:
                     save_checkpoint(
                         model, optimizer, scaler, epoch, best_acc,
@@ -760,24 +704,21 @@ def main():
             if rank == 0:
                 logger.info(
                     f"Epoch {epoch:3d}/{args.epochs} | "
-                    f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
-                    f"LR: {scheduler.get_last_lr()[0]:.2e}"
+                    f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
+                    f"LR={scheduler.get_last_lr()[0]:.2e}"
                 )
         
-        # Early stopping
         if args.early_stopping_patience > 0 and patience_counter >= args.early_stopping_patience:
             if rank == 0:
-                logger.info(f"Early stopping triggered after {epoch} epochs")
+                logger.info(f"Early stopping at epoch {epoch}")
             break
     
-    # Final evaluation and save predictions
+    # Final evaluation
     if rank == 0:
         logger.info("=" * 80)
-        logger.info("TRAINING COMPLETE")
-        logger.info(f"Best validation accuracy: {best_acc:.4f}")
+        logger.info(f"Training complete | Best accuracy: {best_acc*100:.2f}%")
         logger.info("=" * 80)
         
-        # Load best model and run final evaluation
         checkpoint = torch.load(output_dir / 'best_model.pt')
         if is_ddp:
             model.module.load_state_dict(checkpoint['model_state_dict'])
@@ -789,7 +730,6 @@ def main():
             return_predictions=True
         )
         
-        # Save final predictions
         np.savez(
             output_dir / 'final_predictions.npz',
             predictions=final_results['predictions'],
@@ -797,27 +737,22 @@ def main():
             probabilities=final_results['probabilities']
         )
         
-        # Compute and save confusion matrix
         cm = confusion_matrix(final_results['labels'], final_results['predictions'])
         logger.info(f"Confusion matrix:\n{cm}")
-        
-        # Save confusion matrix
         np.save(output_dir / 'confusion_matrix.npy', cm)
         
-        # Save classification report
         report = classification_report(
             final_results['labels'], 
             final_results['predictions'],
-            target_names=['Single', 'Binary', 'Other']
+            target_names=['Flat', 'PSPL', 'Binary']
         )
         logger.info(f"Classification report:\n{report}")
         
         with open(output_dir / 'classification_report.txt', 'w') as f:
             f.write(report)
         
-        logger.info(f"Results saved to {output_dir}")
+        logger.info(f"Results saved: {output_dir}")
     
-    # Cleanup
     if is_ddp:
         dist.destroy_process_group()
 
