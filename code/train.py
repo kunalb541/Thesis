@@ -141,47 +141,47 @@ def set_seed_everywhere(seed: int, rank: int = 0) -> None:
 # =============================================================================
 # DATASET
 # =============================================================================
-# =============================================================================
-# DATA UTILS (OPTIMIZED FOR LAZY HDF5 LOADING)
-# =============================================================================
-
-# =============================================================================
-# DATA UTILS (OPTIMIZED FOR LAZY HDF5 LOADING)
-# =============================================================================
 
 def load_labels_and_split(data_path: Path) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
     Loads only the 'labels' and 'flux' metadata (for normalization) 
     eagerly to perform the train/val index split.
     """
-    logger = logging.getLogger("TRAIN")
+    logger = logging.getLogger("TRAIN") # Assuming logger is defined
     
     with h5py.File(data_path, 'r') as f:
         # 1. Eagerly load ONLY the labels array (small)
         labels = f['labels'][:]
+        # Keep a handle to the large 'flux' dataset for lazy loading
         flux_data = f['flux']
         
-        # 2. Perform train/val split on indices
+        # Perform train/val split on indices
         indices = np.arange(len(labels))
         train_idx, val_idx = train_test_split(
-            indices, test_size=0.2, shuffle=True, random_state=SEED, stratify=labels
+            indices, test_size=0.2, shuffle=True, random_state=SEED, stratify=labels # Assuming SEED is defined
         )
+        # train_idx contains the final, unsorted indices for the full training set
         
-        # 3. Compute normalization stats from the training data (robust sampling)
+        # 2. Compute normalization stats from the training data (robust sampling)
+        
+        # Sample a small fraction of flux data from the training set for statistics
         sample_size = min(100000, len(train_idx))
         
-        # Step 1: Generate random indices from the training set indices
+        # Step 1: Generate random indices from the training set indices (UNSORTED)
         sample_indices_unsorted = np.random.choice(train_idx, size=sample_size, replace=False)
         
         # Step 2: SORT the indices to satisfy the HDF5 requirement for fancy indexing
-        sample_indices_sorted = np.sort(sample_indices_unsorted) # <-- FIX FOR HDF5
+        # THIS IS THE CRITICAL FIX for "TypeError: Indexing elements must be in increasing order"
+        sample_indices_sorted = np.sort(sample_indices_unsorted)
 
         # Step 3: LAZY LOAD - Read only the single slice needed (now sorted)
+        # This occurs at line 177 in your traceback: sample_flux = flux_data[sample_indices]
         sample_flux = flux_data[sample_indices_sorted] 
         
-        # Step 4: Compute stats using the loaded flux (order doesn't matter)
+        # Step 4: Compute stats using the loaded flux (order doesn't matter for median/IQR)
         valid_flux = sample_flux[~np.isnan(sample_flux) & (sample_flux != 0.0)]
         
+        # Compute median and IQR for robust normalization
         if len(valid_flux) == 0:
             median = 0.0
             iqr = 1.0
@@ -189,6 +189,7 @@ def load_labels_and_split(data_path: Path) -> Tuple[np.ndarray, np.ndarray, Dict
             median = float(np.median(valid_flux))
             q75, q25 = np.percentile(valid_flux, [75, 25])
             iqr = float(q75 - q25)
+            # Prevent division by zero or extremely small numbers
             if iqr < 1e-6:
                 iqr = 1.0
 
