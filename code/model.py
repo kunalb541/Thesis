@@ -196,12 +196,12 @@ class OptimizedConvFeatureExtractor(nn.Module):
         self.conv2 = DepthwiseSeparableConv1d(d_model, d_model, kernel_size=3, padding=0)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # SwiGLU activation (faster than GELU)
-        self.swiglu = nn.Sequential(
-            nn.Linear(d_model, d_model * 2, bias=False),
-            nn.SiLU(),  # Swish activation
-            nn.Linear(d_model*2, d_model, bias=False)
-        )
+        # SwiGLU activation (FIXED)
+        # SwiGLU(x) = (W1*x ⊙ SiLU(W2*x)) * W3
+        self.fc1 = nn.Linear(d_model, d_model * 2, bias=False)  # For value
+        self.fc2 = nn.Linear(d_model, d_model * 2, bias=False)  # For gate
+        self.fc3 = nn.Linear(d_model * 2, d_model, bias=False)  # Project back
+        self.silu = nn.SiLU()
         
         self.dropout = nn.Dropout(dropout)
 
@@ -229,8 +229,12 @@ class OptimizedConvFeatureExtractor(nn.Module):
         x = x.permute(0, 2, 1)
         x = self.norm2(x)
         
-        # SwiGLU + residual
-        x = self.swiglu(x)
+        # SwiGLU (CORRECTED)
+        # Split into value and gate paths
+        value = self.fc1(x)
+        gate = self.silu(self.fc2(x))
+        x = self.fc3(value * gate)  # Element-wise multiplication + projection
+        
         x = x + residual
         
         return x
