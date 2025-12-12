@@ -91,52 +91,52 @@ class RomanEvaluator:
     
     def __init__(
         self, 
-        experiment_name: str, 
+        experiment-name: str, 
         data_path: str, 
-        output_dir: Optional[str] = None, 
+        output-dir: Optional[str] = None, 
         device: str = 'cuda', 
-        batch_size: int = 128, 
-        n_samples: Optional[int] = None,
-        early_detection: bool = False, 
-        n_evolution_per_type: int = 0
+        batch-size: int = 128, 
+        n-samples: Optional[int] = None,
+        early-detection: bool = False, 
+        n-evolution-per-type: int = 0
     ):
         """
         Args:
-            experiment_name: Name of experiment to evaluate
+            experiment-name: Name of experiment to evaluate
             data_path: Path to test dataset (.npz)
-            output_dir: Optional custom output directory
+            output-dir: Optional custom output directory
             device: 'cuda' or 'cpu'
-            batch_size: Batch size for inference
-            n_samples: Subsample test set (for speed)
-            early_detection: Run early detection analysis
-            n_evolution_per_type: Number of evolution plots per class
+            batch-size: Batch size for inference
+            n-samples: Subsample test set (for speed)
+            early-detection: Run early detection analysis
+            n-evolution-per-type: Number of evolution plots per class
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.batch_size = batch_size
-        self.n_samples = n_samples
-        self.run_early_detection = early_detection
-        self.n_evolution_per_type = n_evolution_per_type
+        self.batch-size = batch-size
+        self.n-samples = n-samples
+        self.run_early-detection = early-detection
+        self.n-evolution-per-type = n-evolution-per-type
         
         # Locate and load model
-        self.model_path, self.exp_dir = self._find_model(experiment_name)
+        self.model_path, self.exp_dir = self._find_model(experiment-name)
         
         # Setup output directory
-        if output_dir is None:
+        if output-dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             data_name = Path(data_path).stem
-            self.output_dir = self.exp_dir / f'eval_{data_name}_{timestamp}'
+            self.output-dir = self.exp_dir / f'eval_{data_name}_{timestamp}'
         else:
-            self.output_dir = Path(output_dir)
+            self.output-dir = Path(output-dir)
             
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output-dir.mkdir(parents=True, exist_ok=True)
         
         print("=" * 80)
         print("ROMAN SPACE TELESCOPE - COMPREHENSIVE EVALUATION")
         print("=" * 80)
-        print(f"Experiment:  {experiment_name}")
+        print(f"Experiment:  {experiment-name}")
         print(f"Model Path:  {self.model_path}")
         print(f"Data Path:   {data_path}")
-        print(f"Output Dir:  {self.output_dir}")
+        print(f"Output Dir:  {self.output-dir}")
         print(f"Device:      {self.device}")
         
         # Load model and data
@@ -256,8 +256,8 @@ class RomanEvaluator:
             lengths = np.maximum((raw_flux != 0).sum(axis=1), 1)
         
         # Subsample if requested
-        if self.n_samples is not None:
-            n = min(self.n_samples, len(raw_flux))
+        if self.n-samples is not None:
+            n = min(self.n-samples, len(raw_flux))
             indices = np.random.choice(len(raw_flux), n, replace=False)
             raw_flux = raw_flux[indices]
             y = y[indices]
@@ -346,8 +346,8 @@ class RomanEvaluator:
         all_probs = []
         
         with torch.no_grad():
-            for i in tqdm(range(0, n, self.batch_size), desc="Inference"):
-                batch_end = min(i + self.batch_size, n)
+            for i in tqdm(range(0, n, self.batch-size), desc="Inference"):
+                batch_end = min(i + self.batch-size, n)
                 
                 flux_batch = torch.tensor(
                     self.flux[i:batch_end], 
@@ -435,7 +435,7 @@ class RomanEvaluator:
         ax2.set_xlabel('Predicted Label')
         
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'confusion_matrix.png')
+        plt.savefig(self.output-dir / 'confusion_matrix.png')
         plt.close()
 
     def plot_roc_curve(self):
@@ -462,7 +462,7 @@ class RomanEvaluator:
         plt.legend(loc="lower right")
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'roc_curves.png')
+        plt.savefig(self.output-dir / 'roc_curves.png')
         plt.close()
 
     def plot_calibration(self):
@@ -502,7 +502,7 @@ class RomanEvaluator:
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'calibration.png')
+        plt.savefig(self.output-dir / 'calibration.png')
         plt.close()
 
     def analyze_physical_limits(self):
@@ -564,7 +564,7 @@ class RomanEvaluator:
             plt.legend()
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
-            plt.savefig(self.output_dir / 'u0_dependency.png')
+            plt.savefig(self.output-dir / 'u0_dependency.png')
             plt.close()
             
         except Exception as e:
@@ -629,7 +629,7 @@ class RomanEvaluator:
             plt.axis('off')
             
             plt.tight_layout()
-            plt.savefig(self.output_dir / 'temporal_bias_check.png')
+            plt.savefig(self.output-dir / 'temporal_bias_check.png')
             plt.close()
             
             print(f"  KS test: stat={stat:.4f}, p-value={pval:.4f}")
@@ -643,7 +643,7 @@ class RomanEvaluator:
 
     def plot_evolution_examples(self):
         """Plot probability evolution for sample events."""
-        print(f"\nGenerating {self.n_evolution_per_type} evolution plots per class...")
+        print(f"\nGenerating {self.n-evolution-per-type} evolution plots per class...")
         
         for i, cls_name in enumerate(CLASS_NAMES):
             # Find correctly classified events
@@ -654,7 +654,7 @@ class RomanEvaluator:
                 continue
             
             # Random selection
-            n_plot = min(len(candidates), self.n_evolution_per_type)
+            n_plot = min(len(candidates), self.n-evolution-per-type)
             selection = np.random.choice(candidates, n_plot, replace=False)
             
             for idx in tqdm(selection, desc=f"  {cls_name}"):
@@ -719,7 +719,7 @@ class RomanEvaluator:
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(self.output_dir / f'evolution_{cls_name}_{idx}.png')
+        plt.savefig(self.output-dir / f'evolution_{cls_name}_{idx}.png')
         plt.close()
 
     def verify_causal_inference(self):
@@ -782,7 +782,7 @@ class RomanEvaluator:
         print("=" * 80)
         
         # 1. Verify causality (Critical for Roman Science)
-        if self.run_early_detection: 
+        if self.run_early-detection: 
              if not self.verify_causal_inference():
                  print("CRITICAL: Causality check failed. Aborting evaluation.")
                  return
@@ -795,7 +795,7 @@ class RomanEvaluator:
         self.diagnose_temporal_bias()
         
         # 3. Evolution Plots
-        if self.n_evolution_per_type > 0:
+        if self.n-evolution-per-type > 0:
             self.plot_evolution_examples()
         
         # 4. Save Summary
@@ -806,7 +806,7 @@ class RomanEvaluator:
             'timestamp': datetime.now().isoformat()
         }
         
-        with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
+        with open(self.output-dir / 'evaluation_summary.json', 'w') as f:
             json.dump(summary, f, indent=2)
         
         # 5. Print Classification Report
@@ -816,7 +816,7 @@ class RomanEvaluator:
         print(classification_report(self.y, self.preds, target_names=CLASS_NAMES, digits=4))
         
         print("\n" + "=" * 80)
-        print(f"Evaluation complete. Results saved to: {self.output_dir}")
+        print(f"Evaluation complete. Results saved to: {self.output-dir}")
         print("=" * 80)
 
 
@@ -829,37 +829,37 @@ if __name__ == '__main__':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    parser.add_argument('--experiment_name', required=True, 
+    parser.add_argument('--experiment-name', required=True, 
                        help="Name of experiment to evaluate")
     parser.add_argument('--data', required=True, 
                        help="Path to test dataset (.npz)")
-    parser.add_argument('--output_dir', default=None, 
+    parser.add_argument('--output-dir', default=None, 
                        help="Optional custom output directory")
     
-    parser.add_argument('--batch_size', type=int, default=128,
+    parser.add_argument('--batch-size', type=int, default=128,
                        help="Batch size for inference")
-    parser.add_argument('--n_samples', type=int, default=None,
+    parser.add_argument('--n-samples', type=int, default=None,
                        help="Subsample test set for speed")
                        
     parser.add_argument('--device', default='cuda',
                        help="Device: cuda or cpu")
                        
-    parser.add_argument('--early_detection', action='store_true', 
+    parser.add_argument('--early-detection', action='store_true', 
                        help='Run early detection analysis')
     
-    parser.add_argument('--n_evolution_per_type', type=int, default=5,
+    parser.add_argument('--n-evolution-per-type', type=int, default=5,
                        help="Number of evolution plots per class")
     
     args = parser.parse_args()
     
     evaluator = RomanEvaluator(
-        experiment_name=args.experiment_name,
+        experiment-name=args.experiment_name,
         data_path=args.data,
-        output_dir=args.output_dir,
+        output-dir=args.output-dir,
         device=args.device,
-        batch_size=args.batch_size,
-        n_samples=args.n_samples, early_detection=args.early_detection,
-        n_evolution_per_type=args.n_evolution_per_type
+        batch-size=args.batch-size,
+        n-samples=args.n_samples, early-detection=args.early-detection,
+        n-evolution-per-type=args.n_evolution_per_type
     )
     
     evaluator.run()

@@ -1,4 +1,3 @@
-import os
 import sys
 import json
 import argparse
@@ -15,10 +14,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, classification_report
 from pathlib import Path
 from tqdm import tqdm
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
 import random
 import h5py
+import os
 from typing import Dict, Any, Tuple, Optional
 
 try:
@@ -84,9 +84,20 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         
+        print(f"[Rank {rank}] Setting up distributed training: world_size={world_size}, local_rank={local_rank}", flush=True)
+        
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
-            dist.init_process_group(backend='nccl', init_method='env://')
+            print(f"[Rank {rank}] CUDA device set to {local_rank}", flush=True)
+            
+            print(f"[Rank {rank}] Initializing process group...", flush=True)
+            # Add explicit timeout for large multi-node setups
+            dist.init_process_group(
+                backend='nccl', 
+                init_method='env://',
+                timeout=timedelta(seconds=1800)  # 30 minutes for 12 nodes
+            )
+            print(f"[Rank {rank}] Process group initialized successfully!", flush=True)
             
             # Performance optimizations
             torch.backends.cudnn.benchmark = True
@@ -474,12 +485,31 @@ def main():
     parser.add_argument('--experiment-name', type=str, default=None, help='Experiment name')
     
     # Model arguments
-    parser.add_argument('--d-model', type=int, default=128, help='Hidden dimension')
-    parser.add_argument('--n-layers', type=int, default=3, help='Number of GRU layers')
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
-    parser.add_argument('--hierarchical', action='store_true', help='Use hierarchical classification')
-    parser.add_argument('--feature-extraction', type=str, default='mlp', choices=['mlp', 'conv'])
-    parser.add_argument('--use-attention-pooling', action='store_true', help='Use attention pooling')
+    parser.add_argument('--d-model', type=int, default=256, help='Hidden dimension')
+    parser.add_argument('--n-layers', type=int, default=4, help='Number of GRU layers')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    
+    # Hierarchical classification (default: True)
+    parser.add_argument('--hierarchical', dest='hierarchical',
+                        action='store_true', help='Enable hierarchical classification')
+    parser.add_argument('--no-hierarchical', dest='hierarchical',
+                        action='store_false', help='Disable hierarchical classification')
+    parser.set_defaults(hierarchical=True)
+    
+    # Feature extraction (default: conv)
+    parser.add_argument('--feature-extraction', dest='feature_extraction',
+                        type=str, choices=['mlp', 'conv'], default='conv',
+                        help='Feature extraction method (default: conv)')
+    parser.add_argument('--no-feature-extraction', dest='feature_extraction',
+                        action='store_const', const=None,
+                        help='Disable feature extraction entirely')
+    
+    # Attention pooling (default: True)
+    parser.add_argument('--use-attention-pooling', dest='attention_pooling',
+                        action='store_true', help='Enable attention pooling')
+    parser.add_argument('--no-attention-pooling', dest='attention_pooling',
+                        action='store_false', help='Disable attention pooling')
+    parser.set_defaults(attention_pooling=True)
     
     # Training arguments
     parser.add_argument('--batch-size', type=int, default=256, help='Batch size per GPU')
@@ -523,10 +553,18 @@ def main():
     if rank == 0:
         logger.info(f"Loading data from {args.data}")
     
+    print(f"[Rank {rank}] Loading data...", flush=True)
     data = load_compat(args.data)
     flux = data['flux']
     delta_t = data['delta_t']
     labels = data['labels']
+    print(f"[Rank {rank}] Data loaded: {len(flux)} samples", flush=True)
+    
+    # Synchronize all processes after data loading
+    if is_ddp:
+        print(f"[Rank {rank}] Waiting at barrier after data load...", flush=True)
+        dist.barrier()
+        print(f"[Rank {rank}] Passed data load barrier", flush=True)
     
     # GOD MODE: Validate batch size for DDP
     if is_ddp and args.batch_size * world_size > len(flux):
@@ -544,10 +582,13 @@ def main():
         logger.info(f"Normalization stats: median={stats['median']:.4f}, iqr={stats['iqr']:.4f}")
     
     # Create datasets
+    print(f"[Rank {rank}] Creating datasets...", flush=True)
     train_dataset = MicrolensingDataset(flux_train, delta_t_train, labels_train, stats)
     val_dataset = MicrolensingDataset(flux_val, delta_t_val, labels_val, stats)
+    print(f"[Rank {rank}] Datasets created", flush=True)
     
     # Create dataloaders
+    print(f"[Rank {rank}] Creating dataloaders...", flush=True)
     if is_ddp:
         train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=SEED)
         val_sampler = DistributedSampler(val_dataset, shuffle=False)
@@ -560,9 +601,9 @@ def main():
         batch_size=args.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=False
     )
     
     val_loader = DataLoader(
@@ -570,24 +611,27 @@ def main():
         batch_size=args.batch_size * 2,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=False
     )
+    print(f"[Rank {rank}] Dataloaders created", flush=True)
     
     # Create model
+    print(f"[Rank {rank}] Creating model...", flush=True)
     config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
         dropout=args.dropout,
         hierarchical=args.hierarchical,
         feature_extraction=args.feature_extraction,
-        use_attention_pooling=args.use_attention_pooling,
+        use_attention_pooling=args.attention_pooling,
         use_amp=args.use_amp,
         use_gradient_checkpointing=True
     )
     
     model = RomanMicrolensingGRU(config, dtype=torch.float32).to(device)
+    print(f"[Rank {rank}] Model created and moved to device", flush=True)
     
     if rank == 0:
         logger.info(f"Model parameters: {count_parameters(model):,}")
@@ -595,6 +639,7 @@ def main():
     
     # Wrap in DDP
     if is_ddp:
+        print(f"[Rank {rank}] Wrapping model in DDP...", flush=True)
         # GOD MODE: broadcast_buffers defaults to True
         # Set to False if model has complex non-learnable buffers for efficiency
         model = DDP(
@@ -605,6 +650,7 @@ def main():
             find_unused_parameters=False,
             broadcast_buffers=True  # Set False for efficiency if buffers are deterministic
         )
+        print(f"[Rank {rank}] Model wrapped in DDP successfully", flush=True)
     
     # Compile model
     if args.compile and hasattr(torch, 'compile'):
@@ -613,6 +659,7 @@ def main():
         model = torch.compile(model)
     
     # Optimizer and scheduler
+    print(f"[Rank {rank}] Creating optimizer and scheduler...", flush=True)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -631,6 +678,7 @@ def main():
         return 1.0
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    print(f"[Rank {rank}] Optimizer and scheduler created", flush=True)
     
     # Class weights
     if args.use_class_weights:
@@ -639,6 +687,12 @@ def main():
             logger.info(f"Class weights: {class_weights.cpu().numpy()}")
     else:
         class_weights = torch.ones(3, device=device)
+    
+    # Final barrier before training
+    if is_ddp:
+        print(f"[Rank {rank}] Waiting at barrier before training...", flush=True)
+        dist.barrier()
+        print(f"[Rank {rank}] All processes ready to train!", flush=True)
     
     # Training loop
     if rank == 0:
@@ -716,72 +770,57 @@ def main():
                 logger.info(f"Early stopping triggered after {epoch} epochs")
             break
     
-    # Final evaluation
+    # Final evaluation and save predictions
     if rank == 0:
         logger.info("=" * 80)
-        logger.info("FINAL EVALUATION")
+        logger.info("TRAINING COMPLETE")
+        logger.info(f"Best validation accuracy: {best_acc:.4f}")
         logger.info("=" * 80)
         
-        # Load best model
+        # Load best model and run final evaluation
+        checkpoint = torch.load(output_dir / 'best_model.pt')
         if is_ddp:
-            dist.barrier()
-        
-        best_checkpoint = torch.load(output_dir / "best_model.pt", map_location=device)
-        if isinstance(model, DDP):
-            model.module.load_state_dict(best_checkpoint['model_state_dict'])
+            model.module.load_state_dict(checkpoint['model_state_dict'])
         else:
-            model.load_state_dict(best_checkpoint['model_state_dict'])
+            model.load_state_dict(checkpoint['model_state_dict'])
         
-        val_results = evaluate(
+        final_results = evaluate(
             model, val_loader, class_weights, device, rank, config,
             return_predictions=True
         )
         
-        logger.info(f"Best Validation Accuracy: {val_results['accuracy']:.4f}")
-        logger.info(f"Best Validation Loss: {val_results['loss']:.4f}")
-        
-        # Confusion matrix
-        cm = confusion_matrix(val_results['labels'], val_results['predictions'])
-        logger.info("Confusion Matrix:")
-        logger.info("                Predicted")
-        logger.info("             Flat  PSPL  Binary")
-        for i, row in enumerate(cm):
-            class_name = ['Flat', 'PSPL', 'Binary'][i]
-            logger.info(f"  {class_name:6s}  {row[0]:5d} {row[1]:5d} {row[2]:5d}")
-        
-        # Classification report
-        class_names = ['Flat', 'PSPL', 'Binary']
-        report = classification_report(
-            val_results['labels'],
-            val_results['predictions'],
-            target_names=class_names,
-            digits=4
+        # Save final predictions
+        np.savez(
+            output_dir / 'final_predictions.npz',
+            predictions=final_results['predictions'],
+            labels=final_results['labels'],
+            probabilities=final_results['probabilities']
         )
-        logger.info("Classification Report:")
-        logger.info(report)
         
-        # Save metrics
-        metrics = {
-            'best_val_accuracy': float(val_results['accuracy']),
-            'best_val_loss': float(val_results['loss']),
-            'confusion_matrix': cm.tolist(),
-            'classification_report': report,
-            'total_epochs': epoch,
-        }
+        # Compute and save confusion matrix
+        cm = confusion_matrix(final_results['labels'], final_results['predictions'])
+        logger.info(f"Confusion matrix:\n{cm}")
         
-        with open(output_dir / 'final_metrics.json', 'w') as f:
-            json.dump(metrics, f, indent=2, cls=NumpyEncoder)
+        # Save confusion matrix
+        np.save(output_dir / 'confusion_matrix.npy', cm)
         
-        logger.info(f"Training complete. Results saved to {output_dir}")
-        logger.info("=" * 80)
+        # Save classification report
+        report = classification_report(
+            final_results['labels'], 
+            final_results['predictions'],
+            target_names=['Single', 'Binary', 'Other']
+        )
+        logger.info(f"Classification report:\n{report}")
+        
+        with open(output_dir / 'classification_report.txt', 'w') as f:
+            f.write(report)
+        
+        logger.info(f"Results saved to {output_dir}")
     
     # Cleanup
-    if dist.is_initialized():
+    if is_ddp:
         dist.destroy_process_group()
 
 
 if __name__ == '__main__':
     main()
-
-
-

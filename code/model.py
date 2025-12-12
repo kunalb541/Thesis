@@ -48,7 +48,7 @@ class ModelConfig:
     d_model: int = 128
     n_layers: int = 3
     dropout: float = 0.2
-    window_size: int = 7
+    window_size: int = 5
     max_seq_len: int = 2000
     n_classes: int = 3
     

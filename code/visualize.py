@@ -53,18 +53,18 @@ class RomanVisualizer:
         self, 
         model_path: str, 
         data_path: str, 
-        output_dir: str, 
+        output-dir: str, 
         device: str = 'cuda'
     ):
         """
         Args:
             model_path: Path to model checkpoint (.pt file)
             data_path: Path to test data (.npz file)
-            output_dir: Directory for output visualizations
+            output-dir: Directory for output visualizations
             device: 'cuda' or 'cpu'
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.out_dir = Path(output_dir)
+        self.out_dir = Path(output-dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         
         print("=" * 80)
@@ -461,16 +461,16 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    parser.add_argument('--experiment_name', required=True,
+    parser.add_argument('--experiment-name', required=True,
                        help="Name of experiment (searches for model automatically)")
     parser.add_argument('--data', required=True,
                        help="Path to test data (.npz or .h5)")
-    parser.add_argument('--output_dir', required=True,
+    parser.add_argument('--output-dir', required=True,
                        help="Output directory for plots")
     
-    parser.add_argument('--n_latent', type=int, default=2000,
+    parser.add_argument('--n-latent', type=int, default=2000,
                        help="Number of samples for latent space visualization")
-    parser.add_argument('--n_deep_dives', type=int, default=10,
+    parser.add_argument('--n-deep-dives', type=int, default=10,
                        help="Number of deep dive analysis plots")
     parser.add_argument('--device', default='cuda',
                        help="Device: cuda or cpu")
@@ -484,13 +484,13 @@ def main():
     
     for root in search_roots:
         if root.exists():
-            matches = list(root.glob(f"*{args.experiment_name}*"))
+            matches = list(root.glob(f"*{args.experiment-name}*"))
             if matches:
                 exp_path = sorted(matches, key=lambda x: x.stat().st_mtime)[-1]
                 break
     
     if not exp_path:
-        print(f"Error: Experiment '{args.experiment_name}' not found")
+        print(f"Error: Experiment '{args.experiment-name}' not found")
         sys.exit(1)
     
     model_file = exp_path / "best_model.pt"
@@ -502,7 +502,7 @@ def main():
     viz = RomanVisualizer(
         model_path=str(model_file),
         data_path=args.data,
-        output_dir=args.output_dir,
+        output-dir=args.output-dir,
         device=args.device
     )
     
