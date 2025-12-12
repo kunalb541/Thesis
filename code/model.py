@@ -1,7 +1,19 @@
 import torch
+import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
+import torch.nn.functional as F
+import torch.nn.functional as F
+import torch.nn.functional as F
 import math
 import logging
 import warnings
@@ -137,7 +149,6 @@ class FlashAttentionPooling(nn.Module):
         if mask is not None:
             # Convert boolean mask to additive mask
             attn_mask = torch.zeros(B, 1, 1, T, dtype=x.dtype, device=x.device)
-            attn_mask.masked_fill_(~mask.view(B, 1, 1, T), float('-inf'))
         
         # Flash attention via scaled_dot_product_attention (PyTorch 2.0+)
         # This automatically uses Flash Attention 2 on A100 GPUs
@@ -148,7 +159,6 @@ class FlashAttentionPooling(nn.Module):
             is_causal=False
         )
         
-        return out.squeeze(1)  # (B, D)
 
 
 # =============================================================================
@@ -439,7 +449,7 @@ class OptimizedStackedGRU(nn.Module):
         out = self.norm(out)
         
         if self.use_residual and residual.size(-1) == out.size(-1):
-            out = out + residual
+                actual_len = out.size(1); out = out + residual[:, :actual_len]
         
         out = self.dropout(out)
         

@@ -168,7 +168,7 @@ def fast_load_labels_and_split(
             # Compute normalization stats using random sampling
             flux_data = f['flux']
             sample_size = min(50000, len(train_idx))  # Reduced sample size
-            sample_indices = np.random.choice(train_idx, size=sample_size, replace=False)
+            sample_indices = np.sort(np.random.choice(train_idx, size=sample_size, replace=False))
             sample_indices_sorted = np.sort(sample_indices)
             
             # Read in chunks to avoid memory spikes
