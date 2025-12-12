@@ -23,6 +23,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, roc_curve, confusion_matrix, classification_report
 )
+from sklearn.calibration import calibration_curve # Ensure this is available globally for the function
 
 warnings.filterwarnings("ignore")
 
@@ -104,12 +105,10 @@ class RomanEvaluator:
         self.n_samples = n_samples
         self.run_early_detection = early_detection
         self.n_evolution_per_type = n_evolution_per_type
-        self.n_example_grid_per_type = n_example_grid_per_type # New parameter
+        self.n_example_grid_per_type = n_example_grid_per_type
         
-        # Locate and load model
         self.model_path, self.exp_dir = self._find_model(experiment_name)
         
-        # Setup output directory
         if output_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             data_name = Path(data_path).stem
@@ -128,24 +127,20 @@ class RomanEvaluator:
         print(f"Output Dir:  {self.output_dir}")
         print(f"Device:      {self.device}")
         
-        # Load model and data
         self.model, self.config, self.checkpoint = self._load_model()
         self.data_dict = self._load_data(data_path)
         
-        # Extract for convenience
         self.flux = self.data_dict['norm_flux']
         self.raw_flux = self.data_dict['raw_flux']
         self.delta_t = self.data_dict['delta_t']
         self.y = self.data_dict['y']
         self.lengths = self.data_dict['lengths']
         self.timestamps = self.data_dict['timestamps']
-        self.params = self.data_dict['params'] # Now a dictionary
+        self.params = self.data_dict['params']
         
-        # Run inference
         print("\nRunning inference on test set...")
         self.probs, self.preds, self.confs = self._run_inference()
         
-        # Compute metrics
         self.metrics = self._compute_metrics()
 
     def _find_model(self, exp_name: str) -> Tuple[Path, Path]:
@@ -160,14 +155,12 @@ class RomanEvaluator:
         if not candidates:
             if Path(exp_name).exists() and Path(exp_name).is_dir():
                 exp_dir = Path(exp_name)
-                # Fall through to check for .pt files in this directory
             else:
                 raise FileNotFoundError(
                     f"No experiment found matching '{exp_name}'\n"
                     f"Searched in: {search_roots}"
                 )
         else:
-            # Get most recent
             exp_dir = sorted(candidates, key=lambda x: x.stat().st_mtime)[-1]
             
         model_file = exp_dir / "best_model.pt"
@@ -187,21 +180,16 @@ class RomanEvaluator:
         
         checkpoint = torch.load(self.model_path, map_location=self.device)
         
-        # Extract config
-        config_dict = checkpoint.get('config', {})
-        # Only use keys present in ModelConfig for instantiation
         try:
             valid_keys = set(ModelConfig.__annotations__.keys())
+            config_dict = checkpoint.get('config', {})
             clean_conf = {k: v for k, v in config_dict.items() if k in valid_keys}
             config = ModelConfig(**clean_conf)
         except NameError:
-            # Fallback if ModelConfig couldn't be imported (as a safety measure)
             config = ModelConfig() 
         
-        # Create model
         model = RomanMicrolensingGRU(config).to(self.device)
         
-        # Load weights
         state_dict = checkpoint.get('state_dict', checkpoint.get('model_state_dict', checkpoint))
         clean_state = {k.replace('module.', '').replace('_orig_mod.', ''): v for k, v in state_dict.items()}
         model.load_state_dict(clean_state, strict=False)
@@ -237,13 +225,9 @@ class RomanEvaluator:
         params: Dict[str, Any] = {}
         for ptype in ['flat', 'pspl', 'binary']:
             key = f'params_{ptype}'
-            # Check for both structured array name and legacy key name
-            if key in data or ptype in data:
-                # Assuming 'params_ptype' is the structured array from simulate.py
-                param_array = data.get(key, data.get(ptype, None))
-                if param_array is not None and param_array.dtype.fields is not None:
-                    # Convert structured NumPy array to a list of dicts for easier indexing
-                    params[ptype] = [dict(zip(param_array.dtype.names, row)) for row in param_array]
+            param_array = data.get(key, data.get(ptype, None))
+            if param_array is not None and param_array.dtype.fields is not None:
+                params[ptype] = [dict(zip(param_array.dtype.names, row)) for row in param_array]
         
         if not params:
             print("  Physical parameters (params_pspl, params_binary, etc.) not found.")
@@ -258,7 +242,6 @@ class RomanEvaluator:
             delta_t = delta_t[indices]
             timestamps = timestamps[indices]
             lengths = lengths[indices]
-            # No need to subsample params dict as we link via index later
         
         print(f"  Loaded {len(raw_flux):,} samples")
         print(f"  Classes: {np.unique(y)}")
@@ -293,7 +276,7 @@ class RomanEvaluator:
             'y': y,
             'lengths': lengths,
             'timestamps': timestamps,
-            'params': params, # Changed to dict
+            'params': params,
             'norm_median': median,
             'norm_iqr': iqr
         }
@@ -317,7 +300,6 @@ class RomanEvaluator:
                 
                 probs_tensor = torch.softmax(logits, dim=-1)
 
-                # Robust Dimension Check: handles [Batch, Sequence, Classes] or [Batch, Classes]
                 if probs_tensor.ndim == 3:
                     probs = probs_tensor[:, -1, :]
                 elif probs_tensor.ndim == 2:
@@ -384,19 +366,17 @@ class RomanEvaluator:
         print("\nRunning full analysis and generating plots...")
         self.plot_confusion_matrix()
         self.plot_roc_curves()
-        self.plot_calibration_curve()
+        # FIX: The missing method is now called here.
+        self.plot_calibration_curve() 
         
-        # New Example Grid (Data Visualization)
         if self.n_example_grid_per_type > 0:
             self.plot_example_grid()
             
-        # Parameter Diagnostics
         self.plot_parameter_diagnostics()
         
         if self.run_early_detection:
             self.run_early_detection_analysis()
             
-        # Evolution Plots (Classifier Visualization)
         if self.n_evolution_per_type > 0:
             self.plot_evolution_examples()
             
@@ -409,7 +389,7 @@ class RomanEvaluator:
     # =========================================================================
     
     def plot_example_grid(self):
-        """Plot a 3x4 grid of raw light curves (4 per class, randomly selected)."""
+        """Plot a 3x4 grid of raw light curves (4 per class, scatter plot, no padding, inverted y-axis)."""
         print(f"\nGenerating {self.n_example_grid_per_type} example grid plots per class...")
         
         n_rows = 3
@@ -417,13 +397,15 @@ class RomanEvaluator:
         
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows), 
                                  sharex=False, sharey=False)
+        # Handle case where only 1 row or 1 column exists (e.g., if n_example_grid_per_type=1)
+        if n_rows == 1 or n_cols == 1:
+            axes = np.atleast_2d(axes)
+
         fig.suptitle('Example Simulated Light Curves (Raw Flux)', fontsize=16)
         
         for i, cls_name in enumerate(CLASS_NAMES):
-            # Find indices for this class
             candidates = np.where(self.y == i)[0]
             if len(candidates) < n_cols:
-                # Fallback to all samples if not enough exist
                 selection = candidates
             else:
                 selection = np.random.choice(candidates, n_cols, replace=False)
@@ -434,14 +416,18 @@ class RomanEvaluator:
                 time_axis = self.timestamps[idx, :length]
                 raw_flux = self.raw_flux[idx, :length]
                 
-                ax.plot(time_axis, raw_flux, 'o-', color=COLORS[i], markersize=1.5, linewidth=0.5)
+                # Scatter plot for discrete data points, excluding pad values
+                ax.scatter(time_axis, raw_flux, color=COLORS[i], s=5, linewidths=0)
+                
+                # Invert Y-axis for standard astronomical convention (brighter/higher flux peak is up)
+                ax.invert_yaxis()
+                
                 ax.set_title(f'True: {cls_name}', fontsize=10)
                 
-                # Clean up axes
                 if i == n_rows - 1:
                     ax.set_xlabel('Time (Days)', fontsize=8)
                 if j == 0:
-                    ax.set_ylabel('Raw Flux (mag or Jy)', fontsize=8)
+                    ax.set_ylabel('Raw Flux (Jy)', fontsize=8)
                 
                 ax.tick_params(axis='both', which='major', labelsize=7)
                 ax.grid(True, which='both', linestyle='--', alpha=0.5)
@@ -504,9 +490,9 @@ class RomanEvaluator:
         plt.close()
         print("  Generated ROC Curves.")
 
+    # FIX: Restored the missing function
     def plot_calibration_curve(self):
         """Plot and save the reliability diagram (calibration curve)."""
-        from sklearn.calibration import calibration_curve
         
         plt.figure(figsize=(7, 7))
         plt.plot([0, 1], [0, 1], "k:", label="Perfectly calibrated")
@@ -529,6 +515,7 @@ class RomanEvaluator:
         plt.savefig(self.output_dir / 'calibration_curve.png')
         plt.close()
         print("  Generated Calibration Curve.")
+    # END FIX
 
     def plot_parameter_diagnostics(self):
         """Plot diagnostic metrics against physical parameters (if available)."""
@@ -539,7 +526,8 @@ class RomanEvaluator:
         print("\nRunning parameter diagnostics...")
         
         try:
-            self._plot_binary_u0_accuracy()
+            # This calls the method that generates diag_binary_u0.png
+            self._plot_binary_u0_accuracy() 
             self._plot_binary_q_accuracy()
             self._plot_pspl_tE_accuracy()
             print("  Generated Parameter Diagnostics.")
@@ -553,23 +541,13 @@ class RomanEvaluator:
             return
 
         try:
-            # 1. Map parameters to the full dataset indices
-            # The simulator saves params for PSPL events only in 'pspl' structure, 
-            # so we only plot points where y == class_idx.
-            
             param_list = self.params[data_type]
             
-            # Create a dictionary to map the unique identifier (if available) to the parameter set,
-            # or rely on the indices matching the y[mask] array
-            
-            # Filter main arrays by class
             class_mask = self.y == class_idx
             if class_mask.sum() == 0: return
 
             class_preds = self.preds[class_mask]
             
-            # Since params list only contains events of 'data_type', 
-            # we need to ensure its length matches the number of events in y[class_mask]
             if len(param_list) != class_mask.sum():
                  warnings.warn(f"Mismatch in counts for {data_type}: params={len(param_list)}, y_true={class_mask.sum()}. Skipping plot.")
                  return
@@ -585,7 +563,6 @@ class RomanEvaluator:
 
             # Bin by parameter on a log scale
             log_param = np.log10(param_vals)
-            # Use 10 bins across the natural range
             bins = np.linspace(log_param.min(), log_param.max(), 10)
             
             accs, centers, counts = [], [], []
@@ -626,23 +603,23 @@ class RomanEvaluator:
 
 
     def _plot_binary_u0_accuracy(self):
-        """Plot accuracy vs. source-lens separation (u0) for binary events."""
+        """Plot accuracy vs. source-lens separation (u0) for binary events. (Generates diag_binary_u0.png)"""
         self._plot_diagnostic(
-            data_type='binary', param_key='u0', param_label='Minimum Source-Lens Separation (u₀)', 
+            data_type='binary', param_key='u0', param_label='Minimum Source-Lens Separation ($u_0$)', 
             class_idx=2, class_name='Binary'
         )
 
     def _plot_binary_q_accuracy(self):
         """Plot accuracy vs. mass ratio (q) for binary events."""
         self._plot_diagnostic(
-            data_type='binary', param_key='q', param_label='Mass Ratio (q = m₂/m₁)', 
+            data_type='binary', param_key='q', param_label='Mass Ratio ($q = m_2/m_1$)', 
             class_idx=2, class_name='Binary'
         )
 
     def _plot_pspl_tE_accuracy(self):
         """Plot accuracy vs. Einstein radius crossing time (tE) for PSPL events."""
         self._plot_diagnostic(
-            data_type='pspl', param_key='tE', param_label='Einstein Radius Crossing Time (t_E) [Days]', 
+            data_type='pspl', param_key='tE', param_label='Einstein Radius Crossing Time ($t_E$) [Days]', 
             class_idx=1, class_name='PSPL'
         )
 
@@ -656,15 +633,12 @@ class RomanEvaluator:
             print("  Cannot run temporal bias analysis: Zero correct or incorrect predictions.")
             return
 
-        # Use the time of the *last valid data point* for analysis
         time_indices_correct = self.lengths[correct_mask] - 1
         time_indices_incorrect = self.lengths[~correct_mask] - 1
         
-        # Extract the specific timestamp for the last valid point
         t_correct = np.array([self.timestamps[i, idx] for i, idx in zip(np.where(correct_mask)[0], time_indices_correct)])
         t_incorrect = np.array([self.timestamps[i, idx] for i, idx in zip(np.where(~correct_mask)[0], time_indices_incorrect)])
         
-        # KS Test
         ks_stat, p_value = ks_2samp(t_correct, t_incorrect)
         
         print(f"\nTemporal Bias Diagnostics (KS Test on Last Timestep):")
@@ -676,7 +650,6 @@ class RomanEvaluator:
         else:
             print("  No significant temporal bias detected (p >= 0.05).")
         
-        # Plot the distributions
         plt.figure(figsize=(7, 5))
         sns.histplot(t_correct, bins=30, kde=True, stat="density", label='Correct Predictions', color='green', alpha=0.5)
         sns.histplot(t_incorrect, bins=30, kde=True, stat="density", label='Incorrect Predictions', color='red', alpha=0.5)
@@ -708,7 +681,7 @@ class RomanEvaluator:
                 self._plot_single_evolution(idx, cls_name, i)
 
     def _plot_single_evolution(self, idx: int, cls_name: str, cls_idx: int):
-        """Plot single event evolution (3-panel)."""
+        """Plot single event evolution (3-panel: Flux (scatter, inverted), Probs, Confidence)."""
         
         # --- 1. Run time-series inference ---
         f = torch.tensor(self.flux[idx], dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -727,7 +700,6 @@ class RomanEvaluator:
                 
                 probs_tensor = torch.softmax(logits_final, dim=-1)
                 
-                # Robust Dimension Check
                 if probs_tensor.ndim == 3:
                     probs = probs_tensor[:, -1, :]
                 elif probs_tensor.ndim == 2:
@@ -747,7 +719,17 @@ class RomanEvaluator:
 
         # Panel 1: Raw Light Curve (Flux)
         ax1 = axes[0]
-        ax1.plot(time_axis, self.raw_flux[idx, :length], 'o-', color='gray', markersize=2, linewidth=0.5, label='Raw Flux')
+        raw_flux = self.raw_flux[idx, :length]
+        
+        # FIX: Scatter Plot and No Padding
+        ax1.scatter(time_axis, raw_flux, color='gray', s=5, linewidths=0, label='Raw Flux')
+        
+        # For context, plot the interpolated curve using a thin line
+        ax1.plot(time_axis, raw_flux, '-', color='gray', linewidth=0.5, alpha=0.5)
+        
+        # FIX: Invert Y-axis
+        ax1.invert_yaxis()
+        
         ax1.set_ylabel('Raw Flux (Jy)')
         ax1.grid(True, which='both', linestyle='--', alpha=0.5)
         ax1.legend(loc='upper right', fontsize=8)
@@ -766,7 +748,7 @@ class RomanEvaluator:
         # Panel 3: Classification Confidence
         ax3 = axes[2]
         confidence = probs_full.max(axis=1)
-        # Highlight confidence in the predicted class
+        
         ax3.plot(time_axis, confidence, label='Max Confidence', color='black', linewidth=2)
         ax3.fill_between(time_axis, 0, confidence, color=COLORS[self.preds[idx]], alpha=0.3)
         
@@ -784,7 +766,7 @@ class RomanEvaluator:
         """Run early detection analysis by computing metrics at sequence length quantiles."""
         print("\nRunning early detection analysis (re-running inference)...")
         
-        time_fractions = np.linspace(0.2, 1.0, 5) # Test 20%, 40%, 60%, 80%, 100%
+        time_fractions = np.linspace(0.2, 1.0, 5)
         results = []
         
         max_len = self.flux.shape[1]
@@ -802,11 +784,9 @@ class RomanEvaluator:
                 for i in tqdm(range(0, n, self.batch_size), desc="    Inference"):
                     batch_end = min(i + self.batch_size, n)
                     
-                    # Truncate flux and delta_t to the maximum length needed for this fraction
                     flux_batch = torch.tensor(self.flux[i:batch_end, :current_max_len], dtype=torch.float32, device=self.device)
                     dt_batch = torch.tensor(self.delta_t[i:batch_end, :current_max_len], dtype=torch.float32, device=self.device)
                     
-                    # Use the dynamically calculated lengths for this batch
                     len_batch = torch.tensor(new_lengths[i:batch_end], dtype=torch.long, device=self.device)
                     
                     logits = self.model(flux_batch, dt_batch, lengths=len_batch)
@@ -829,7 +809,6 @@ class RomanEvaluator:
             acc = accuracy_score(self.y, preds_frac)
             f1 = f1_score(self.y, preds_frac, average='macro', zero_division=0)
             
-            # Cast numpy types to native Python types for JSON serialization
             results.append({
                 'fraction': float(frac),
                 'max_sequence_length': int(current_max_len), 
