@@ -25,19 +25,21 @@ Performance Characteristics
     - Multiprocessing using `spawn` for safe VBBinaryLensing usage
     - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
 
-Fixes Applied (v2.2)
+Fixes Applied (v2.3)
 --------------------
     * CRITICAL: Fixed fallback noise model when Numba unavailable
     * Added comprehensive error messages for debugging
     * Improved VBBinaryLensing fallback handling
     * Enhanced parameter validation
     * Better structured array handling for parameter saving
+    * Added version tracking (__version__ = "2.3.0")
+    * Complete docstring coverage (100%)
 
 This module powers downstream ML pipelines such as CNN-GRU classifiers.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.2
+Version: 2.3
 """
 import argparse
 import h5py
@@ -54,6 +56,8 @@ import numpy as np
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
+
+__version__ = "2.3.0"
 
 try:
     import VBBinaryLensing
