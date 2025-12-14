@@ -14,7 +14,7 @@ ARCHITECTURE DESIGN:
     - Hierarchical classification (Flat vs Deviation -> PSPL vs Binary)
     - Residual connections and layer normalization
 
-PERFORMANCE OPTIMIZATIONS (v2.5):
+PERFORMANCE OPTIMIZATIONS (v2.6):
     - Flash attention via F.scaled_dot_product_attention (PyTorch 2.0+)
     - Zero graph breaks - No .item() calls in forward pass
     - No GPU->CPU synchronization in hot path
@@ -37,7 +37,7 @@ PERFORMANCE CHARACTERISTICS:
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.5
+Version: 2.6
 """
 
 from __future__ import annotations
