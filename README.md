@@ -169,8 +169,8 @@ echo "All jobs finished."
 
 ```bash
 python train.py \
-    --data ../data/raw/baseline.h5 \
-    --experiment-name baseline \
+    --data ../data/raw/distinct.h5 \
+    --experiment-name distinct \
     --epochs 50 \
     --batch-size 64 \
     --lr 1e-3 \
@@ -214,9 +214,9 @@ srun torchrun \
   --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
   --rdzv-id="train-$(date +%s)" \
   train.py \
-  --data ../data/raw/baseline.h5 \
+  --data ../data/raw/distinct.h5 \
   --prefetch-factor 12 \
-  --experiment-name baseline
+  --experiment-name distinct
 ```
 
 ### Checkpoint Resumption 
