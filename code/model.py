@@ -9,7 +9,7 @@ Space Telescope gravitational microlensing event classification.
 ARCHITECTURE DESIGN:
     - Strictly causal convolutions with left-padding only
     - Depthwise separable convolutions for efficiency
-    - Multi-layer GRU with gradient checkpointing
+    - Multi-layer GRU 
     - Flash attention pooling for sequence aggregation (2-3x faster)
     - Hierarchical classification (Flat vs Deviation -> PSPL vs Binary)
     - Residual connections and layer normalization
@@ -104,8 +104,6 @@ class ModelConfig:
         Use attention pooling vs mean pooling.
     use_amp : bool
         Enable automatic mixed precision.
-    use_gradient_checkpointing : bool
-        Enable gradient checkpointing.
     use_flash_attention : bool
         Use flash attention (if available).
     use_packed_sequences : bool
@@ -137,7 +135,6 @@ class ModelConfig:
     
     # Performance options
     use_amp: bool = True
-    use_gradient_checkpointing: bool = False
     use_flash_attention: bool = True
     use_packed_sequences: bool = False
     
