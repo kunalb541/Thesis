@@ -99,8 +99,8 @@ python simulate.py \
     --n_flat 100000 \
     --n_pspl 500000 \
     --n_binary 500000 \
-    --binary_preset baseline \
-    --output ../data/raw/baseline.h5 \
+    --binary_preset distinct \
+    --output ../data/raw/distinct.h5 \
     --num_workers 32 \
     --seed 42
 ```
