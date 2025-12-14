@@ -59,19 +59,19 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 
 ## Quick Start
 
-Basic pipeline validation (single GPU, 5 minutes):
+Basic pipeline validation:
 
 ```bash
 cd code
 
 # 1. Generate test dataset (300 events)
-python simulate.py --n_flat 100 --n_pspl 100 --n_binary 100 --output ../data/test.h5
+python simulate.py --n_flat 100 --n_pspl 100 --n_binary 100 --output ../data/raw/test.h5
 
 # 2. Train model (5 epochs, no convergence expected)
-python train.py --data ../data/test.h5 --epochs 5 --batch-size 32
+python train.py --data ../data/raw/test.h5 --epochs 5 --batch-size 32
 
 # 3. Evaluate
-python evaluate.py --experiment-name results_* --data ../data/test.h5
+python evaluate.py --experiment-name rom --data ../data/raw/test.h5
 ```
 
 ---
@@ -85,8 +85,8 @@ python simulate.py \
     --n_flat 100000 \
     --n_pspl 500000 \
     --n_binary 500000 \
-    --binary_preset distinct \
-    --output ../data/raw/dataset.h5 \
+    --binary_preset baseline \
+    --output ../data/raw/baseline.h5 \
     --num_workers 32 \
     --seed 42
 ```
@@ -112,8 +112,8 @@ python simulate.py \
 
 ```bash
 python train.py \
-    --data ../data/raw/dataset.h5 \
-    --experiment-name my_experiment \
+    --data ../data/raw/baseline.h5 \
+    --experiment-name baseline \
     --epochs 50 \
     --batch-size 64 \
     --lr 1e-3 \
@@ -140,28 +140,27 @@ export TORCH_CPP_LOG_LEVEL=ERROR
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=NONE
 export RCCL_DEBUG=NONE
-
-export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n 1)
+export TORCH_DISTRIBUTED_ACK_TIMEOUT=1800
+export TORCH_DISTRIBUTED_SEND_TIMEOUT=1200
+export NCCL_IB_DISABLE=0
+export NCCL_NET_GDR_LEVEL=3
+export NCCL_P2P_LEVEL=5
+export NCCL_MIN_NCHANNELS=16
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=29500
+export NCCL_ALGO=TREE
 
 # Distributed training
 srun torchrun \
-    --nnodes=12 \
-    --nproc-per-node=4 \
-    --rdzv-backend=c10d \
-    --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT \
-    --rdzv-id=train-$(date +%s) \
-    --rdzv-conf=timeout=5000 \
-    train.py \
-        --data ../data/raw/baseline.h5 \
-        --experiment-name baseline \
-        --epochs 50 \
-        --batch-size 512 \
-        --lr 1e-3 \
-        --weight-decay 1e-3 \
-        --warmup-epochs 5 \
-        --eval-every 5 \
-        --save-every 10
+  --nnodes=12 \
+  --nproc-per-node=4 \
+  --rdzv-backend=c10d \
+  --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+  --rdzv-id="train-$(date +%s)" \
+  train.py \
+  --data ../data/raw/baseline.h5 \
+  --prefetch-factor 12 \
+  --experiment-name baseline \
 ```
 
 **Training Outputs** (saved in `results/<experiment-name>_<timestamp>/`):
@@ -191,7 +190,7 @@ srun torchrun \
 ```bash
 python evaluate.py \
     --experiment-name baseline \
-    --data ../data/raw/test.h5 \
+    --data ../data/raw/baseline.h5 \
     --batch-size 512 \
     --n-samples 100000 \
     --early-detection \
@@ -223,39 +222,6 @@ python evaluate.py --data ../data/raw/baseline.h5   --experiment-name baseline -
 python evaluate.py --data ../data/raw/stellar.h5    --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
 python evaluate.py --data ../data/raw/planetary.h5  --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
 python evaluate.py --data ../data/raw/distinct.h5   --experiment-name baseline --batch-size 512 --n-samples 100000 --early-detection --n-evolution-per-type 10
-```
-
----
-
-## Visualization
-
-### Model Internals
-
-```bash
-python visualize.py \
-    --experiment-name baseline \
-    --data ../data/raw/test.h5 \
-    --output-dir ../reports/figures/baseline_viz \
-    --n-latent 2000 \
-    --n-deep-dives 20
-```
-
-**Visualization Outputs** (saved in `<output-dir>/`):
-- `attention_patterns_event*.png` - Attention weight matrices per layer
-- `temporal_encoding_event*.png` - Δt encoding analysis
-- `classification_evolution_event*.png` - High-resolution prediction trajectories
-- `binary_vs_pspl_comparison.png` - Class separation over time
-- `embedding_space_pca.png` - Final layer embeddings in 2D
-- `confidence_evolution_by_class.png` - Mean confidence trajectories with std bands
-
-### Batch Visualization
-
-```bash
-# Visualize multiple datasets
-python visualize.py --data ../data/raw/baseline.h5   --experiment-name baseline --output-dir ../reports/figures/baseline_viz   --n-latent 2000 --n-deep-dives 20
-python visualize.py --data ../data/raw/stellar.h5    --experiment-name baseline --output-dir ../reports/figures/stellar_viz    --n-latent 2000 --n-deep-dives 20
-python visualize.py --data ../data/raw/planetary.h5  --experiment-name baseline --output-dir ../reports/figures/planetary_viz  --n-latent 2000 --n-deep-dives 20
-python visualize.py --data ../data/raw/distinct.h5   --experiment-name baseline --output-dir ../reports/figures/distinct_viz   --n-latent 2000 --n-deep-dives 20
 ```
 
 ---
@@ -360,12 +326,10 @@ Thesis/
 │   ├── simulate.py          # VBBinaryLensing-based data generation
 │   ├── train.py             # DDP training with AMP and gradient accumulation
 │   ├── evaluate.py          # Comprehensive metrics, u₀ analysis, early detection
-│   ├── visualize.py         # Model internals and embedding space
 │   └── model.py             # RomanMicrolensingGRU architecture
 │
 ├── data/
 │   ├── raw/                 # Generated datasets (*.h5)
-│   └── processed/           # (unused, for future preprocessing)
 │
 ├── results/
 │   └── <experiment>_*/      # Training outputs per experiment
@@ -373,9 +337,6 @@ Thesis/
 │       ├── training.log     # Training log
 │       ├── eval_*/          # Evaluation outputs (timestamped)
 │       └── checkpoint_*.pt  # Periodic checkpoints
-│
-├── reports/
-│   └── figures/             # Visualization outputs
 │
 ├── docs/
 │   └── RESEARCH_GUIDE.md    # Detailed experimental methodology
