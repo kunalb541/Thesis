@@ -60,7 +60,7 @@ IMPORTANT ASSUMPTION:
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.7
+Version: 2.6
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-__version__: Final[str] = "2.7.0"
+__version__: Final[str] = "2.6.0"
 
 __all__ = [
     # Configuration
