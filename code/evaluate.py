@@ -2262,7 +2262,8 @@ class RomanEvaluator:
         if n_valid < 10:
             self.logger.warning(f"Skipping evolution for {class_name}_{sample_idx} (too few points)")
             return
-        
+        is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
+       
         # Compute evolution by truncating sequence
         n_steps = 20
         step_indices = np.linspace(10, n_valid, n_steps, dtype=int)
@@ -2292,7 +2293,12 @@ class RomanEvaluator:
                 delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
                 
                 logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
-                probs = F.softmax(logits, dim=-1)
+               
+                if is_hierarchical:
+                   probs = torch.exp(logits)
+                   probs = probs / probs.sum(dim=-1, keepdim=True)
+                else:
+                   probs = F.softmax(logits, dim=-1)
                 
                 probs_evolution[i] = probs.cpu().numpy()[0]
         
