@@ -17,8 +17,6 @@ Three-class classification of gravitational microlensing events using a CNN-GRU 
 
 The model uses depthwise separable convolutions, flash attention pooling, hierarchical classification, and processes variable-length sequences with causal masking. Temporal encoding based on observation intervals (Δt) rather than absolute timestamps.
 
-**Version 2.0** - Production-ready with all critical bugs fixed.
-
 ---
 
 ## Recent Improvements (v2.0)
