@@ -7,32 +7,33 @@ High-performance distributed training pipeline for classifying Roman Space
 Telescope microlensing light curves into Flat, PSPL, and Binary classes.
 
 CORE CAPABILITIES:
-    * End-to-end PyTorch DDP training with NCCL optimization
-    * Zero-copy HDF5 streaming with worker-safe dataset handles
-    * Separate normalization for flux and delta_t (CRITICAL FIX)
-    * Flash-accelerated attention and TF32 matmul
-    * Mixed-precision training with dynamic GradScaler
-    * CUDA streams for asynchronous data prefetching
-    * Cosine-warmup learning rate schedule with proper warmup
-    * Checkpoint resumption for fault tolerance
+    - End-to-end PyTorch DDP training with NCCL optimization
+    - Zero-copy HDF5 streaming with worker-safe dataset handles
+    - Separate normalization for flux and delta_t (CRITICAL FIX)
+    - Flash-accelerated attention and TF32 matmul
+    - Mixed-precision training with dynamic GradScaler
+    - CUDA streams for asynchronous data prefetching
+    - Cosine-warmup learning rate schedule with proper warmup
+    - Checkpoint resumption for fault tolerance
 
-FIXES APPLIED (v2.3):
-    * CRITICAL: Fixed stats dictionary keys (norm_median → flux_median, norm_iqr → flux_iqr)
-    * Delta_t now normalized with its own median/IQR (not flux stats)
-    * DDP optimizations: broadcast_buffers=False, gradient_as_bucket_view=True
-    * Batch size validation for distributed training
-    * Increased prefetch_factor default to 4 for better GPU saturation
-    * Complete type hints for all functions
-    * Receptive field validation in dataset loading
-    * Proper statistics saved for evaluation compatibility
-    * Deterministic seeding for reproducibility
-    * GradScaler constructor format fixed for PyTorch 2.x
-    * Proper warmup scheduler implementation
-    * Scheduler total_steps now accounts for accumulation_steps
+FIXES APPLIED (v2.4):
+    - CRITICAL: Fixed checkpoint key from 'config' to 'model_config' for evaluate.py compatibility
+    - Fixed stats dictionary keys (norm_median -> flux_median, norm_iqr -> flux_iqr)
+    - Delta_t now normalized with its own median/IQR (not flux stats)
+    - DDP optimizations: broadcast_buffers=False, gradient_as_bucket_view=True
+    - Batch size validation for distributed training
+    - Increased prefetch_factor default to 4 for better GPU saturation
+    - Complete type hints for all functions
+    - Receptive field validation in dataset loading
+    - Proper statistics saved for evaluation compatibility
+    - Deterministic seeding for reproducibility
+    - GradScaler constructor format fixed for PyTorch 2.x
+    - Proper warmup scheduler implementation
+    - Scheduler total_steps now accounts for accumulation_steps
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.3
+Version: 2.4
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 # =============================================================================
 # ENVIRONMENT CONFIGURATION
@@ -160,10 +161,14 @@ def format_time(seconds: float) -> str:
     """
     Format seconds into human-readable time string.
     
-    Args:
-        seconds: Time in seconds.
+    Parameters
+    ----------
+    seconds : float
+        Time in seconds.
         
-    Returns:
+    Returns
+    -------
+    str
         Formatted string (e.g., "1.5m", "2.3h").
     """
     if seconds < 0:
@@ -179,10 +184,14 @@ def format_number(n: int) -> str:
     """
     Format large numbers with K/M suffixes.
     
-    Args:
-        n: Number to format.
+    Parameters
+    ----------
+    n : int
+        Number to format.
         
-    Returns:
+    Returns
+    -------
+    str
         Formatted string (e.g., "1.5M", "300K").
     """
     if n < 0:
@@ -209,7 +218,9 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
     Initializes NCCL process group and configures CUDA settings
     for optimal multi-GPU training performance.
     
-    Returns:
+    Returns
+    -------
+    tuple
         Tuple of (rank, local_rank, world_size, is_distributed).
     """
     if 'RANK' not in os.environ:
@@ -261,9 +272,12 @@ def set_seed(seed: int, rank: int = 0) -> None:
     """
     Set random seeds for reproducibility.
     
-    Args:
-        seed: Base random seed.
-        rank: Process rank (adds offset for different workers).
+    Parameters
+    ----------
+    seed : int
+        Base random seed.
+    rank : int, optional
+        Process rank (adds offset for different workers). Default is 0.
     """
     seed_offset = seed + rank
     random.seed(seed_offset)
@@ -300,19 +314,26 @@ class MicrolensingDataset(Dataset):
     Memory-efficient HDF5 dataset for microlensing light curves.
     
     Features:
-        * Zero-copy HDF5 access with file handle per worker
-        * Robust normalization using median and IQR
-        * Separate normalization for flux and delta_t
-        * Sequence length computation for masking
-        * Thread-safe worker initialization
+        - Zero-copy HDF5 access with file handle per worker
+        - Robust normalization using median and IQR
+        - Separate normalization for flux and delta_t
+        - Sequence length computation for masking
+        - Thread-safe worker initialization
     
-    Args:
-        hdf5_path: Path to HDF5 file.
-        indices: Subset indices to use.
-        flux_median: Median flux for normalization.
-        flux_iqr: Flux IQR for normalization.
-        delta_t_median: Median delta_t for normalization.
-        delta_t_iqr: Delta_t IQR for normalization.
+    Parameters
+    ----------
+    hdf5_path : str
+        Path to HDF5 file.
+    indices : np.ndarray
+        Subset indices to use.
+    flux_median : float
+        Median flux for normalization.
+    flux_iqr : float
+        Flux IQR for normalization.
+    delta_t_median : float
+        Median delta_t for normalization.
+    delta_t_iqr : float
+        Delta_t IQR for normalization.
     """
     
     def __init__(
@@ -341,10 +362,14 @@ class MicrolensingDataset(Dataset):
         """
         Get single sample with normalization.
         
-        Args:
-            idx: Sample index in subset.
+        Parameters
+        ----------
+        idx : int
+            Sample index in subset.
             
-        Returns:
+        Returns
+        -------
+        tuple
             Tuple of (flux, delta_t, length, label).
         """
         if self.h5_file is None:
@@ -377,11 +402,13 @@ def worker_init_fn(worker_id: int) -> None:
     Initialize worker process with unique seed.
     
     Ensures each DataLoader worker has:
-        * Independent random state
-        * Own HDF5 file handle (thread-safe)
+        - Independent random state
+        - Own HDF5 file handle (thread-safe)
     
-    Args:
-        worker_id: Worker process ID.
+    Parameters
+    ----------
+    worker_id : int
+        Worker process ID.
     """
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
@@ -394,10 +421,14 @@ def collate_fn(
     """
     Collate batch with proper tensor stacking.
     
-    Args:
-        batch: List of (flux, delta_t, length, label) tuples.
+    Parameters
+    ----------
+    batch : list
+        List of (flux, delta_t, length, label) tuples.
         
-    Returns:
+    Returns
+    -------
+    tuple
         Batched tensors (B, T) for flux/delta_t, (B,) for lengths/labels.
     """
     flux, delta_t, lengths, labels = zip(*batch)
@@ -429,13 +460,20 @@ def load_and_split_data(
     Both must be normalized with their own median/IQR for proper
     model training and evaluation.
     
-    Args:
-        data_path: Path to HDF5 file.
-        val_fraction: Validation fraction.
-        seed: Random seed.
-        rank: Process rank.
+    Parameters
+    ----------
+    data_path : str
+        Path to HDF5 file.
+    val_fraction : float
+        Validation fraction.
+    seed : int
+        Random seed.
+    rank : int
+        Process rank.
         
-    Returns:
+    Returns
+    -------
+    tuple
         Tuple of (train_indices, val_indices, labels, stats_dict).
     """
     if is_main_process(rank):
@@ -515,18 +553,30 @@ def create_dataloaders(
     """
     Create train and validation dataloaders.
     
-    Args:
-        data_path: Path to HDF5 file.
-        train_idx: Training indices.
-        val_idx: Validation indices.
-        stats: Normalization statistics.
-        batch_size: Batch size per GPU.
-        num_workers: Number of worker processes.
-        prefetch_factor: Prefetch factor.
-        is_ddp: Whether using DDP.
-        rank: Process rank.
+    Parameters
+    ----------
+    data_path : str
+        Path to HDF5 file.
+    train_idx : np.ndarray
+        Training indices.
+    val_idx : np.ndarray
+        Validation indices.
+    stats : dict
+        Normalization statistics.
+    batch_size : int
+        Batch size per GPU.
+    num_workers : int
+        Number of worker processes.
+    prefetch_factor : int
+        Prefetch factor.
+    is_ddp : bool
+        Whether using DDP.
+    rank : int
+        Process rank.
         
-    Returns:
+    Returns
+    -------
+    tuple
         Tuple of (train_loader, val_loader).
     """
     train_dataset = MicrolensingDataset(
@@ -602,12 +652,18 @@ class WarmupCosineScheduler(_LRScheduler):
     Implements a learning rate schedule that linearly increases
     during warmup, then follows cosine annealing to a minimum value.
     
-    Args:
-        optimizer: Wrapped optimizer.
-        warmup_steps: Number of warmup steps.
-        total_steps: Total number of training steps.
-        min_lr: Minimum learning rate.
-        last_epoch: The index of last epoch.
+    Parameters
+    ----------
+    optimizer : torch.optim.Optimizer
+        Wrapped optimizer.
+    warmup_steps : int
+        Number of warmup steps.
+    total_steps : int
+        Total number of training steps.
+    min_lr : float, optional
+        Minimum learning rate. Default is 1e-6.
+    last_epoch : int, optional
+        The index of last epoch. Default is -1.
     """
     
     def __init__(
@@ -651,12 +707,18 @@ def compute_class_weights(
     """
     Compute class weights for balanced loss.
     
-    Args:
-        labels: Label array.
-        n_classes: Number of classes.
-        device: Target device.
+    Parameters
+    ----------
+    labels : np.ndarray
+        Label array.
+    n_classes : int
+        Number of classes.
+    device : torch.device
+        Target device.
         
-    Returns:
+    Returns
+    -------
+    Tensor
         Class weight tensor.
     """
     counts = np.bincount(labels, minlength=n_classes)
@@ -684,23 +746,40 @@ def train_epoch(
     """
     Train for one epoch with gradient accumulation.
     
-    Args:
-        model: Model to train.
-        loader: Training dataloader.
-        optimizer: Optimizer.
-        scheduler: Learning rate scheduler.
-        scaler: Gradient scaler for AMP.
-        class_weights: Class weights for loss.
-        device: Computation device.
-        rank: Process rank.
-        world_size: Number of processes.
-        epoch: Current epoch number.
-        config: Model configuration.
-        accumulation_steps: Gradient accumulation steps.
-        clip_norm: Gradient clipping norm.
-        use_prefetcher: Use CUDA stream prefetching.
+    Parameters
+    ----------
+    model : nn.Module
+        Model to train.
+    loader : DataLoader
+        Training dataloader.
+    optimizer : torch.optim.Optimizer
+        Optimizer.
+    scheduler : _LRScheduler
+        Learning rate scheduler.
+    scaler : torch.amp.GradScaler, optional
+        Gradient scaler for AMP.
+    class_weights : Tensor
+        Class weights for loss.
+    device : torch.device
+        Computation device.
+    rank : int
+        Process rank.
+    world_size : int
+        Number of processes.
+    epoch : int
+        Current epoch number.
+    config : ModelConfig
+        Model configuration.
+    accumulation_steps : int, optional
+        Gradient accumulation steps. Default is 1.
+    clip_norm : float, optional
+        Gradient clipping norm. Default is DEFAULT_CLIP_NORM.
+    use_prefetcher : bool, optional
+        Use CUDA stream prefetching. Default is False.
         
-    Returns:
+    Returns
+    -------
+    tuple
         Tuple of (average_loss, accuracy).
     """
     model.train()
@@ -803,18 +882,30 @@ def evaluate(
     """
     Evaluate model on validation set.
     
-    Args:
-        model: Model to evaluate.
-        loader: Validation dataloader.
-        class_weights: Class weights for loss.
-        device: Computation device.
-        rank: Process rank.
-        world_size: Number of processes.
-        config: Model configuration.
-        return_predictions: Return predictions and labels.
-        use_prefetcher: Use CUDA stream prefetching.
+    Parameters
+    ----------
+    model : nn.Module
+        Model to evaluate.
+    loader : DataLoader
+        Validation dataloader.
+    class_weights : Tensor
+        Class weights for loss.
+    device : torch.device
+        Computation device.
+    rank : int
+        Process rank.
+    world_size : int
+        Number of processes.
+    config : ModelConfig
+        Model configuration.
+    return_predictions : bool, optional
+        Return predictions and labels. Default is False.
+    use_prefetcher : bool, optional
+        Use CUDA stream prefetching. Default is False.
         
-    Returns:
+    Returns
+    -------
+    dict
         Dictionary with loss, accuracy, and optionally predictions.
     """
     model.eval()
@@ -894,17 +985,33 @@ def save_checkpoint(
     """
     Save checkpoint with all training state.
     
-    Args:
-        model: Model to save.
-        optimizer: Optimizer state.
-        scheduler: Scheduler state.
-        scaler: GradScaler state.
-        epoch: Current epoch.
-        best_acc: Best accuracy so far.
-        config: Model config.
-        stats: Training statistics.
-        output_dir: Output directory.
-        is_best: Whether this is the best checkpoint.
+    Parameters
+    ----------
+    model : nn.Module
+        Model to save.
+    optimizer : torch.optim.Optimizer
+        Optimizer state.
+    scheduler : _LRScheduler
+        Scheduler state.
+    scaler : torch.amp.GradScaler, optional
+        GradScaler state.
+    epoch : int
+        Current epoch.
+    best_acc : float
+        Best accuracy so far.
+    config : ModelConfig
+        Model config.
+    stats : dict
+        Training statistics.
+    output_dir : Path
+        Output directory.
+    is_best : bool, optional
+        Whether this is the best checkpoint. Default is False.
+        
+    Notes
+    -----
+    CRITICAL FIX (v2.4): Changed key from 'config' to 'model_config' for
+    compatibility with evaluate.py which expects 'model_config'.
     """
     # Unwrap model from DDP and torch.compile
     unwrapped_model = model
@@ -922,7 +1029,8 @@ def save_checkpoint(
         'scheduler_state_dict': scheduler.state_dict(),
         'scaler_state_dict': scaler.state_dict() if scaler else None,
         'best_accuracy': best_acc,
-        'config': config.to_dict(),
+        # CRITICAL FIX: Changed from 'config' to 'model_config' for evaluate.py compatibility
+        'model_config': config.to_dict(),
         'stats': stats,
     }
     
@@ -945,15 +1053,24 @@ def load_checkpoint_for_resume(
     """
     Load checkpoint for resuming training.
     
-    Args:
-        checkpoint_path: Path to checkpoint.
-        model: Model to load state into.
-        optimizer: Optimizer to load state into.
-        scheduler: Scheduler to load state into.
-        scaler: GradScaler to load state into.
-        device: Device.
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to checkpoint.
+    model : nn.Module
+        Model to load state into.
+    optimizer : torch.optim.Optimizer
+        Optimizer to load state into.
+    scheduler : _LRScheduler
+        Scheduler to load state into.
+    scaler : torch.amp.GradScaler, optional
+        GradScaler to load state into.
+    device : torch.device
+        Device.
         
-    Returns:
+    Returns
+    -------
+    tuple
         Tuple of (start_epoch, best_accuracy).
     """
     if not Path(checkpoint_path).exists():
@@ -996,11 +1113,16 @@ def should_use_grad_scaler(device: torch.device, use_amp: bool) -> bool:
     GradScaler is only needed for FP16 training. BF16 training
     does not require loss scaling.
     
-    Args:
-        device: Computation device.
-        use_amp: Whether AMP is enabled.
+    Parameters
+    ----------
+    device : torch.device
+        Computation device.
+    use_amp : bool
+        Whether AMP is enabled.
         
-    Returns:
+    Returns
+    -------
+    bool
         Whether to use GradScaler.
     """
     if not use_amp:
