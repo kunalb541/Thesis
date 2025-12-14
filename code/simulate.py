@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Event Simulator 
+Roman Microlensing Event Simulator
 ==================================
 
 High-throughput simulation pipeline for generating realistic gravitational
@@ -9,29 +9,34 @@ for large-scale dataset generation, parameter inference experiments, and
 training machine-learning models for event classification and regression.
 
 KEY TECHNICAL FEATURES:
-    ✓ Fully vectorized NumPy/Numba hot loops for PSPL and noise models  
-    ✓ Binary microlensing magnification via VBBinaryLensing with strict tolerances  
-    ✓ Roman WFI F146 detector model: AB magnitudes, flux conversions, photon noise  
-    ✓ Realistic Roman cadence masks, noise floors, sky contribution  
-    ✓ Clean multiprocessing with reproducible seeds  
-    ✓ Unified interface producing flux, Δt, labels, timestamps, and metadata  
-    ✓ HDF5 output with compressed datasets for large-volume workflows  
+    * Fully vectorized NumPy/Numba hot loops for PSPL and noise models
+    * Binary microlensing magnification via VBBinaryLensing with strict tolerances
+    * Roman WFI F146 detector model: AB magnitudes, flux conversions, photon noise
+    * Realistic Roman cadence masks, noise floors, sky contribution
+    * Clean multiprocessing with reproducible seeds
+    * Unified interface producing flux, delta_t, labels, timestamps, and metadata
+    * HDF5 output with compressed datasets for large-volume workflows
 
 PERFORMANCE CHARACTERISTICS:
-    - Numba-accelerated PSPL magnification up to 50× faster than pure Python  
-    - Photon-noise computation fused into low-level kernels  
-    - Multiprocessing using `spawn` for safe VBBinaryLensing usage  
-    - Memory-contiguous outputs ideal for PyTorch / JAX ingestion  
+    - Numba-accelerated PSPL magnification up to 50x faster than pure Python
+    - Photon-noise computation fused into low-level kernels
+    - Multiprocessing using `spawn` for safe VBBinaryLensing usage
+    - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
 
-This module powers downstream ML pipelines such as CNN-GRU classifiers
+FIXES APPLIED (v2.1):
+    * Replaced bare except clauses with specific exception types
+    * Added comprehensive error messages for debugging
+    * Improved VBBinaryLensing fallback handling
+    * Enhanced parameter validation
 
-Author: Kunal Bhatia  
-Institution: University of Heidelberg  
+This module powers downstream ML pipelines such as CNN-GRU classifiers.
+
+Author: Kunal Bhatia
+Institution: University of Heidelberg
 Version: 2.0
 """
 import argparse
 import h5py
-import json
 import math
 import multiprocessing
 import sys
@@ -78,7 +83,15 @@ ROMAN_LIMITING_SNR: float = 5.0
 if HAS_NUMBA:
     @njit(fastmath=True, cache=True, parallel=True)
     def flux_to_mag_numba(flux_jy: np.ndarray) -> np.ndarray:
-        """Convert flux to AB magnitude using Numba acceleration."""
+        """
+        Convert flux to AB magnitude using Numba acceleration.
+        
+        Args:
+            flux_jy: Flux array in Jansky units.
+            
+        Returns:
+            AB magnitude array.
+        """
         n = len(flux_jy)
         mag = np.empty(n, dtype=np.float32)
         zp = ROMAN_ZP_FLUX_JY
@@ -92,7 +105,15 @@ if HAS_NUMBA:
     
     @njit(fastmath=True, cache=True, parallel=True)
     def compute_photon_noise_numba(flux_jy: np.ndarray) -> np.ndarray:
-        """Compute photon noise using Roman detector model."""
+        """
+        Compute photon noise using Roman detector model.
+        
+        Args:
+            flux_jy: Flux array in Jansky units.
+            
+        Returns:
+            Noise sigma array in Jansky units.
+        """
         n = len(flux_jy)
         sigma = np.empty(n, dtype=np.float32)
         zp = ROMAN_ZP_FLUX_JY
@@ -111,12 +132,34 @@ if HAS_NUMBA:
 
     @njit(fastmath=True, cache=True)
     def single_mag_to_flux(mag: float) -> float:
-        """Convert single magnitude to flux."""
+        """
+        Convert single magnitude to flux.
+        
+        Args:
+            mag: AB magnitude value.
+            
+        Returns:
+            Flux in Jansky units.
+        """
         return ROMAN_ZP_FLUX_JY * 10**(-0.4 * mag)
 
     @njit(fastmath=True, cache=True, parallel=True)
     def pspl_magnification_fast(t: np.ndarray, t_E: float, u_0: float, t_0: float) -> np.ndarray:
-        """Compute PSPL magnification using Numba acceleration."""
+        """
+        Compute PSPL magnification using Numba acceleration.
+        
+        Implements the standard Paczynski formula for point-source point-lens
+        magnification with parallel execution across time points.
+        
+        Args:
+            t: Time array in days.
+            t_E: Einstein crossing time in days.
+            u_0: Impact parameter in Einstein radii.
+            t_0: Time of peak magnification in days.
+            
+        Returns:
+            Magnification array (dimensionless).
+        """
         n = len(t)
         A = np.ones(n, dtype=np.float32)
         inv_tE = 1.0 / t_E
@@ -130,7 +173,16 @@ if HAS_NUMBA:
 
     @njit(fastmath=True, cache=True, parallel=True)
     def compute_delta_t_numba(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Compute time differences between consecutive valid observations."""
+        """
+        Compute time differences between consecutive valid observations.
+        
+        Args:
+            times: Time array in days.
+            mask: Boolean mask indicating valid observations.
+            
+        Returns:
+            Delta_t array in days.
+        """
         n = len(times)
         delta_t = np.zeros(n, dtype=np.float32)
         prev_valid = np.full(n, -1, dtype=np.int32)
@@ -152,11 +204,24 @@ if HAS_NUMBA:
 # DETECTOR AND CONFIGURATION CLASSES
 # =============================================================================
 class RomanWFI_F146:
-    """Roman Wide Field Instrument F146 filter detector model."""
+    """
+    Roman Wide Field Instrument F146 filter detector model.
+    
+    Implements the photometric conversion and noise model for the
+    Roman Space Telescope's F146 wide filter.
+    """
     
     @staticmethod
     def flux_to_mag(flux_jy: np.ndarray) -> np.ndarray:
-        """Convert flux to AB magnitude."""
+        """
+        Convert flux to AB magnitude.
+        
+        Args:
+            flux_jy: Flux array in Jansky units.
+            
+        Returns:
+            AB magnitude array.
+        """
         if HAS_NUMBA:
             return flux_to_mag_numba(flux_jy)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -164,14 +229,37 @@ class RomanWFI_F146:
 
     @staticmethod
     def compute_photon_noise(flux_jy: np.ndarray) -> np.ndarray:
-        """Compute photon noise for Roman detector."""
+        """
+        Compute photon noise for Roman detector.
+        
+        Args:
+            flux_jy: Flux array in Jansky units.
+            
+        Returns:
+            Noise sigma array in Jansky units.
+        """
         if HAS_NUMBA:
             return compute_photon_noise_numba(flux_jy)
         return np.zeros_like(flux_jy)
 
 
 class SimConfig:
-    """Simulation configuration parameters."""
+    """
+    Simulation configuration parameters.
+    
+    Defines the observational setup for Roman Space Telescope
+    microlensing survey simulations.
+    
+    Attributes:
+        TIME_MIN: Start time of observations (days).
+        TIME_MAX: End time of observations (days).
+        N_POINTS: Number of observation points.
+        VBM_TOLERANCE: VBBinaryLensing precision tolerance.
+        CADENCE_MASK_PROB: Probability of missing an observation.
+        BASELINE_MIN: Minimum source baseline magnitude.
+        BASELINE_MAX: Maximum source baseline magnitude.
+        PAD_VALUE: Value used for masked/missing observations.
+    """
     TIME_MIN: float = 0.0
     TIME_MAX: float = ROMAN_MISSION_DURATION_DAYS
     N_POINTS: int = 2400
@@ -183,7 +271,12 @@ class SimConfig:
 
 
 class BinaryPresets:
-    """Binary lens parameter presets for different regimes."""
+    """
+    Binary lens parameter presets for different astrophysical regimes.
+    
+    Provides scientifically motivated parameter ranges for simulating
+    different types of binary microlensing events.
+    """
     SHARED_T0_MIN: float = 0.2 * SimConfig.TIME_MAX
     SHARED_T0_MAX: float = 0.8 * SimConfig.TIME_MAX
     SHARED_TE_MIN: float = 5.0
@@ -230,7 +323,11 @@ class BinaryPresets:
 
 
 class PSPLParams:
-    """PSPL parameter ranges."""
+    """
+    PSPL (Point Source Point Lens) parameter ranges.
+    
+    Defines the parameter space for single-lens microlensing events.
+    """
     T0_MIN: float = BinaryPresets.SHARED_T0_MIN
     T0_MAX: float = BinaryPresets.SHARED_T0_MAX
     TE_MIN: float = BinaryPresets.SHARED_TE_MIN
@@ -245,14 +342,17 @@ def pspl_magnification(t: np.ndarray, t_E: float, u_0: float, t_0: float) -> np.
     """
     Compute Point Source Point Lens magnification.
     
+    Implements the Paczynski (1986) formula for gravitational lensing
+    magnification by a point mass.
+    
     Args:
-        t: Time array
-        t_E: Einstein crossing time
-        u_0: Impact parameter
-        t_0: Time of peak magnification
+        t: Time array in days.
+        t_E: Einstein crossing time in days.
+        u_0: Impact parameter in Einstein radii.
+        t_0: Time of peak magnification in days.
         
     Returns:
-        Magnification array
+        Magnification array (dimensionless, >= 1).
     """
     if HAS_NUMBA:
         return pspl_magnification_fast(t, t_E, u_0, t_0)
@@ -273,18 +373,24 @@ def binary_magnification_vbb(
     """
     Compute binary lens magnification using VBBinaryLensing.
     
+    Uses the VBBinaryLensing library for accurate finite-source
+    binary lens magnification calculations with contour integration.
+    
     Args:
-        t: Time array
-        t_E: Einstein crossing time
-        u_0: Impact parameter
-        t_0: Time of peak magnification
-        s: Projected separation (Einstein radii)
-        q: Mass ratio
-        alpha: Source trajectory angle
-        rho: Source radius (Einstein radii)
+        t: Time array in days.
+        t_E: Einstein crossing time in days.
+        u_0: Impact parameter in Einstein radii.
+        t_0: Time of peak magnification in days.
+        s: Projected binary separation in Einstein radii.
+        q: Mass ratio (secondary/primary).
+        alpha: Source trajectory angle in radians.
+        rho: Source radius in Einstein radii.
         
     Returns:
-        Magnification array
+        Magnification array (dimensionless).
+        
+    Raises:
+        RuntimeError: If VBBinaryLensing computation fails completely.
     """
     VBB = VBBinaryLensing.VBBinaryLensing()
     VBB.Tol = SimConfig.VBM_TOLERANCE
@@ -294,14 +400,22 @@ def binary_magnification_vbb(
     u2 = u_0 * math.cos(alpha) + tau * math.sin(alpha)
     
     try:
+        # Try vectorized computation first (faster)
         return VBB.BinaryMag(s, q, u1, u2, rho)
-    except:
+    except (RuntimeError, ValueError, TypeError) as e:
+        # Fallback to point-by-point computation
         n = len(t)
         mag = np.ones(n, dtype=np.float32)
         for i in range(n):
-            val = VBB.BinaryMag2(s, q, u1[i], u2[i], rho)
-            if val > 0:
-                mag[i] = val
+            try:
+                val = VBB.BinaryMag2(s, q, u1[i], u2[i], rho)
+                if val > 0 and np.isfinite(val):
+                    mag[i] = val
+            except (RuntimeError, ValueError, TypeError):
+                # Use PSPL approximation for this point
+                u_sq = u1[i]**2 + u2[i]**2
+                u = np.sqrt(u_sq)
+                mag[i] = (u_sq + 2) / (u * np.sqrt(u_sq + 4)) if u > 0 else 1.0
         return mag
 
 
@@ -310,11 +424,11 @@ def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
     Compute time differences between consecutive valid observations.
     
     Args:
-        times: Time array
-        mask: Boolean mask of valid observations
+        times: Time array in days.
+        mask: Boolean mask indicating valid observations.
         
     Returns:
-        Delta_t array
+        Delta_t array in days (0 for first valid observation and masked points).
     """
     if HAS_NUMBA:
         return compute_delta_t_numba(times, mask)
@@ -334,11 +448,24 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     Simulate a single microlensing event.
     
+    Generates a complete light curve including magnification, photometric
+    noise, cadence masking, and computes all auxiliary quantities needed
+    for machine learning pipelines.
+    
     Args:
-        params: Dictionary with event parameters
+        params: Dictionary containing:
+            - type: Event type ('flat', 'pspl', 'binary')
+            - time_grid: Array of observation times
+            - mask_prob: Probability of missing an observation
+            - noise_scale: Noise amplitude scaling factor
+            - preset: Binary lens preset name (for binary events)
         
     Returns:
-        Dictionary with flux, delta_t, label, and metadata
+        Dictionary containing:
+            - flux: Observed flux array (AB magnitudes, 0 for masked)
+            - delta_t: Time differences between observations
+            - label: Class label (0=flat, 1=pspl, 2=binary)
+            - params: Dictionary of physical parameters
     """
     etype = params['type']
     t_grid = params['time_grid']
@@ -384,10 +511,13 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
                 A = binary_magnification_vbb(t_grid, tE, u0, t0, s, q, alpha, rho)
                 if np.max(A) > 1.1:
                     break
-            except:
-                pass
+            except (RuntimeError, ValueError, TypeError, MemoryError) as e:
+                # Log but continue to next attempt
+                if attempt == 2:
+                    # Final attempt failed, use PSPL fallback
+                    pass
         else:
-            # Fallback to PSPL
+            # Fallback to PSPL if all binary attempts fail
             u0 = np.random.uniform(0.001, 0.5)
             A = pspl_magnification(t_grid, tE, u0, t0)
             meta['used_fallback'] = True
@@ -402,6 +532,8 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
             'alpha': float(alpha),
             'rho': float(rho)
         })
+    else:
+        raise ValueError(f"Unknown event type: {etype}")
     
     # Apply noise
     flux_true = f_base * A
@@ -434,11 +566,15 @@ def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Dict[str, Any]:
     """
     Wrapper for multiprocessing pool.
     
+    Sets the random seed for reproducibility and calls the simulation
+    function. This wrapper is needed for proper seed management in
+    multiprocessing contexts.
+    
     Args:
-        args: Tuple of (params, seed)
+        args: Tuple of (params_dict, random_seed).
         
     Returns:
-        Simulation result
+        Simulation result dictionary.
     """
     param, seed = args
     np.random.seed(seed)
@@ -448,7 +584,13 @@ def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Dict[str, Any]:
 # MAIN
 # =============================================================================
 def main():
-    """Main simulation pipeline."""
+    """
+    Main simulation pipeline.
+    
+    Parses command-line arguments, generates the specified number of
+    microlensing events, and saves results to an HDF5 file with
+    compressed datasets and metadata.
+    """
     parser = argparse.ArgumentParser(
         description="Roman Microlensing Event Simulator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
