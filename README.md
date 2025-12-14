@@ -305,7 +305,7 @@ for preset in distinct stellar planetary baseline; do
   srun --partition=gpu_a100_short --gres=gpu:4 --nodes=1 --ntasks=1 --cpus-per-task=32 \
     --exclusive --time=00:30:00 \
     python -u simulate.py \
-    --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
+    --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
     --binary_preset ${preset} \
     --output ../data/raw/${preset}.h5 \
     --num_workers 32 --seed $RANDOM > log_${preset}.txt 2>&1 &
