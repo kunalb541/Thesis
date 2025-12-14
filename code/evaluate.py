@@ -127,7 +127,7 @@ COLORS_COLORBLIND: List[str] = ['#0173b2', '#de8f05', '#029e73']  # IBM colorbli
 
 # Publication settings
 DPI: int = 600  # Publication standard
-DPI_SCREEN: int = 150  # For quick preview
+DPI_SCREEN: int = 120  # For quick preview
 EPS: float = 1e-8
 
 # Figure sizes (inches) - optimized for A&A/MNRAS single/double column
@@ -1764,7 +1764,7 @@ class RomanEvaluator:
         ax.set_xlabel('False Positive Rate', fontweight='bold')
         ax.set_ylabel('True Positive Rate', fontweight='bold')
         ax.set_title('ROC Curves (One-vs-Rest)', fontweight='bold')
-        ax.legend(loc='lower right', fontsize=8)
+        ax.legend(loc='lower right', fontsize=7, framealpha=0.95, edgecolor='black')
         ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
         ax.set_aspect('equal')
@@ -1884,7 +1884,7 @@ class RomanEvaluator:
             
             ax.set_xlabel('Predicted Probability', fontweight='bold')
             ax.set_ylabel('Count', fontweight='bold')
-            ax.set_title(f'{name} Predictions', fontweight='bold')
+            ax.set_title(f'{name}', fontsize=11, fontweight='bold', pad=10)
             ax.legend(fontsize=8)
             ax.set_xlim([0, 1])
         
@@ -2109,7 +2109,7 @@ class RomanEvaluator:
         
         # Reference line at 0.3 (typical detectability threshold)
         ax.axvline(0.3, color='gray', linestyle='--', linewidth=1.5, 
-                  alpha=0.7, label=r'$u_0 = 0.3$ (caustic threshold)')
+                  alpha=0.7, label=r'$u_0 = 0.3$')
         
         ax.set_xlabel(r'Impact Parameter $u_0$', fontweight='bold')
         ax.set_ylabel('Binary Classification Accuracy', fontweight='bold')
@@ -2195,10 +2195,10 @@ class RomanEvaluator:
         
         # KS test result
         result = "BIAS DETECTED" if p_value < 0.05 else "NO BIAS"
-        ax.text(0.05, 0.95, 
-               f'KS test: D={ks_stat:.4f}, p={p_value:.4f}\n{result}',
+        ax.text(0.98, 0.97, 
+               f'KS: D={ks_stat:.3f}, p={p_value:.2f}\n{result}',
                transform=ax.transAxes, fontsize=8,
-               verticalalignment='top',
+               verticalalignment='top', horizontalalignment='right',
                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
         ax.legend(fontsize=8)
@@ -2297,7 +2297,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.scatter(times_valid, flux_valid, 
+        ax1.plot(times_valid, flux_valid, 
                 'o-', color=self.colors[true_label], markersize=3, linewidth=1, alpha=0.7)
         ax1.invert_yaxis()
         ax1.set_ylabel('Magnitude (AB)', fontsize=11)
