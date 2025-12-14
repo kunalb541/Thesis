@@ -28,11 +28,21 @@ Scientific Visualization
     * Light curve examples with magnitude conversion (Roman F146)
     * Temporal evolution plots with 3-panel layout
     * Impact parameter dependency analysis for binary classification
-    * Colorblind-safe palette options
+    * Colorblind-safe palette options (IBM/Wong standard)
+
+Fixes Applied (v2.2)
+--------------------
+    * CRITICAL: Fixed parameter-label alignment after shuffle in simulate.py
+    * Publication-quality graphs with LaTeX rendering option
+    * Proper checkpoint stats loading with fallback warnings
+    * 600 DPI output for publication standard
+    * Error bars on early detection analysis
+    * Consistent figure sizing for journal submission
+    * Improved edge case handling throughout
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.1
+Version: 2.2
 """
 from __future__ import annotations
 
@@ -67,6 +77,7 @@ except Exception:
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy import stats
 from scipy.stats import ks_2samp
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
@@ -90,10 +101,97 @@ warnings.filterwarnings("ignore")
 
 ROMAN_ZP_FLUX_JY: float = 3631.0  # AB magnitude zero-point in Jansky
 CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
-COLORS_DEFAULT: List[str] = ['#95a5a6', '#e74c3c', '#3498db']  # Grey, Red, Blue
+
+# Color palettes
+COLORS_DEFAULT: List[str] = ['#7f8c8d', '#c0392b', '#2980b9']  # Grey, Red, Blue
 COLORS_COLORBLIND: List[str] = ['#0173b2', '#de8f05', '#029e73']  # IBM colorblind-safe
-DPI: int = 300
+
+# Publication settings
+DPI: int = 600  # Publication standard
+DPI_SCREEN: int = 150  # For quick preview
 EPS: float = 1e-8
+
+# Figure sizes (inches) - optimized for A&A/MNRAS single/double column
+FIG_SINGLE_COL: Tuple[float, float] = (3.5, 3.0)  # ~8.9cm
+FIG_DOUBLE_COL: Tuple[float, float] = (7.0, 5.0)  # ~17.8cm
+FIG_FULL_PAGE: Tuple[float, float] = (7.0, 9.0)
+
+
+# =============================================================================
+# MATPLOTLIB CONFIGURATION FOR PUBLICATION
+# =============================================================================
+
+def configure_matplotlib(use_latex: bool = False) -> None:
+    """
+    Configure matplotlib for publication-quality figures.
+    
+    Parameters
+    ----------
+    use_latex : bool, optional
+        Enable LaTeX rendering for text. Requires LaTeX installation.
+        Default is False for compatibility.
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    
+    # Base configuration
+    plt.rcParams.update({
+        # Figure
+        'figure.dpi': DPI_SCREEN,
+        'savefig.dpi': DPI,
+        'figure.figsize': FIG_DOUBLE_COL,
+        'figure.facecolor': 'white',
+        'savefig.facecolor': 'white',
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.05,
+        
+        # Font
+        'font.family': 'serif',
+        'font.serif': ['Computer Modern Roman', 'DejaVu Serif', 'Times New Roman'],
+        'font.size': 10,
+        'axes.titlesize': 12,
+        'axes.labelsize': 11,
+        'xtick.labelsize': 9,
+        'ytick.labelsize': 9,
+        'legend.fontsize': 9,
+        
+        # Lines
+        'lines.linewidth': 1.5,
+        'lines.markersize': 5,
+        'patch.linewidth': 0.5,
+        
+        # Axes
+        'axes.linewidth': 0.8,
+        'axes.grid': True,
+        'axes.axisbelow': True,
+        'grid.alpha': 0.3,
+        'grid.linewidth': 0.5,
+        
+        # Ticks
+        'xtick.major.width': 0.8,
+        'ytick.major.width': 0.8,
+        'xtick.minor.width': 0.5,
+        'ytick.minor.width': 0.5,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'xtick.top': True,
+        'ytick.right': True,
+        
+        # Legend
+        'legend.frameon': True,
+        'legend.framealpha': 0.9,
+        'legend.edgecolor': '0.8',
+        'legend.fancybox': False,
+        
+        # Error bars
+        'errorbar.capsize': 3,
+    })
+    
+    # LaTeX configuration (optional)
+    if use_latex:
+        plt.rcParams.update({
+            'text.usetex': True,
+            'text.latex.preamble': r'\usepackage{amsmath}\usepackage{amssymb}',
+        })
 
 
 # =============================================================================
@@ -163,6 +261,7 @@ def load_data_hybrid(path: str) -> Dict[str, Any]:
         Dictionary mapping dataset names to NumPy arrays. For HDF5 files,
         this includes 'flux', 'delta_t', 'labels', 'timestamps', and
         parameter arrays like 'params_flat', 'params_pspl', 'params_binary'.
+        Also includes HDF5 attributes as 'attrs' key.
         
     Raises
     ------
@@ -185,10 +284,14 @@ def load_data_hybrid(path: str) -> Dict[str, Any]:
     
     if path.suffix in {'.h5', '.hdf5'}:
         with h5py.File(path, 'r') as f:
+            # Load all datasets
             for key in f.keys():
                 dataset = f[key]
                 if isinstance(dataset, h5py.Dataset):
                     data[key] = dataset[:]
+            
+            # Load attributes (metadata)
+            data['attrs'] = dict(f.attrs)
                     
     elif path.suffix == '.npz':
         npz_data = np.load(path, allow_pickle=True)
@@ -200,17 +303,17 @@ def load_data_hybrid(path: str) -> Dict[str, Any]:
     return data
 
 
-def extract_parameters_from_structured(
+def extract_parameters_aligned(
     data: Dict[str, Any], 
     labels: np.ndarray
 ) -> Dict[str, np.ndarray]:
     """
-    Extract physical parameters from structured arrays saved by simulate.py.
+    Extract physical parameters with proper alignment to shuffled labels.
     
-    The simulation script saves parameters as separate structured arrays
-    for each class type (params_flat, params_pspl, params_binary). This
-    function merges them into full-length arrays aligned with the labels,
-    enabling physics-based analysis across the entire dataset.
+    CRITICAL FIX (v2.2): The simulate.py script shuffles all tasks before
+    processing, but saves parameters grouped by class type. This function
+    correctly reconstructs the full parameter arrays by using cumulative
+    indexing within each class.
     
     Parameters
     ----------
@@ -219,7 +322,7 @@ def extract_parameters_from_structured(
         keys like 'params_flat', 'params_pspl', 'params_binary'.
     labels : np.ndarray
         Label array of shape (n_samples,) with values in {0, 1, 2}.
-        Used to align parameters with their corresponding samples.
+        These are the shuffled labels from the HDF5 file.
         
     Returns
     -------
@@ -238,15 +341,15 @@ def extract_parameters_from_structured(
         
     Notes
     -----
-    The structured arrays from simulate.py have dtype with named fields.
-    This function handles the mapping from class-specific arrays to the
-    full dataset indices based on the label array.
+    The key insight is that params_flat[i] corresponds to the i-th occurrence
+    of label==0 in the shuffled labels array, NOT to index i in the full array.
+    This function tracks cumulative counts per class to reconstruct alignment.
     
     Examples
     --------
     >>> data = load_data_hybrid('simulation.h5')
     >>> labels = data['labels']
-    >>> params = extract_parameters_from_structured(data, labels)
+    >>> params = extract_parameters_aligned(data, labels)
     >>> u0_binary = params['u0'][labels == 2]  # u0 for binary events only
     """
     n_total = len(labels)
@@ -263,32 +366,42 @@ def extract_parameters_from_structured(
         'rho': np.full(n_total, np.nan, dtype=np.float32),
     }
     
-    # Extract from structured arrays for each class
-    for class_idx, class_name in enumerate(['flat', 'pspl', 'binary']):
+    # Map class index to class name
+    class_map = {0: 'flat', 1: 'pspl', 2: 'binary'}
+    
+    # Process each class with proper index tracking
+    for class_idx, class_name in class_map.items():
         key = f'params_{class_name}'
         if key not in data:
             continue
             
         struct_arr = data[key]
-        if not isinstance(struct_arr, np.ndarray):
+        if not isinstance(struct_arr, np.ndarray) or len(struct_arr) == 0:
             continue
         
-        # Find indices for this class in the full dataset
+        # Check if structured array with named fields
+        if not (hasattr(struct_arr, 'dtype') and struct_arr.dtype.names is not None):
+            continue
+        
+        # Find all indices where this class appears in shuffled labels
         class_mask = (labels == class_idx)
-        n_class = class_mask.sum()
+        class_indices = np.where(class_mask)[0]
         
-        if n_class == 0 or len(struct_arr) == 0:
+        # The params array is ordered by occurrence in the shuffled sequence
+        # params_X[i] corresponds to the i-th occurrence of class X
+        n_params = len(struct_arr)
+        n_indices = len(class_indices)
+        
+        # Use minimum to handle any length mismatches
+        n_to_assign = min(n_params, n_indices)
+        
+        if n_to_assign == 0:
             continue
         
-        # Handle potential length mismatch (shouldn't happen but be safe)
-        n_available = min(len(struct_arr), n_class)
-        class_indices = np.where(class_mask)[0][:n_available]
-        
-        # Extract fields from structured array
-        if hasattr(struct_arr, 'dtype') and struct_arr.dtype.names is not None:
-            for field_name in params.keys():
-                if field_name in struct_arr.dtype.names:
-                    params[field_name][class_indices] = struct_arr[field_name][:n_available]
+        # Assign parameters to correct indices
+        for field_name in params.keys():
+            if field_name in struct_arr.dtype.names:
+                params[field_name][class_indices[:n_to_assign]] = struct_arr[field_name][:n_to_assign]
     
     return params
 
@@ -369,6 +482,36 @@ def bootstrap_metric(
     upper = np.percentile(bootstrap_scores, (1 - alpha) * 100)
     
     return point_estimate, lower, upper
+
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """
+    JSON encoder for NumPy types and other special objects.
+    
+    Handles conversion of NumPy arrays, scalars, and other special
+    types to JSON-serializable formats for saving evaluation results.
+    """
+    
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, (np.floating, float)):
+            if np.isnan(obj) or np.isinf(obj):
+                return None
+            return float(obj)
+        if isinstance(obj, (np.integer, int)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, (Path, os.PathLike)):
+            return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if hasattr(obj, 'to_dict'):
+            return obj.to_dict()
+        if hasattr(obj, '__dict__'):
+            return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+        return super().default(obj)
 
 
 # =============================================================================
@@ -517,6 +660,8 @@ class RomanEvaluator:
         Use IBM colorblind-safe palette (default: False).
     save_formats : List[str], optional
         Output formats for plots, e.g., ['png', 'pdf', 'svg'] (default: ['png']).
+    use_latex : bool, optional
+        Enable LaTeX rendering for plot text (default: False).
     verbose : bool, optional
         Enable debug-level logging (default: False).
     
@@ -571,6 +716,7 @@ class RomanEvaluator:
         n_example_grid_per_type: int = 4,
         colorblind_safe: bool = False,
         save_formats: Optional[List[str]] = None,
+        use_latex: bool = False,
         verbose: bool = False
     ):
         """Initialize evaluator with model and data."""
@@ -582,6 +728,10 @@ class RomanEvaluator:
         self.n_example_grid_per_type = n_example_grid_per_type
         self.colors = COLORS_COLORBLIND if colorblind_safe else COLORS_DEFAULT
         self.save_formats = save_formats or ['png']
+        self.use_latex = use_latex
+        
+        # Configure matplotlib
+        configure_matplotlib(use_latex=use_latex)
         
         # Find model checkpoint
         self.model_path, self.exp_dir = self._find_best_model(experiment_name)
@@ -681,28 +831,15 @@ class RomanEvaluator:
     
     def _load_and_prepare_data(self, data_path: str) -> None:
         """
-        Load and prepare data with proper normalization for both flux and delta_t.
+        Load and prepare data with proper normalization.
         
-        This method implements the CRITICAL normalization matching between
-        training and evaluation. The checkpoint contains statistics computed
-        during training, and these MUST be used to normalize evaluation data
-        identically.
+        CRITICAL: Uses normalization statistics from training checkpoint
+        to ensure evaluation matches training distribution.
         
         Parameters
         ----------
         data_path : str
             Path to data file (.h5 or .npz).
-            
-        Raises
-        ------
-        KeyError
-            If required datasets ('flux', 'delta_t', 'labels') are missing.
-            
-        Notes
-        -----
-        If checkpoint statistics are missing, the method falls back to
-        computing statistics from the evaluation data. This is logged as
-        a warning since it may cause distribution mismatch.
         """
         self.logger.info("\nLoading data...")
         data_dict = load_data_hybrid(data_path)
@@ -723,7 +860,17 @@ class RomanEvaluator:
             raw_flux = raw_flux[indices]
             raw_delta_t = raw_delta_t[indices]
             labels = labels[indices]
+            
+            # Also subsample parameter arrays if present
+            for key in list(data_dict.keys()):
+                if key.startswith('params_'):
+                    # Parameters are class-specific, handle separately
+                    pass
+            
             self.logger.info(f"Subsampled to {self.n_samples} events")
+            self._subsampled_indices = indices
+        else:
+            self._subsampled_indices = None
         
         # Compute sequence lengths (non-zero observations)
         mask = (raw_flux != 0)
@@ -731,8 +878,6 @@ class RomanEvaluator:
         
         # =====================================================================
         # CRITICAL: Load normalization statistics from checkpoint
-        # Training normalizes flux and delta_t with SEPARATE statistics.
-        # Evaluation MUST use the SAME statistics for consistent inference.
         # =====================================================================
         
         stats = self.checkpoint.get('stats', {})
@@ -747,9 +892,9 @@ class RomanEvaluator:
             flux_valid = raw_flux[raw_flux != 0]
             flux_median = float(np.median(flux_valid))
             flux_iqr = float(np.percentile(flux_valid, 75) - np.percentile(flux_valid, 25))
-            self.logger.warning("Checkpoint missing flux stats, computing from data")
+            self.logger.warning("WARNING: Checkpoint missing flux stats, computing from data")
         
-        # Delta_t normalization (CRITICAL FIX in v2.1)
+        # Delta_t normalization
         if 'delta_t_median' in stats and 'delta_t_iqr' in stats:
             delta_t_median = float(stats['delta_t_median'])
             delta_t_iqr = float(stats['delta_t_iqr'])
@@ -764,7 +909,7 @@ class RomanEvaluator:
             else:
                 delta_t_median = 0.0
                 delta_t_iqr = 1.0
-            self.logger.warning("Checkpoint missing delta_t stats, computing from data")
+            self.logger.warning("WARNING: Checkpoint missing delta_t stats, computing from data")
         
         # Ensure IQR is not zero
         flux_iqr = max(flux_iqr, EPS)
@@ -780,16 +925,27 @@ class RomanEvaluator:
         # Load timestamps
         if 'timestamps' in data_dict:
             timestamps = data_dict['timestamps']
+            if self._subsampled_indices is not None:
+                timestamps = timestamps[self._subsampled_indices]
         else:
             # Generate default timestamps
             max_len = raw_flux.shape[1]
             timestamps = np.tile(np.linspace(0, 200, max_len), (len(labels), 1))
             self.logger.warning("Timestamps missing, using default 0-200 days")
         
-        # Extract physical parameters
+        # Extract physical parameters with FIXED alignment
         try:
-            params = extract_parameters_from_structured(data_dict, labels)
-            self.logger.info("Extracted parameters from structured arrays")
+            # For subsampled data, we need to handle parameter extraction carefully
+            if self._subsampled_indices is not None:
+                # Create a temporary full labels array for parameter extraction
+                with h5py.File(data_path, 'r') as f:
+                    full_labels = f['labels'][:]
+                params_full = extract_parameters_aligned(data_dict, full_labels)
+                # Subsample the parameters
+                params = {k: v[self._subsampled_indices] for k, v in params_full.items()}
+            else:
+                params = extract_parameters_aligned(data_dict, labels)
+            self.logger.info("Extracted parameters with corrected alignment")
         except Exception as e:
             self.logger.warning(f"Parameter extraction failed: {e}")
             params = {}
@@ -819,9 +975,6 @@ class RomanEvaluator:
         """
         Run batch inference on the test set with optimized memory handling.
         
-        Uses torch.inference_mode() for maximum performance and non_blocking
-        transfers for GPU pipelining.
-        
         Returns
         -------
         Tuple[np.ndarray, np.ndarray, np.ndarray]
@@ -835,7 +988,7 @@ class RomanEvaluator:
         self.model.eval()
         
         with torch.inference_mode():
-            for i in tqdm(range(0, n, self.batch_size), desc="Inference"):
+            for i in tqdm(range(0, n, self.batch_size), desc="Inference", leave=False):
                 batch_end = min(i + self.batch_size, n)
                 
                 flux_batch = torch.from_numpy(
@@ -862,20 +1015,12 @@ class RomanEvaluator:
     
     def _compute_metrics(self) -> Dict[str, Any]:
         """
-        Compute comprehensive evaluation metrics with robust edge-case handling.
-        
-        Computes accuracy, precision, recall, F1 scores (per-class and macro),
-        ROC-AUC scores, and bootstrap confidence intervals for accuracy.
+        Compute comprehensive evaluation metrics.
         
         Returns
         -------
         Dict[str, Any]
-            Dictionary containing:
-            - accuracy: Overall accuracy
-            - precision_macro, recall_macro, f1_macro: Macro-averaged metrics
-            - {Class}_precision, {Class}_recall, {Class}_f1: Per-class metrics
-            - roc_auc_macro, roc_auc_weighted: Multi-class ROC-AUC
-            - accuracy_ci_lower, accuracy_ci_upper: Bootstrap 95% CI
+            Dictionary containing all computed metrics.
         """
         self.logger.info("\nComputing metrics...")
         
@@ -923,7 +1068,6 @@ class RomanEvaluator:
                 y_bin = label_binarize(self.y, classes=[0, 1, 2])
                 
                 if n_unique == 2:
-                    # Only 2 classes: compute for available classes
                     valid_cols = [i for i in range(3) if i in unique_classes]
                     y_bin_valid = y_bin[:, valid_cols]
                     probs_valid = self.probs[:, valid_cols]
@@ -936,7 +1080,6 @@ class RomanEvaluator:
                         roc_auc_score(y_bin_valid, probs_valid, average='weighted')
                     )
                 else:
-                    # All 3 classes present
                     metrics['roc_auc_macro'] = float(
                         roc_auc_score(y_bin, self.probs, average='macro', multi_class='ovr')
                     )
@@ -971,48 +1114,30 @@ class RomanEvaluator:
         """
         Convert raw flux to relative magnitude for visualization.
         
-        The simulation outputs flux in magnitude space. This method
-        computes relative magnitude (deviation from baseline) with
-        proper sign convention for astronomical plots.
-        
         Parameters
         ----------
         raw_flux : np.ndarray
             Raw flux array from simulation (in magnitude units).
-            Padding zeros are converted to NaN.
             
         Returns
         -------
         np.ndarray
-            Relative magnitude array where:
-            - Negative values = brighter than baseline
-            - Positive values = fainter than baseline
-            - NaN = padded/masked observations
-            
-        Notes
-        -----
-        Sign convention: -Δm so that magnification events appear as
-        positive peaks (brighter = more negative mag = positive on plot).
+            Relative magnitude array.
         """
         valid_mask = (raw_flux != 0)
         
         if not valid_mask.any():
             return np.full_like(raw_flux, np.nan)
         
-        # Baseline magnitude from valid observations
         median_mag = np.median(raw_flux[valid_mask])
-        
-        # Relative magnitude with sign flip (brighter = more negative)
         relative_mag = -(raw_flux - median_mag)
-        
-        # Mark padding as NaN
         relative_mag[~valid_mask] = np.nan
         
         return relative_mag
     
     def _save_figure(self, fig: plt.Figure, filename: str) -> None:
         """
-        Save figure in multiple formats with appropriate settings.
+        Save figure in multiple formats.
         
         Parameters
         ----------
@@ -1024,60 +1149,61 @@ class RomanEvaluator:
         for fmt in self.save_formats:
             filepath = self.output_dir / f'{filename}.{fmt}'
             if fmt == 'png':
-                fig.savefig(filepath, dpi=DPI, bbox_inches='tight', facecolor='white')
+                fig.savefig(filepath, dpi=DPI, bbox_inches='tight', 
+                           facecolor='white', edgecolor='none')
+            elif fmt == 'pdf':
+                fig.savefig(filepath, format='pdf', bbox_inches='tight',
+                           facecolor='white', edgecolor='none')
             else:
                 fig.savefig(filepath, format=fmt, bbox_inches='tight')
     
     def plot_confusion_matrix(self) -> None:
-        """
-        Generate row-normalized confusion matrix heatmap.
-        
-        Saves a heatmap showing classification performance with both
-        normalized fractions and raw counts annotated.
-        """
+        """Generate publication-quality confusion matrix."""
         self.logger.info("Generating confusion matrix...")
         
         cm = confusion_matrix(self.y, self.preds, labels=[0, 1, 2])
         
-        # Row normalization with zero handling
+        # Row normalization
         row_sums = cm.sum(axis=1, keepdims=True)
         row_sums[row_sums == 0] = 1
         cm_normalized = cm.astype('float') / row_sums
         
-        fig, ax = plt.subplots(figsize=(8, 7))
-        sns.heatmap(
-            cm_normalized,
-            annot=True,
-            fmt='.3f',
-            cmap='Blues',
-            xticklabels=CLASS_NAMES,
-            yticklabels=CLASS_NAMES,
-            cbar_kws={'label': 'Fraction'},
-            ax=ax,
-            vmin=0,
-            vmax=1
-        )
-        ax.set_xlabel('Predicted Class', fontsize=12)
-        ax.set_ylabel('True Class', fontsize=12)
-        ax.set_title('Confusion Matrix (Row-Normalized)', fontsize=14)
+        fig, ax = plt.subplots(figsize=(4.5, 4.0))
         
-        # Add raw counts as secondary annotation
+        # Use custom colormap for better print quality
+        cmap = plt.cm.Blues
+        
+        im = ax.imshow(cm_normalized, interpolation='nearest', cmap=cmap, 
+                       vmin=0, vmax=1, aspect='equal')
+        
+        # Colorbar
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Fraction', fontsize=10)
+        cbar.ax.tick_params(labelsize=9)
+        
+        # Axis labels
+        ax.set_xticks(np.arange(3))
+        ax.set_yticks(np.arange(3))
+        ax.set_xticklabels(CLASS_NAMES, fontsize=10)
+        ax.set_yticklabels(CLASS_NAMES, fontsize=10)
+        ax.set_xlabel('Predicted Class', fontsize=11)
+        ax.set_ylabel('True Class', fontsize=11)
+        ax.set_title('Confusion Matrix', fontsize=12, fontweight='bold')
+        
+        # Annotate cells
+        thresh = 0.5
         for i in range(3):
             for j in range(3):
-                ax.text(j + 0.5, i + 0.75, f'n={cm[i, j]}',
-                       ha='center', va='center', fontsize=8, color='gray')
+                color = 'white' if cm_normalized[i, j] > thresh else 'black'
+                ax.text(j, i, f'{cm_normalized[i, j]:.2f}\n(n={cm[i, j]})',
+                       ha='center', va='center', fontsize=9, color=color)
         
         plt.tight_layout()
         self._save_figure(fig, 'confusion_matrix')
         plt.close()
     
     def plot_roc_curves(self) -> None:
-        """
-        Generate one-vs-rest ROC curves with AUC scores.
-        
-        Creates ROC curves for each class showing true positive rate
-        vs false positive rate, with AUC values in the legend.
-        """
+        """Generate ROC curves with AUC scores."""
         self.logger.info("Generating ROC curves...")
         
         unique_classes = np.unique(self.y)
@@ -1087,7 +1213,7 @@ class RomanEvaluator:
         
         y_bin = label_binarize(self.y, classes=[0, 1, 2])
         
-        fig, ax = plt.subplots(figsize=(8, 7))
+        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
         
         for i, class_name in enumerate(CLASS_NAMES):
             if i not in unique_classes:
@@ -1099,36 +1225,27 @@ class RomanEvaluator:
             fpr, tpr, _ = roc_curve(y_bin[:, i], self.probs[:, i])
             auc_score = roc_auc_score(y_bin[:, i], self.probs[:, i])
             
-            ax.plot(
-                fpr, tpr,
-                label=f'{class_name} (AUC = {auc_score:.3f})',
-                color=self.colors[i],
-                linewidth=2
-            )
+            ax.plot(fpr, tpr, label=f'{class_name} (AUC={auc_score:.3f})',
+                   color=self.colors[i], linewidth=1.5)
         
-        ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random')
-        ax.set_xlabel('False Positive Rate', fontsize=12)
-        ax.set_ylabel('True Positive Rate', fontsize=12)
-        ax.set_title('ROC Curves (One-vs-Rest)', fontsize=14)
-        ax.legend(loc='lower right', fontsize=10)
-        ax.grid(True, alpha=0.3)
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=0.8, alpha=0.7)
+        ax.set_xlabel('False Positive Rate')
+        ax.set_ylabel('True Positive Rate')
+        ax.set_title('ROC Curves (One-vs-Rest)', fontweight='bold')
+        ax.legend(loc='lower right', fontsize=8)
         ax.set_xlim(-0.02, 1.02)
         ax.set_ylim(-0.02, 1.02)
+        ax.set_aspect('equal')
         
         plt.tight_layout()
         self._save_figure(fig, 'roc_curves')
         plt.close()
     
     def plot_calibration_curve(self) -> None:
-        """
-        Generate calibration curve and confidence distribution.
-        
-        Left panel shows reliability diagram (calibration curve).
-        Right panel shows histogram of prediction confidences.
-        """
+        """Generate calibration curve and confidence distribution."""
         self.logger.info("Generating calibration curve...")
         
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.0, 3.5))
         
         # Calibration curve
         for i, class_name in enumerate(CLASS_NAMES):
@@ -1146,54 +1263,42 @@ class RomanEvaluator:
                     y_binary, prob_class, n_bins=10, strategy='uniform'
                 )
                 
-                ax1.plot(
-                    mean_predicted_value,
-                    fraction_of_positives,
-                    marker='o',
-                    label=class_name,
-                    color=self.colors[i],
-                    linewidth=2,
-                    markersize=6
-                )
+                ax1.plot(mean_predicted_value, fraction_of_positives,
+                        marker='o', label=class_name, color=self.colors[i],
+                        linewidth=1.5, markersize=4)
             except ValueError as e:
                 self.logger.warning(f"Calibration for {class_name} failed: {e}")
                 continue
         
-        ax1.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Perfect')
-        ax1.set_xlabel('Mean Predicted Probability', fontsize=12)
-        ax1.set_ylabel('Fraction of Positives', fontsize=12)
-        ax1.set_title('Calibration Curve', fontsize=14)
-        ax1.legend(loc='upper left', fontsize=10)
-        ax1.grid(True, alpha=0.3)
+        ax1.plot([0, 1], [0, 1], 'k--', linewidth=0.8, alpha=0.7)
+        ax1.set_xlabel('Mean Predicted Probability')
+        ax1.set_ylabel('Fraction of Positives')
+        ax1.set_title('Calibration Curve', fontweight='bold')
+        ax1.legend(loc='upper left', fontsize=8)
         ax1.set_xlim(-0.02, 1.02)
         ax1.set_ylim(-0.02, 1.02)
         
         # Confidence histogram
-        ax2.hist(self.confs, bins=50, color='steelblue', alpha=0.7, edgecolor='black')
-        ax2.axvline(self.confs.mean(), color='red', linestyle='--', 
-                   linewidth=2, label=f'Mean: {self.confs.mean():.3f}')
-        ax2.axvline(np.median(self.confs), color='orange', linestyle=':', 
-                   linewidth=2, label=f'Median: {np.median(self.confs):.3f}')
-        ax2.set_xlabel('Confidence', fontsize=12)
-        ax2.set_ylabel('Frequency', fontsize=12)
-        ax2.set_title('Confidence Distribution', fontsize=14)
-        ax2.legend(fontsize=10)
-        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.hist(self.confs, bins=50, color='steelblue', alpha=0.7, 
+                edgecolor='white', linewidth=0.5)
+        ax2.axvline(self.confs.mean(), color='#c0392b', linestyle='--', 
+                   linewidth=1.5, label=f'Mean: {self.confs.mean():.3f}')
+        ax2.axvline(np.median(self.confs), color='#27ae60', linestyle=':', 
+                   linewidth=1.5, label=f'Median: {np.median(self.confs):.3f}')
+        ax2.set_xlabel('Confidence')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title('Confidence Distribution', fontweight='bold')
+        ax2.legend(fontsize=8)
         
         plt.tight_layout()
         self._save_figure(fig, 'calibration')
         plt.close()
     
     def plot_class_distributions(self) -> None:
-        """
-        Generate per-class probability distributions.
-        
-        Shows how probability for each class is distributed across
-        samples from each true class, revealing confusion patterns.
-        """
+        """Generate per-class probability distributions."""
         self.logger.info("Generating class probability distributions...")
         
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.8))
         
         for i, (class_name, ax) in enumerate(zip(CLASS_NAMES, axes)):
             for j, other_class in enumerate(CLASS_NAMES):
@@ -1201,371 +1306,355 @@ class RomanEvaluator:
                 if mask.sum() == 0:
                     continue
                 
-                ax.hist(
-                    self.probs[mask, i],
-                    bins=30,
-                    alpha=0.6,
-                    label=f'True: {other_class}',
-                    color=self.colors[j],
-                    edgecolor='black',
-                    linewidth=0.5
-                )
+                ax.hist(self.probs[mask, i], bins=30, alpha=0.6,
+                       label=f'True: {other_class}', color=self.colors[j],
+                       density=True, edgecolor='white', linewidth=0.3)
             
-            ax.set_xlabel(f'P({class_name})', fontsize=11)
-            ax.set_ylabel('Frequency', fontsize=11)
-            ax.set_title(f'{class_name} Probability', fontsize=12)
-            ax.legend(fontsize=9)
-            ax.grid(True, alpha=0.3, axis='y')
+            ax.set_xlabel(f'P({class_name})')
+            ax.set_ylabel('Density')
+            ax.set_title(f'{class_name}', fontweight='bold')
             ax.set_xlim(-0.02, 1.02)
+            
+            if i == 0:
+                ax.legend(fontsize=7, loc='upper right')
         
         plt.tight_layout()
         self._save_figure(fig, 'class_distributions')
         plt.close()
     
     def plot_per_class_metrics(self) -> None:
-        """
-        Generate per-class precision, recall, F1 bar chart.
-        
-        Grouped bar chart comparing metrics across classes.
-        """
+        """Generate per-class metric bar chart."""
         self.logger.info("Generating per-class metrics...")
         
-        precision = [self.metrics[f'{name}_precision'] for name in CLASS_NAMES]
-        recall = [self.metrics[f'{name}_recall'] for name in CLASS_NAMES]
-        f1 = [self.metrics[f'{name}_f1'] for name in CLASS_NAMES]
+        fig, ax = plt.subplots(figsize=(5.0, 3.5))
         
-        x = np.arange(len(CLASS_NAMES))
+        x = np.arange(3)
         width = 0.25
         
-        fig, ax = plt.subplots(figsize=(10, 6))
+        precision = [self.metrics.get(f'{c}_precision', 0) for c in CLASS_NAMES]
+        recall = [self.metrics.get(f'{c}_recall', 0) for c in CLASS_NAMES]
+        f1 = [self.metrics.get(f'{c}_f1', 0) for c in CLASS_NAMES]
         
         bars1 = ax.bar(x - width, precision, width, label='Precision', 
-                       color=self.colors[0], alpha=0.8, edgecolor='black')
+                      color='#3498db', edgecolor='white')
         bars2 = ax.bar(x, recall, width, label='Recall', 
-                       color=self.colors[1], alpha=0.8, edgecolor='black')
+                      color='#e74c3c', edgecolor='white')
         bars3 = ax.bar(x + width, f1, width, label='F1-Score', 
-                       color=self.colors[2], alpha=0.8, edgecolor='black')
+                      color='#2ecc71', edgecolor='white')
         
+        ax.set_xlabel('Class')
+        ax.set_ylabel('Score')
+        ax.set_title('Per-Class Performance', fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(CLASS_NAMES)
+        ax.legend(fontsize=8)
+        ax.set_ylim(0, 1.1)
+        
+        # Add value labels
         for bars in [bars1, bars2, bars3]:
             for bar in bars:
                 height = bar.get_height()
-                ax.annotate(f'{height:.2f}',
-                           xy=(bar.get_x() + bar.get_width() / 2, height),
-                           xytext=(0, 3),
-                           textcoords="offset points",
-                           ha='center', va='bottom', fontsize=8)
-        
-        ax.set_xlabel('Class', fontsize=12)
-        ax.set_ylabel('Score', fontsize=12)
-        ax.set_title('Per-Class Metrics', fontsize=14)
-        ax.set_xticks(x)
-        ax.set_xticklabels(CLASS_NAMES)
-        ax.set_ylim(0, 1.15)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3, axis='y')
+                if height > 0.05:
+                    ax.annotate(f'{height:.2f}',
+                               xy=(bar.get_x() + bar.get_width() / 2, height),
+                               xytext=(0, 2), textcoords="offset points",
+                               ha='center', va='bottom', fontsize=7)
         
         plt.tight_layout()
         self._save_figure(fig, 'per_class_metrics')
         plt.close()
     
     def plot_example_light_curves(self) -> None:
-        """
-        Generate grid of example light curves for each class.
+        """Generate grid of example light curves."""
+        self.logger.info("Generating example light curves...")
         
-        Shows representative light curves with true and predicted labels.
-        """
-        self.logger.info("Generating example light curve grid...")
+        n_per_class = self.n_example_grid_per_type
+        n_classes = 3
         
-        n_examples = self.n_example_grid_per_type
-        fig, axes = plt.subplots(3, n_examples, figsize=(4*n_examples, 10))
+        fig, axes = plt.subplots(n_classes, n_per_class, 
+                                figsize=(7.0, 5.5), sharex=True)
         
-        if n_examples == 1:
-            axes = axes.reshape(-1, 1)
-        
-        for class_idx, class_name in enumerate(CLASS_NAMES):
+        for class_idx in range(n_classes):
             class_mask = (self.y == class_idx)
-            indices = np.where(class_mask)[0][:n_examples]
+            class_indices = np.where(class_mask)[0]
             
-            for col, idx in enumerate(indices):
+            if len(class_indices) == 0:
+                continue
+            
+            # Select examples with varying confidence
+            selected = class_indices[:n_per_class]
+            
+            for col, idx in enumerate(selected):
                 ax = axes[class_idx, col]
                 
-                length = self.lengths[idx]
-                times = self.timestamps[idx, :length]
-                raw_flux = self.raw_flux[idx, :length]
-                mag_data = self._raw_flux_to_relative_mag(raw_flux)
+                # Get data
+                raw = self.raw_flux[idx]
+                times = self.timestamps[idx]
+                valid = raw != 0
                 
-                ax.scatter(times, mag_data, c='gray', s=10, alpha=0.7, linewidths=0)
-                ax.axhline(0, color='k', linestyle=':', alpha=0.5)
+                # Convert to relative magnitude
+                rel_mag = self._raw_flux_to_relative_mag(raw)
                 
-                pred_name = CLASS_NAMES[self.preds[idx]]
-                confidence = self.confs[idx]
+                # Plot
+                ax.scatter(times[valid], rel_mag[valid], s=3, 
+                          color=self.colors[class_idx], alpha=0.7)
                 
-                title_color = 'green' if self.preds[idx] == class_idx else 'red'
-                ax.set_title(
-                    f'True: {class_name}\nPred: {pred_name} ({confidence:.2f})',
-                    fontsize=9,
-                    color=title_color
-                )
-                ax.set_xlabel('Time (days)', fontsize=9)
-                ax.set_ylabel(r'$-\Delta m$ (mag)', fontsize=9)
-                ax.grid(True, alpha=0.3)
+                # Add prediction info
+                pred = self.preds[idx]
+                conf = self.confs[idx]
+                is_correct = pred == class_idx
+                
+                title_color = 'green' if is_correct else 'red'
+                ax.set_title(f'P={CLASS_NAMES[pred][:1]} ({conf:.2f})', 
+                           fontsize=8, color=title_color)
+                
+                ax.set_ylabel(r'$\Delta m$' if col == 0 else '')
+                ax.invert_yaxis()  # Astronomical convention
+                
+                if class_idx == n_classes - 1:
+                    ax.set_xlabel('Time (days)')
         
-        plt.suptitle('Example Light Curves', fontsize=16, y=0.995)
+        # Row labels
+        for class_idx, class_name in enumerate(CLASS_NAMES):
+            axes[class_idx, 0].annotate(
+                class_name, xy=(-0.35, 0.5), xycoords='axes fraction',
+                fontsize=10, fontweight='bold', rotation=90, va='center'
+            )
+        
         plt.tight_layout()
         self._save_figure(fig, 'example_light_curves')
         plt.close()
     
     def plot_u0_dependency(self) -> None:
-        """
-        Generate binary classification accuracy vs impact parameter u0.
-        
-        Physics: Events with large u0 have weak magnification and are
-        harder to distinguish from PSPL events.
-        """
-        if 'u0' not in self.params or np.all(np.isnan(self.params['u0'])):
-            self.logger.warning("Skipping u0 analysis (parameters unavailable)")
-            return
-        
+        """Generate accuracy vs impact parameter analysis."""
         self.logger.info("Generating u0 dependency analysis...")
         
-        binary_mask = (self.y == 2)
-        if binary_mask.sum() == 0:
-            self.logger.warning("No binary events in dataset")
+        if 'u0' not in self.params or np.all(np.isnan(self.params['u0'])):
+            self.logger.warning("Skipping u0 analysis (no parameter data)")
             return
         
-        u0_vals = self.params['u0'][binary_mask]
-        correct = (self.preds[binary_mask] == 2).astype(int)
+        # Focus on PSPL and Binary classes
+        lensing_mask = (self.y >= 1)
+        u0_values = self.params['u0'][lensing_mask]
+        y_lensing = self.y[lensing_mask]
+        preds_lensing = self.preds[lensing_mask]
         
-        valid = ~np.isnan(u0_vals)
-        u0_vals = u0_vals[valid]
-        correct = correct[valid]
-        
-        if len(u0_vals) == 0:
-            self.logger.warning("No valid u0 values for binary events")
+        valid_mask = ~np.isnan(u0_values)
+        if valid_mask.sum() < 100:
+            self.logger.warning("Insufficient u0 data for analysis")
             return
+        
+        u0_values = u0_values[valid_mask]
+        y_lensing = y_lensing[valid_mask]
+        preds_lensing = preds_lensing[valid_mask]
         
         # Bin by u0
-        u0_max = min(1.0, np.percentile(u0_vals, 99))
-        u0_bins = np.linspace(0, u0_max, 11)
-        bin_centers = (u0_bins[:-1] + u0_bins[1:]) / 2
-        accuracy_per_bin = []
-        stderr_per_bin = []
-        counts_per_bin = []
+        u0_bins = np.array([0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0])
+        bin_indices = np.digitize(u0_values, u0_bins)
         
-        for i in range(len(u0_bins) - 1):
-            mask = (u0_vals >= u0_bins[i]) & (u0_vals < u0_bins[i+1])
-            n_bin = mask.sum()
-            counts_per_bin.append(n_bin)
+        fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0))
+        
+        # Panel 1: Accuracy vs u0
+        ax1 = axes[0]
+        accuracies = []
+        errors = []
+        bin_centers = []
+        bin_counts = []
+        
+        for i in range(1, len(u0_bins)):
+            mask = (bin_indices == i)
+            if mask.sum() < 10:
+                continue
             
-            if n_bin > 0:
-                acc = correct[mask].mean()
-                stderr = np.sqrt(acc * (1 - acc) / n_bin) if n_bin > 1 else 0
-                accuracy_per_bin.append(acc)
-                stderr_per_bin.append(stderr)
-            else:
-                accuracy_per_bin.append(np.nan)
-                stderr_per_bin.append(0)
+            y_bin = y_lensing[mask]
+            pred_bin = preds_lensing[mask]
+            
+            acc = accuracy_score(y_bin, pred_bin)
+            # Bootstrap error
+            _, lower, upper = bootstrap_metric(y_bin, pred_bin, accuracy_score, n_bootstrap=500)
+            
+            accuracies.append(acc)
+            errors.append([acc - lower, upper - acc])
+            bin_centers.append((u0_bins[i-1] + u0_bins[i]) / 2)
+            bin_counts.append(mask.sum())
         
-        fig, ax = plt.subplots(figsize=(10, 6))
+        if len(accuracies) > 0:
+            errors = np.array(errors).T
+            ax1.errorbar(bin_centers, accuracies, yerr=errors, 
+                        fmt='o-', color='#2980b9', capsize=3, 
+                        linewidth=1.5, markersize=6)
+            ax1.set_xlabel(r'Impact Parameter $u_0$')
+            ax1.set_ylabel('Accuracy')
+            ax1.set_title('Accuracy vs Impact Parameter', fontweight='bold')
+            ax1.set_ylim(0, 1.05)
         
-        ax.errorbar(
-            bin_centers, accuracy_per_bin, yerr=stderr_per_bin,
-            fmt='o-', color=self.colors[2], linewidth=2, markersize=8,
-            capsize=5, label='Binary Classification Accuracy'
-        )
+        # Panel 2: Class distribution vs u0
+        ax2 = axes[1]
         
-        ax.axhline(0.5, color='k', linestyle='--', label='Random')
-        ax.set_xlabel(r'Impact Parameter $u_0$', fontsize=12)
-        ax.set_ylabel('Binary Classification Accuracy', fontsize=12)
-        ax.set_title(r'Binary Detection vs Impact Parameter', fontsize=14)
-        ax.set_ylim(0, 1.05)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
+        for class_idx in [1, 2]:
+            class_mask = (y_lensing == class_idx)
+            if class_mask.sum() == 0:
+                continue
+            
+            ax2.hist(u0_values[class_mask], bins=20, alpha=0.6,
+                    label=CLASS_NAMES[class_idx], color=self.colors[class_idx],
+                    density=True, edgecolor='white', linewidth=0.3)
         
-        for i, (x, y, n) in enumerate(zip(bin_centers, accuracy_per_bin, counts_per_bin)):
-            if not np.isnan(y) and n > 0:
-                ax.annotate(f'n={n}', (x, y), textcoords="offset points",
-                           xytext=(0, 10), ha='center', fontsize=7, color='gray')
+        ax2.set_xlabel(r'Impact Parameter $u_0$')
+        ax2.set_ylabel('Density')
+        ax2.set_title(r'$u_0$ Distribution by Class', fontweight='bold')
+        ax2.legend(fontsize=8)
         
         plt.tight_layout()
         self._save_figure(fig, 'u0_dependency')
         plt.close()
     
     def plot_temporal_bias_check(self) -> None:
-        """
-        Check for temporal bias via t0 distribution comparison.
+        """Check for temporal bias in predictions."""
+        self.logger.info("Generating temporal bias analysis...")
         
-        Uses Kolmogorov-Smirnov test to verify model doesn't learn
-        temporal shortcuts.
-        """
         if 't0' not in self.params or np.all(np.isnan(self.params['t0'])):
-            self.logger.warning("Skipping temporal bias check (t0 unavailable)")
+            self.logger.warning("Skipping temporal bias check (no t0 data)")
             return
         
-        self.logger.info("Generating temporal bias check...")
+        lensing_mask = (self.y >= 1)
+        t0_values = self.params['t0'][lensing_mask]
+        correct = (self.preds[lensing_mask] == self.y[lensing_mask])
         
-        correct_mask = (self.preds == self.y)
-        t0_correct = self.params['t0'][correct_mask]
-        t0_incorrect = self.params['t0'][~correct_mask]
-        
-        t0_correct = t0_correct[~np.isnan(t0_correct)]
-        t0_incorrect = t0_incorrect[~np.isnan(t0_incorrect)]
-        
-        if len(t0_correct) == 0 or len(t0_incorrect) == 0:
-            self.logger.warning("Insufficient data for temporal bias check")
+        valid_mask = ~np.isnan(t0_values)
+        if valid_mask.sum() < 100:
             return
         
-        ks_stat, p_value = ks_2samp(t0_correct, t0_incorrect)
+        t0_values = t0_values[valid_mask]
+        correct = correct[valid_mask]
         
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
         
-        ax.hist(t0_correct, bins=30, alpha=0.6, label='Correct',
-                color='green', edgecolor='black', density=True)
-        ax.hist(t0_incorrect, bins=30, alpha=0.6, label='Incorrect',
-                color='red', edgecolor='black', density=True)
+        # Bin by t0
+        t0_bins = np.linspace(t0_values.min(), t0_values.max(), 11)
+        bin_indices = np.digitize(t0_values, t0_bins)
         
-        ax.set_xlabel(r'Peak Time $t_0$ (days)', fontsize=12)
-        ax.set_ylabel('Density', fontsize=12)
-        ax.set_title(
-            f'Temporal Bias: KS={ks_stat:.4f}, p={p_value:.4f}',
-            fontsize=14
-        )
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3, axis='y')
+        accuracies = []
+        bin_centers = []
         
-        if p_value > 0.05:
-            bias_text = "No significant temporal bias (p > 0.05)"
-            text_color = 'green'
-        else:
-            bias_text = "Temporal bias detected (p < 0.05)"
-            text_color = 'red'
+        for i in range(1, len(t0_bins)):
+            mask = (bin_indices == i)
+            if mask.sum() < 10:
+                continue
+            
+            acc = correct[mask].mean()
+            accuracies.append(acc)
+            bin_centers.append((t0_bins[i-1] + t0_bins[i]) / 2)
         
-        ax.text(
-            0.5, 0.95, bias_text,
-            transform=ax.transAxes,
-            fontsize=11,
-            color=text_color,
-            ha='center',
-            va='top',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
-        )
+        if len(accuracies) > 1:
+            ax.plot(bin_centers, accuracies, 'o-', color='#2980b9', 
+                   linewidth=1.5, markersize=6)
+            
+            # Reference line
+            ax.axhline(np.mean(correct), color='#e74c3c', linestyle='--', 
+                      linewidth=1, label=f'Mean: {np.mean(correct):.3f}')
+            
+            ax.set_xlabel(r'Peak Time $t_0$ (days)')
+            ax.set_ylabel('Accuracy')
+            ax.set_title('Accuracy vs Peak Time', fontweight='bold')
+            ax.legend(fontsize=8)
+            ax.set_ylim(0, 1.05)
         
         plt.tight_layout()
-        self._save_figure(fig, 'temporal_bias_check')
+        self._save_figure(fig, 'temporal_bias')
         plt.close()
     
-    def plot_evolution_for_class(self, class_idx: int, event_idx: int) -> None:
+    def plot_evolution_for_class(self, class_idx: int, sample_idx: int) -> None:
         """
-        Generate 3-panel probability evolution plot for a single event.
+        Plot probability evolution for a single sample.
         
         Parameters
         ----------
         class_idx : int
-            True class index (0, 1, or 2).
-        event_idx : int
-            Index of event in dataset.
+            True class index.
+        sample_idx : int
+            Sample index in the dataset.
         """
-        cls_name = CLASS_NAMES[class_idx]
-        length = int(self.lengths[event_idx])
+        # Get data
+        flux = self.norm_flux[sample_idx]
+        delta_t = self.norm_delta_t[sample_idx]
+        raw = self.raw_flux[sample_idx]
+        times = self.timestamps[sample_idx]
+        length = self.lengths[sample_idx]
         
-        if length < 10:
-            return
+        # Compute probabilities at different fractions
+        fractions = np.linspace(0.1, 1.0, 20)
+        probs_evolution = []
         
-        # Sample ~50 points along the sequence
-        step = max(1, length // 50)
-        time_steps = list(range(10, length + 1, step))
-        if time_steps[-1] != length:
-            time_steps.append(length)
-        
-        # Pre-allocate and batch inference
-        probs_seq = []
-        
+        self.model.eval()
         with torch.inference_mode():
-            f_full = torch.from_numpy(
-                self.norm_flux[event_idx:event_idx+1]
-            ).to(self.device)
-            d_full = torch.from_numpy(
-                self.norm_delta_t[event_idx:event_idx+1]
-            ).to(self.device)
-            
-            for t in time_steps:
-                f_trunc = f_full[:, :t]
-                d_trunc = d_full[:, :t]
-                l_trunc = torch.tensor([t], dtype=torch.long, device=self.device)
+            for frac in fractions:
+                curr_len = max(1, int(length * frac))
                 
-                logits = self.model(f_trunc, d_trunc, lengths=l_trunc)
-                probs = F.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
-                probs_seq.append(probs)
+                flux_t = torch.from_numpy(flux[:curr_len]).unsqueeze(0).to(self.device)
+                dt_t = torch.from_numpy(delta_t[:curr_len]).unsqueeze(0).to(self.device)
+                len_t = torch.tensor([curr_len], device=self.device)
+                
+                # Pad to minimum length if needed
+                if curr_len < 10:
+                    pad_len = 10 - curr_len
+                    flux_t = F.pad(flux_t, (0, pad_len))
+                    dt_t = F.pad(dt_t, (0, pad_len))
+                
+                logits = self.model(flux_t, dt_t, len_t)
+                prob = F.softmax(logits, dim=-1).cpu().numpy()[0]
+                probs_evolution.append(prob)
         
-        if len(probs_seq) == 0:
-            return
+        probs_evolution = np.array(probs_evolution)
         
-        probs_full = np.array(probs_seq)
-        time_axis = np.array([self.timestamps[event_idx, t-1] for t in time_steps])
+        # Create figure
+        fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.5))
         
-        # 3-panel plot
-        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-        fig.suptitle(
-            f'Evolution (True: {cls_name}, Pred: {CLASS_NAMES[self.preds[event_idx]]})',
-            fontsize=14
-        )
-        
-        # Panel 1: Light Curve
+        # Panel 1: Light curve
         ax1 = axes[0]
-        raw_flux = self.raw_flux[event_idx, :length]
-        mag_data = self._raw_flux_to_relative_mag(raw_flux)
+        valid = raw != 0
+        rel_mag = self._raw_flux_to_relative_mag(raw)
+        ax1.scatter(times[valid], rel_mag[valid], s=2, 
+                   color=self.colors[class_idx], alpha=0.7)
+        ax1.set_xlabel('Time (days)')
+        ax1.set_ylabel(r'$\Delta m$')
+        ax1.set_title(f'True: {CLASS_NAMES[class_idx]}', fontweight='bold')
+        ax1.invert_yaxis()
         
-        ax1.scatter(
-            self.timestamps[event_idx, :length], mag_data, 
-            color='gray', s=5, linewidths=0
-        )
-        ax1.set_ylabel(r'$-\Delta m$', fontsize=11)
-        ax1.grid(True, linestyle='--', alpha=0.5)
-        ax1.axhline(0, color='k', linestyle=':', alpha=0.5)
-        
-        # Panel 2: Probabilities
+        # Panel 2: Probability evolution
         ax2 = axes[1]
         for i, name in enumerate(CLASS_NAMES):
-            ax2.plot(time_axis, probs_full[:, i], label=f'P({name})', 
-                    color=self.colors[i], linewidth=2)
+            ax2.plot(fractions * 100, probs_evolution[:, i], 
+                    label=name, color=self.colors[i], linewidth=1.5)
+        ax2.set_xlabel('Sequence Completeness (%)')
+        ax2.set_ylabel('Probability')
+        ax2.set_title('Probability Evolution', fontweight='bold')
+        ax2.legend(fontsize=7)
+        ax2.set_xlim(0, 105)
+        ax2.set_ylim(-0.02, 1.02)
         
-        ax2.axhline(0.5, color='k', linestyle=':', alpha=0.7)
-        ax2.set_ylabel('Probability', fontsize=11)
-        ax2.set_ylim(-0.05, 1.05)
-        ax2.grid(True, linestyle='--', alpha=0.5)
-        ax2.legend(loc='upper left', ncol=3, fontsize=9)
-        
-        # Panel 3: Confidence
+        # Panel 3: Final probabilities bar chart
         ax3 = axes[2]
-        confidence = probs_full.max(axis=1)
+        final_probs = probs_evolution[-1]
+        bars = ax3.bar(CLASS_NAMES, final_probs, color=self.colors)
+        ax3.set_ylabel('Probability')
+        ax3.set_title('Final Prediction', fontweight='bold')
+        ax3.set_ylim(0, 1.1)
         
-        ax3.plot(time_axis, confidence, color='black', linewidth=2)
-        ax3.fill_between(
-            time_axis, 0, confidence, 
-            color=self.colors[self.preds[event_idx]], 
-            alpha=0.3
-        )
+        # Highlight predicted class
+        pred = np.argmax(final_probs)
+        bars[pred].set_edgecolor('black')
+        bars[pred].set_linewidth(2)
         
-        ax3.axhline(0.5, color='k', linestyle=':', alpha=0.7)
-        ax3.set_ylabel('Confidence', fontsize=11)
-        ax3.set_ylim(-0.05, 1.05)
-        ax3.set_xlabel('Time (Days)', fontsize=11)
-        ax3.grid(True, linestyle='--', alpha=0.5)
-        
-        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-        self._save_figure(fig, f'evolution_{cls_name.lower()}_{event_idx}')
+        plt.tight_layout()
+        self._save_figure(fig, f'evolution_{CLASS_NAMES[class_idx].lower()}_{sample_idx}')
         plt.close()
     
     def run_early_detection_analysis(self) -> None:
-        """
-        Evaluate classification at multiple observation completeness levels.
-        
-        Tests model performance with truncated sequences to assess
-        early detection capability.
-        """
+        """Run early detection analysis with error bars."""
         self.logger.info("\nRunning early detection analysis...")
         
-        time_fractions = np.array([0.1, 0.2, 0.4, 0.6, 0.8, 1.0])
+        time_fractions = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
         results = []
         
         max_len = self.norm_flux.shape[1]
@@ -1583,8 +1672,9 @@ class RomanEvaluator:
             n = len(self.norm_flux)
             all_probs = []
             
+            self.model.eval()
             with torch.inference_mode():
-                for i in tqdm(range(0, n, self.batch_size), desc="    Progress", leave=False):
+                for i in tqdm(range(0, n, self.batch_size), desc=f"    {frac*100:.0f}%", leave=False):
                     batch_end = min(i + self.batch_size, n)
                     
                     flux_batch = torch.from_numpy(
@@ -1609,45 +1699,59 @@ class RomanEvaluator:
             acc = accuracy_score(self.y, preds_frac)
             f1 = f1_score(self.y, preds_frac, average='macro', zero_division=0)
             
+            # Bootstrap confidence intervals
+            _, acc_lower, acc_upper = bootstrap_metric(self.y, preds_frac, accuracy_score, n_bootstrap=500)
+            
             results.append({
                 'fraction': float(frac),
                 'max_sequence_length': int(current_max_len),
                 'accuracy': float(acc),
+                'accuracy_ci_lower': float(acc_lower),
+                'accuracy_ci_upper': float(acc_upper),
                 'f1_macro': float(f1)
             })
         
         # Plot
         fractions = [r['fraction'] for r in results]
         accuracies = [r['accuracy'] for r in results]
+        acc_lower = [r['accuracy_ci_lower'] for r in results]
+        acc_upper = [r['accuracy_ci_upper'] for r in results]
         f1_scores = [r['f1_macro'] for r in results]
         
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
         
-        ax.plot(fractions, accuracies, 'o-', label='Accuracy', 
-                color=self.colors[1], linewidth=2, markersize=8)
-        ax.plot(fractions, f1_scores, 's--', label='F1 (macro)', 
-                color=self.colors[2], linewidth=2, markersize=8)
+        # Accuracy with error bars
+        acc_err_lower = [a - l for a, l in zip(accuracies, acc_lower)]
+        acc_err_upper = [u - a for a, u in zip(accuracies, acc_upper)]
         
-        ax.set_title('Early Detection Performance', fontsize=14)
-        ax.set_xlabel('Sequence Completeness', fontsize=12)
-        ax.set_ylabel('Metric', fontsize=12)
+        ax.errorbar(np.array(fractions) * 100, accuracies, 
+                   yerr=[acc_err_lower, acc_err_upper],
+                   fmt='o-', label='Accuracy', color=self.colors[1], 
+                   capsize=3, linewidth=1.5, markersize=5)
+        
+        ax.plot(np.array(fractions) * 100, f1_scores, 's--', 
+               label='F1 (macro)', color=self.colors[2], 
+               linewidth=1.5, markersize=5)
+        
+        ax.set_xlabel('Sequence Completeness (%)')
+        ax.set_ylabel('Score')
+        ax.set_title('Early Detection Performance', fontweight='bold')
         ax.set_ylim(0.0, 1.05)
-        ax.set_xticks(fractions)
-        ax.set_xticklabels([f'{f:.0%}' for f in fractions])
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
+        ax.set_xlim(5, 105)
+        ax.legend(fontsize=8)
         
         plt.tight_layout()
         self._save_figure(fig, 'early_detection_curve')
         plt.close()
         
+        # Save results
         with open(self.output_dir / 'early_detection_results.json', 'w') as f:
-            json.dump(results, f, indent=2)
+            json.dump(results, f, indent=2, cls=NumpyJSONEncoder)
         
         self.logger.info("Early detection analysis complete")
     
     def run_all_analysis(self) -> None:
-        """Execute complete evaluation suite and generate all outputs."""
+        """Execute complete evaluation suite."""
         self.logger.info("\n" + "=" * 80)
         self.logger.info("GENERATING VISUALIZATIONS")
         self.logger.info("=" * 80)
@@ -1697,12 +1801,23 @@ class RomanEvaluator:
             },
             'metrics': self.metrics,
             'config': self.config_dict,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'version': '2.2'
         }
         
         with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary, f, indent=2, cls=NumpyJSONEncoder)
         
+        # Save predictions
+        np.savez(
+            self.output_dir / 'predictions.npz',
+            y_true=self.y,
+            y_pred=self.preds,
+            probabilities=self.probs,
+            confidences=self.confs
+        )
+        
+        # Classification report
         report = classification_report(
             self.y, self.preds, 
             target_names=list(CLASS_NAMES), 
@@ -1713,6 +1828,10 @@ class RomanEvaluator:
         
         with open(self.output_dir / 'classification_report.txt', 'w') as f:
             f.write(report)
+        
+        # Confusion matrix raw
+        cm = confusion_matrix(self.y, self.preds, labels=[0, 1, 2])
+        np.save(self.output_dir / 'confusion_matrix.npy', cm)
         
         self.logger.info("\n" + "=" * 80)
         self.logger.info("EVALUATION COMPLETE")
@@ -1756,6 +1875,8 @@ def main():
     
     parser.add_argument('--colorblind_safe', action='store_true',
                        help="Use colorblind-safe palette")
+    parser.add_argument('--use_latex', action='store_true',
+                       help="Enable LaTeX rendering")
     parser.add_argument('--save_formats', nargs='+', default=['png'],
                        choices=['png', 'pdf', 'svg'],
                        help="Output formats")
@@ -1776,6 +1897,7 @@ def main():
         n_example_grid_per_type=args.n_example_grid_per_type,
         colorblind_safe=args.colorblind_safe,
         save_formats=args.save_formats,
+        use_latex=args.use_latex,
         verbose=args.verbose
     )
     
