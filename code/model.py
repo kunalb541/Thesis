@@ -26,13 +26,14 @@ PERFORMANCE OPTIMIZATIONS (v2.6):
     - Fixed weight initialization for SiLU activation (Kaiming)
     - Implemented gradient checkpointing for GRU
     - Complete type hints and docstrings (100% coverage)
+    - Pre-allocated attention mask constants for efficiency
 
-FIXES APPLIED (v2.7):
-    * CRITICAL FIX: Documented that hierarchical mode outputs log-probabilities,
-      requiring F.nll_loss() instead of F.cross_entropy() in training (S0-1)
-    * Documentation clarification for hierarchical output format
-    
 FIXES APPLIED (v2.6):
+    * S2 FIX: Pre-allocated tensor constants in FlashAttentionPooling for efficiency
+    * S2 FIX: Added migration warning when loading old checkpoint formats
+    * Documentation: Version string consistency
+
+FIXES APPLIED (v2.5):
     * CRITICAL FIX: Hierarchical classification now uses proper probability
       computation: P(PSPL) = P(Deviation) × P(PSPL|Deviation) (S0-1)
     * CRITICAL FIX: Documented length masking assumption (contiguous prefix) (S0-2)
@@ -60,12 +61,13 @@ IMPORTANT ASSUMPTION:
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.6
+Version: 2.6.0
 """
 
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Final, List, Optional, Tuple, Union
 
@@ -237,7 +239,7 @@ class ModelConfig:
         if not isinstance(self.n_classes, int) or self.n_classes <= 0:
             raise ValueError(f"n_classes must be positive int, got {self.n_classes}")
         
-        # v2.6 FIX: Only 'conv' is supported (removed 'mlp' option)
+        # Only 'conv' is supported (removed 'mlp' option)
         if self.feature_extraction != 'conv':
             raise ValueError(
                 f"feature_extraction must be 'conv', got '{self.feature_extraction}'"
@@ -338,8 +340,6 @@ def validate_batch_size_for_ddp(batch_size: int, world_size: int) -> None:
     UserWarning
         If batch size is suboptimal for distributed training.
     """
-    import warnings
-    
     effective_batch = batch_size * world_size
     if effective_batch < 16:
         warnings.warn(
@@ -663,9 +663,27 @@ class FlashAttentionPooling(nn.Module):
         
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         
+        # v2.7 FIX: Pre-allocate mask constants as buffers for efficiency
+        # These are registered as non-persistent buffers (not saved in state_dict)
+        self.register_buffer('_mask_zero', torch.tensor(0.0), persistent=False)
+        self.register_buffer('_mask_neg_inf_fp32', torch.tensor(MASK_VALUE_FP32), persistent=False)
+        self.register_buffer('_mask_neg_inf_fp16', torch.tensor(MASK_VALUE_FP16), persistent=False)
+        self.register_buffer('_mask_neg_inf_bf16', torch.tensor(MASK_VALUE_BF16), persistent=False)
+        
         nn.init.xavier_uniform_(self.qkv_proj.weight)
         nn.init.xavier_uniform_(self.out_proj.weight)
         nn.init.normal_(self.query, std=0.02)
+    
+    def _get_mask_values(self, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
+        """Get pre-allocated mask values cast to the appropriate dtype."""
+        zero = self._mask_zero.to(dtype=dtype)
+        if dtype == torch.float16:
+            neg_inf = self._mask_neg_inf_fp16.to(dtype=dtype)
+        elif dtype == torch.bfloat16:
+            neg_inf = self._mask_neg_inf_bf16.to(dtype=dtype)
+        else:
+            neg_inf = self._mask_neg_inf_fp32.to(dtype=dtype)
+        return zero, neg_inf
         
     def forward(self, x: Tensor, lengths: Optional[Tensor] = None) -> Tensor:
         """
@@ -703,7 +721,7 @@ class FlashAttentionPooling(nn.Module):
         v = v.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         
         # Create attention mask if lengths provided
-        # v2.6 FIX: Always use additive mask format for compatibility
+        # v2.7: Use pre-allocated mask constants for efficiency
         attn_mask = None
         if lengths is not None:
             # Create mask: [B, T]
@@ -712,11 +730,11 @@ class FlashAttentionPooling(nn.Module):
             
             # Convert to additive mask: 0 for valid, -inf for invalid
             # Shape: [B, 1, 1, T] for broadcasting
-            mask_value = get_mask_value(q.dtype)
+            zero, neg_inf = self._get_mask_values(q.dtype)
             attn_mask = torch.where(
                 valid_mask[:, None, None, :],
-                torch.tensor(0.0, device=x.device, dtype=q.dtype),
-                torch.tensor(mask_value, device=x.device, dtype=q.dtype)
+                zero,
+                neg_inf
             )
         
         # Apply attention
@@ -854,7 +872,7 @@ class RomanMicrolensingClassifier(nn.Module):
         )
         
         if config.hierarchical:
-            # v2.6 FIX: Proper hierarchical classification
+            # Proper hierarchical classification
             # Stage 1: P(Deviation) - single output with sigmoid
             self.head_stage1 = nn.Linear(config.d_model, 1)  # P(Deviation)
             # Stage 2: P(PSPL|Deviation) - single output with sigmoid
@@ -1014,7 +1032,7 @@ class RomanMicrolensingClassifier(nn.Module):
             if lengths is not None:
                 mask = torch.arange(T, device=device)[None, :] < lengths[:, None]
                 mask = mask.float().unsqueeze(-1)  # [B, T, 1]
-                # v2.6 FIX: Add epsilon to prevent division by zero
+                # Add epsilon to prevent division by zero
                 x = (x * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=EPS)
             else:
                 x = x.mean(dim=1)
@@ -1023,7 +1041,7 @@ class RomanMicrolensingClassifier(nn.Module):
         x = self.head_shared(x)
         
         if self.config.hierarchical:
-            # v2.6 FIX: Proper hierarchical probability computation
+            # Proper hierarchical probability computation
             # Stage 1: P(Deviation)
             p_deviation = torch.sigmoid(self.head_stage1(x))  # [B, 1]
             
@@ -1038,11 +1056,7 @@ class RomanMicrolensingClassifier(nn.Module):
             # Concatenate and convert to logits
             probs = torch.cat([p_flat, p_pspl, p_binary], dim=1)  # [B, 3]
             
-            # Convert probabilities to logits for cross-entropy loss compatibility
-            # log(p) gives log-probabilities, which work with NLLLoss
-            # For CrossEntropyLoss compatibility, we use log(p / (1-p)) = logit
-            # But since we have proper probabilities, we use log(p) + constant
-            # Actually, for numerical stability, use log(p.clamp(min=eps))
+            # Convert probabilities to log-probabilities for NLLLoss
             logits = torch.log(probs.clamp(min=EPS, max=1.0 - EPS))
         else:
             logits = self.head_flat(x)
@@ -1201,7 +1215,7 @@ def validate_inputs(
                 f"receptive field ({receptive_field})"
             )
         
-        # v2.6: Check for zero-length sequences
+        # Check for zero-length sequences
         if min_len < MIN_VALID_SEQ_LEN:
             raise ValueError(
                 f"Minimum sequence length ({min_len}) must be >= {MIN_VALID_SEQ_LEN}"
@@ -1260,6 +1274,7 @@ def load_checkpoint(
         - torch.compile prefix removal (_orig_mod.)
         - Config extraction from checkpoint
         - Standardized 'model_config' key
+        - v2.6→v2.7 hierarchical head migration
     
     Parameters
     ----------
@@ -1332,10 +1347,11 @@ def load_checkpoint(
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     
-    # v2.6: Handle hierarchical head shape changes
+    # v2.7 FIX: Handle hierarchical head shape changes with warning
     # Old: head_stage1 [d_model, 2], head_stage2 [d_model, 2]
     # New: head_stage1 [d_model, 1], head_stage2 [d_model, 1]
     if config.hierarchical:
+        migrated = False
         for key in ['head_stage1.weight', 'head_stage1.bias', 
                     'head_stage2.weight', 'head_stage2.bias']:
             if key in state_dict:
@@ -1343,8 +1359,18 @@ def load_checkpoint(
                 if 'weight' in key and old_shape[0] == 2:
                     # Take first row only (P(Deviation) or P(PSPL|Deviation))
                     state_dict[key] = state_dict[key][0:1, :]
+                    migrated = True
                 elif 'bias' in key and old_shape[0] == 2:
                     state_dict[key] = state_dict[key][0:1]
+                    migrated = True
+        
+        # v2.7 FIX: Warn user about migration
+        if migrated:
+            warnings.warn(
+                "Migrating checkpoint from old hierarchical format (2-output heads) "
+                "to new format (1-output heads). Consider retraining for optimal results.",
+                UserWarning
+            )
     
     model.load_state_dict(state_dict, strict=strict)
     
