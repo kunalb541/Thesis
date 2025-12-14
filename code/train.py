@@ -1192,7 +1192,7 @@ def main():
                        help="Disable AMP")
     parser.add_argument('--compile', action='store_true',
                        help="Use torch.compile")
-    parser.add_argument('--compile-mode', type=str, default='default',
+    parser.add_argument('--compile-mode', type=str, default='reduce-overhead',
                        choices=['default', 'reduce-overhead', 'max-autotune'],
                        help="Compile mode")
     
