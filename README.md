@@ -132,7 +132,7 @@ export NUMBA_NUM_THREADS=1
 
 srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
   --gres=gpu:4 --exclusive --time=00:30:00 \
-  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
+  python -u simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
   --binary_preset distinct --output ../data/raw/distinct.h5 \
   --num_workers 32 --seed 42 > log_distinct.txt 2>&1 &
 
@@ -287,10 +287,10 @@ python evaluate.py \
     --data test.h5 \
     --verbose
 
-python evaluate.py --data ../data/raw/baseline.h5   --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
-python evaluate.py --data ../data/raw/stellar.h5    --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
-python evaluate.py --data ../data/raw/planetary.h5  --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
-python evaluate.py --data ../data/raw/distinct.h5   --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/baseline.h5   --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/stellar.h5    --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/planetary.h5  --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/distinct.h5   --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
 
 ```
 
