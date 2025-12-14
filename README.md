@@ -245,11 +245,6 @@ python evaluate.py \
     --data test.h5 \
     --verbose
 
-python evaluate.py --data ../data/raw/baseline.h5   --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
-python evaluate.py --data ../data/raw/stellar.h5    --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
-python evaluate.py --data ../data/raw/planetary.h5  --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
-python evaluate.py --data ../data/raw/distinct.h5   --experiment_name distinct --batch_size 512 --n_samples 300000 --early_detection --n_evolution_per_type 10
-
 ```
 
 **Evaluation Outputs** (saved in `results/<experiment>_*/eval_<dataset>_<timestamp>/`):
@@ -284,7 +279,7 @@ for preset in baseline stellar planetary distinct; do
     --experiment-name distinct \
     --data ../data/raw/${preset}.h5 \
     --batch-size 512 \
-    --n-samples 100000 \
+    --n-samples 500000 \
     --early-detection \
     --save-formats png pdf
 done
