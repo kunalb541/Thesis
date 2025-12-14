@@ -16,6 +16,14 @@ CORE CAPABILITIES:
     - Cosine-warmup learning rate schedule with proper warmup
     - Checkpoint resumption for fault tolerance
 
+FIXES APPLIED (v2.6):
+    - CRITICAL FIX: Hierarchical mode now uses F.nll_loss() instead of F.cross_entropy()
+      since model outputs log-probabilities, not logits (S0-1)
+    - CRITICAL FIX: Probability computation in evaluate() now uses torch.exp() for
+      hierarchical mode instead of F.softmax() (S0-2)
+    - MAJOR FIX: Validation sampler now has set_epoch() called for proper DDP (S1-1)
+    - MAJOR FIX: Sequence length computation now has minimum length of 1 (S1-3)
+
 FIXES APPLIED (v2.5):
     - Enhanced: Complete type hint coverage for all functions (100%)
     - Enhanced: Robust HDF5 file handling with try-except blocks
@@ -78,7 +86,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 # =============================================================================
 # ENVIRONMENT CONFIGURATION
@@ -397,7 +405,8 @@ class MicrolensingDataset(Dataset):
         label = int(self.h5_file['labels'][global_idx])
         
         # Compute sequence length (non-zero flux indicates valid observation)
-        length = int((flux != 0).sum())
+        # v2.6 FIX (S1-3): Ensure minimum length of 1 to prevent division by zero
+        length = max(1, int((flux != 0).sum()))
         
         # Normalize with separate statistics
         flux_norm = (flux - self.flux_median) / (self.flux_iqr + EPS)
@@ -831,7 +840,12 @@ def train_epoch(
         # Forward pass
         with autocast_ctx:
             logits = model(flux, delta_t, lengths)
-            loss = F.cross_entropy(logits, labels, weight=class_weights)
+            # v2.6 FIX (S0-1): Use nll_loss for hierarchical (receives log-probs),
+            # cross_entropy for flat classification (receives logits)
+            if config.hierarchical:
+                loss = F.nll_loss(logits, labels, weight=class_weights)
+            else:
+                loss = F.cross_entropy(logits, labels, weight=class_weights)
             loss = loss / accumulation_steps
         
         # Backward pass
@@ -951,10 +965,22 @@ def evaluate(
         
         with autocast_ctx:
             logits = model(flux, delta_t, lengths)
-            loss = F.cross_entropy(logits, labels, weight=class_weights)
+            # v2.6 FIX (S0-1): Use correct loss for hierarchical mode
+            if config.hierarchical:
+                loss = F.nll_loss(logits, labels, weight=class_weights)
+            else:
+                loss = F.cross_entropy(logits, labels, weight=class_weights)
         
         preds = logits.argmax(dim=-1)
-        probs = F.softmax(logits, dim=-1)
+        
+        # v2.6 FIX (S0-2): Correct probability computation for hierarchical mode
+        if config.hierarchical:
+            # logits are log-probabilities, convert to probabilities
+            probs = torch.exp(logits)
+            # Renormalize to handle numerical errors
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+        else:
+            probs = F.softmax(logits, dim=-1)
         
         total_loss += loss.item() * len(labels)
         total_correct += (preds == labels).sum().item()
@@ -1476,6 +1502,9 @@ def main():
             
             if is_ddp and hasattr(train_loader.sampler, 'set_epoch'):
                 train_loader.sampler.set_epoch(epoch)
+            # v2.6 FIX (S1-1): Also set epoch for validation sampler
+            if is_ddp and hasattr(val_loader.sampler, 'set_epoch'):
+                val_loader.sampler.set_epoch(epoch)
             
             train_loss, train_acc = train_epoch(
                 model, train_loader, optimizer, scheduler, scaler, class_weights,
