@@ -575,6 +575,3 @@ MIT License - See [LICENSE](LICENSE) for details.
 - Extended to 5-year Roman mission simulations
 
 ---
-
-**Version**: 3.0  
-**Last Updated**: December 2024  
