@@ -1195,7 +1195,7 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            broadcast_buffers=False,
+            broadcast_buffers=True,
             gradient_as_bucket_view=True
         )
     
