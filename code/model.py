@@ -27,6 +27,11 @@ PERFORMANCE OPTIMIZATIONS (v2.6):
     - Implemented gradient checkpointing for GRU
     - Complete type hints and docstrings (100% coverage)
 
+FIXES APPLIED (v2.7):
+    * CRITICAL FIX: Documented that hierarchical mode outputs log-probabilities,
+      requiring F.nll_loss() instead of F.cross_entropy() in training (S0-1)
+    * Documentation clarification for hierarchical output format
+    
 FIXES APPLIED (v2.6):
     * CRITICAL FIX: Hierarchical classification now uses proper probability
       computation: P(PSPL) = P(Deviation) × P(PSPL|Deviation) (S0-1)
@@ -55,7 +60,7 @@ IMPORTANT ASSUMPTION:
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.6
+Version: 2.7
 """
 
 from __future__ import annotations
@@ -69,7 +74,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-__version__: Final[str] = "2.6.0"
+__version__: Final[str] = "2.7.0"
 
 __all__ = [
     # Configuration
@@ -958,6 +963,10 @@ class RomanMicrolensingClassifier(nn.Module):
         -------
         Tensor
             Class logits [batch, n_classes].
+            
+            IMPORTANT: When hierarchical=True, returns LOG-PROBABILITIES (not logits).
+            Use F.nll_loss() instead of F.cross_entropy() for training.
+            When hierarchical=False, returns standard logits for F.cross_entropy().
             
         Notes
         -----
