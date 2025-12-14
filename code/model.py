@@ -59,7 +59,7 @@ FIXES APPLIED (v3.0 - Production)
 Author: Kunal Bhatia
 Institution: University of Heidelberg
 Advisor: Prof. Dr. Joachim Wambsganß
-Version: 3.0 (Production)
+Version: 3.0 
 """
 
 from __future__ import annotations
