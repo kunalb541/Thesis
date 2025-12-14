@@ -30,8 +30,16 @@ Scientific Visualization
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options (IBM/Wong standard)
 
-Fixes Applied (v2.5 - Production Release)
------------------------------------------
+Fixes Applied (v2.4 - Evolution Plot Fix)
+------------------------------------------
+    * CRITICAL: Fixed evolution plot x-axis to use time (days) instead of observation completeness
+    * CRITICAL: All three panels in evolution plot now share consistent x-axis (time in days)
+    * MAJOR: Improved evolution plot spacing and formatting to prevent label overlap
+    * MAJOR: Added explicit filtering of padded observations in evolution plots
+    * MINOR: Increased figure sizes for better readability
+    * MINOR: Enhanced grid transparency and legend positioning
+    
+    Previous fixes (v2.3):
     * CRITICAL: Fixed DDP/compile wrapper handling in checkpoint loading
     * CRITICAL: Hard failure on missing normalization statistics
     * CRITICAL: Added reproducible seeding for subsampling
@@ -50,7 +58,7 @@ Fixes Applied (v2.5 - Production Release)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.4 
+Version: 2.4
 """
 from __future__ import annotations
 
@@ -1976,16 +1984,30 @@ class RomanEvaluator:
                 # Denormalize
                 flux = flux_norm * (self.flux_iqr + EPS) + self.flux_median
                 
-                # Mask invalid observations
-                valid_mask = (times != INVALID_TIMESTAMP) & (times != 0)
+                # Filter padded observations (explicit check for both conditions)
+                valid_mask = (times != INVALID_TIMESTAMP) & (times > 0) & (flux != 0)
+                
+                if valid_mask.sum() < 3:
+                    # Not enough valid points, show empty plot
+                    ax.text(0.5, 0.5, 'Insufficient data', 
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_xlabel('Time (days)', fontsize=8)
+                    ax.set_ylabel('Magnitude (AB)', fontsize=8)
+                    prob = self.probs[idx, class_idx]
+                    ax.set_title(f'{class_name} (P={prob:.3f})', fontsize=9, fontweight='bold')
+                    continue
+                
+                # Extract valid observations
+                times_valid = times[valid_mask]
+                flux_valid = flux[valid_mask]
                 
                 # Plot
-                ax.plot(times[valid_mask], flux[valid_mask], 
+                ax.plot(times_valid, flux_valid, 
                        'o-', color=self.colors[class_idx], 
                        markersize=2, linewidth=0.8, alpha=0.7)
                 
                 # Formatting
-                ax.invert_yaxis()  # Magnitude convention
+                ax.invert_yaxis()
                 ax.set_xlabel('Time (days)', fontsize=8)
                 ax.set_ylabel('Magnitude (AB)', fontsize=8)
                 
@@ -1994,6 +2016,7 @@ class RomanEvaluator:
                 ax.set_title(f'{class_name} (P={prob:.3f})', fontsize=9, fontweight='bold')
                 
                 ax.tick_params(labelsize=7)
+                ax.grid(alpha=0.2)
         
         plt.tight_layout()
         self._save_figure(fig, 'example_light_curves')
@@ -2227,12 +2250,16 @@ class RomanEvaluator:
         step_indices = np.linspace(10, n_valid, n_steps, dtype=int)
         
         probs_evolution = np.zeros((n_steps, 3))
+        times_evolution = np.zeros(n_steps)
         
         with torch.no_grad(), torch.inference_mode():
             for i, n_obs in enumerate(step_indices):
                 # Truncate sequence
                 flux_trunc = flux_norm[:n_obs]
                 delta_t_trunc = delta_t_norm[:n_obs]
+                
+                # Record time at this step
+                times_evolution[i] = times[n_obs - 1]
                 
                 # Pad to max length
                 max_len = len(flux_norm)
@@ -2254,45 +2281,50 @@ class RomanEvaluator:
         # Denormalize for plotting
         flux_denorm = flux_norm * (self.flux_iqr + EPS) + self.flux_median
         
+        # Filter valid observations for plotting
+        times_valid = times[valid_mask]
+        flux_valid = flux_denorm[valid_mask]
+        
         # Plot
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(7, 8), sharex=True)
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.plot(times[valid_mask], flux_denorm[valid_mask], 
-                'o-', color=self.colors[true_label], markersize=3, linewidth=1)
+        ax1.plot(times_valid, flux_valid, 
+                'o-', color=self.colors[true_label], markersize=3, linewidth=1, alpha=0.7)
         ax1.invert_yaxis()
-        ax1.set_ylabel('Magnitude (AB)', fontweight='bold')
+        ax1.set_ylabel('Magnitude (AB)', fontsize=11)
         ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
-                     fontweight='bold')
+                     fontsize=12, fontweight='bold')
+        ax1.grid(alpha=0.2)
         
         # Panel 2: Probability evolution
-        completeness = step_indices / n_valid
-        
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
-            ax2.plot(completeness, probs_evolution[:, i], 
+            ax2.plot(times_evolution, probs_evolution[:, i], 
                     'o-', color=color, label=name, linewidth=2, markersize=4)
         
         ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-        ax2.set_ylabel('Class Probability', fontweight='bold')
+        ax2.set_ylabel('Class Probability', fontsize=11)
         ax2.set_ylim([0, 1.05])
-        ax2.legend(fontsize=8, loc='best')
-        ax2.grid(alpha=0.3)
+        ax2.legend(fontsize=9, loc='best', framealpha=0.9)
+        ax2.grid(alpha=0.2)
         
         # Panel 3: Confidence
         confidence = probs_evolution.max(axis=1)
         predicted_class = probs_evolution.argmax(axis=1)
         
-        ax3.plot(completeness, confidence, 'o-', color='black', 
+        ax3.plot(times_evolution, confidence, 'o-', color='black', 
                 linewidth=2, markersize=4, label='Confidence')
-        ax3.fill_between(completeness, 0, confidence, alpha=0.3, color='gray')
+        ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
         
-        ax3.set_xlabel('Observation Completeness', fontweight='bold')
-        ax3.set_ylabel('Max Probability', fontweight='bold')
+        ax3.set_xlabel('Time (days)', fontsize=11)
+        ax3.set_ylabel('Max Probability', fontsize=11)
         ax3.set_ylim([0, 1.05])
-        ax3.set_xlim([0, 1.05])
-        ax3.legend(fontsize=8)
-        ax3.grid(alpha=0.3)
+        ax3.set_xlim([times_valid.min(), times_valid.max()])
+        ax3.legend(fontsize=9, framealpha=0.9)
+        ax3.grid(alpha=0.2)
         
+        # Improve spacing
+        plt.subplots_adjust(hspace=0.25)
         plt.tight_layout()
         self._save_figure(fig, f'evolution_{class_name}_{sample_idx}')
         plt.close()
