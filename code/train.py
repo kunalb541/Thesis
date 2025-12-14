@@ -16,7 +16,7 @@ CORE CAPABILITIES:
     - Cosine-warmup learning rate schedule with proper warmup
     - Checkpoint resumption for fault tolerance
 
-FIXES APPLIED (v2.6):
+FIXES APPLIED (v2.5):
     - Enhanced: Complete type hint coverage for all functions (100%)
     - Enhanced: Robust HDF5 file handling with try-except blocks
     - Enhanced: Improved error messages with actionable guidance
@@ -24,7 +24,7 @@ FIXES APPLIED (v2.6):
     - Verified: Distributed validation already correct (uses DistributedSampler)
     - Verified: Metrics aggregation across processes working correctly
     
-    Previous fixes (v2.5):
+    Previous fixes (v2.4):
     - CRITICAL: Fixed checkpoint key from 'config' to 'model_config' for evaluate.py compatibility
     - CRITICAL: Fixed stats dictionary keys (norm_median -> flux_median, norm_iqr -> flux_iqr)
     - CRITICAL: Delta_t now normalized with its own median/IQR (not flux stats)
@@ -41,7 +41,7 @@ FIXES APPLIED (v2.6):
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.6
+Version: 2.5
 """
 
 from __future__ import annotations
