@@ -331,7 +331,7 @@ class MicrolensingDatasetFast(Dataset):
         flux_iqr: float,
         delta_t_median: float,
         delta_t_iqr: float,
-        precompute_lengths: bool = True
+        precompute_lengths: bool = False
     ) -> None:
         self.hdf5_path = hdf5_path
         self.indices = indices
@@ -565,7 +565,7 @@ def create_dataloaders(
         stats['flux_iqr'],
         stats['delta_t_median'],
         stats['delta_t_iqr'],
-        precompute_lengths=True  # v2.7: Enable pre-computed lengths
+        precompute_lengths=False  # FIX: See above  # v2.7: Enable pre-computed lengths
     )
     
     val_dataset = MicrolensingDatasetFast(
@@ -575,7 +575,7 @@ def create_dataloaders(
         stats['flux_iqr'],
         stats['delta_t_median'],
         stats['delta_t_iqr'],
-        precompute_lengths=True
+        precompute_lengths=False  # FIX: See above
     )
     
     if is_ddp:
@@ -602,8 +602,8 @@ def create_dataloaders(
         sampler=train_sampler,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=(num_workers > 0),
+        pin_memory=False,  # PATCHED: Disabled to prevent OOM
+        persistent_workers=False,  # PATCHED: Disabled to prevent OOM
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         worker_init_fn=worker_init_fn,
         drop_last=True  # v2.7: Consistent batch sizes
@@ -616,8 +616,8 @@ def create_dataloaders(
         sampler=val_sampler,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=(num_workers > 0),
+        pin_memory=False,  # PATCHED: Disabled to prevent OOM
+        persistent_workers=False,  # PATCHED: Disabled to prevent OOM
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         worker_init_fn=worker_init_fn
     )
