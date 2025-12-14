@@ -24,7 +24,7 @@ CRITICAL FIXES:
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 1.0 
+Version: 2.0 
 """
 
 from __future__ import annotations
