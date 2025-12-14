@@ -2307,7 +2307,7 @@ class RomanEvaluator:
         
         # Panel 2: Probability evolution
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
-            ax2.plot(times_evolution, probs_evolution[:, i], 
+            ax2.scatter(times_evolution, probs_evolution[:, i], 
                     'o-', color=color, label=name, linewidth=2, markersize=4)
         
         ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
