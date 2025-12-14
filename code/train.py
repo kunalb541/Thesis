@@ -49,7 +49,7 @@ FIXES APPLIED (v2.5):
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.5
+Version: 2.6
 """
 
 from __future__ import annotations
