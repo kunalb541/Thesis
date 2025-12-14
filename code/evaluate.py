@@ -30,20 +30,22 @@ Scientific Visualization
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options (IBM/Wong standard)
 
-Fixes Applied (v2.3 - Production Release)
+Fixes Applied (v2.4 - Production Release)
 -----------------------------------------
-    * CRITICAL: Fixed tensor creation in early detection loop (3x speedup)
+    * CRITICAL: Fixed NPZ format compatibility in subsampling path
+    * CRITICAL: Fixed parameter extraction for subsampled NPZ data
     * Publication-quality matplotlib settings (A&A/MNRAS standard)
     * Grid alpha reduced to 0.2 for astronomy publication standard
     * Error bar capsize increased to 4pt for 600 DPI visibility
-    * Complete docstrings for all visualization methods
+    * Complete docstrings for all methods
     * Optimized memory usage in batch inference
     * Enhanced error handling throughout
+    * CLI argument naming standardized to use hyphens
     * Improved edge case handling for parameter extraction
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.3
+Version: 2.4
 """
 from __future__ import annotations
 
@@ -176,7 +178,7 @@ def configure_matplotlib(use_latex: bool = False) -> None:
         'axes.linewidth': 0.8,
         'axes.grid': True,
         'axes.axisbelow': True,
-        'grid.alpha': 0.2,  # FIXED: Astronomy publication standard
+        'grid.alpha': 0.2,  # Astronomy publication standard
         'grid.linewidth': 0.5,
         
         # Ticks
@@ -196,7 +198,7 @@ def configure_matplotlib(use_latex: bool = False) -> None:
         'legend.fancybox': False,
         
         # Error bars
-        'errorbar.capsize': 4,  # FIXED: Increased for 600 DPI visibility
+        'errorbar.capsize': 4,  # Increased for 600 DPI visibility
     })
     
     # LaTeX configuration (optional)
@@ -305,6 +307,7 @@ def load_data_hybrid(path: Union[str, Path]) -> Dict[str, Any]:
         - 'labels': Label array of shape (n_samples,)
         - 'timestamps': Time array of shape (n_samples, seq_len) if available
         - 'params_flat', 'params_pspl', 'params_binary': Parameter arrays if available
+        - '_file_format': 'h5' or 'npz' for internal tracking
         
     Raises
     ------
@@ -326,6 +329,7 @@ def load_data_hybrid(path: Union[str, Path]) -> Dict[str, Any]:
     data = {}
     
     if path.suffix in ['.h5', '.hdf5']:
+        data['_file_format'] = 'h5'
         with h5py.File(path, 'r') as f:
             # Load core datasets
             for key in ['flux', 'delta_t', 'labels', 'timestamps']:
@@ -341,6 +345,7 @@ def load_data_hybrid(path: Union[str, Path]) -> Dict[str, Any]:
             data['metadata'] = dict(f.attrs)
     
     elif path.suffix == '.npz':
+        data['_file_format'] = 'npz'
         npz_data = np.load(path, allow_pickle=True)
         for key in npz_data.files:
             data[key] = npz_data[key]
@@ -538,9 +543,20 @@ class NumpyJSONEncoder(json.JSONEncoder):
     
     Handles conversion of NumPy arrays, scalars, and other special
     types to JSON-serializable formats for saving evaluation results.
+    
+    Supported Types
+    ---------------
+    - np.floating, float -> float (NaN/Inf -> None)
+    - np.integer, int -> int
+    - np.ndarray -> list
+    - np.bool_ -> bool
+    - Path, PathLike -> str
+    - datetime -> ISO format string
+    - Objects with to_dict() method -> dict
     """
     
     def default(self, obj: Any) -> Any:
+        """Convert special types to JSON-serializable formats."""
         if isinstance(obj, (np.floating, float)):
             if np.isnan(obj) or np.isinf(obj):
                 return None
@@ -771,6 +787,7 @@ class RomanEvaluator:
         self.colors = COLORS_COLORBLIND if colorblind_safe else COLORS_DEFAULT
         self.save_formats = save_formats or ['png']
         self.use_latex = use_latex
+        self.data_path = data_path
         
         # Configure matplotlib
         configure_matplotlib(use_latex=use_latex)
@@ -876,15 +893,24 @@ class RomanEvaluator:
         Load and prepare data with proper normalization.
         
         CRITICAL: Uses normalization statistics from training checkpoint
-        to ensure evaluation matches training distribution.
+        to ensure evaluation matches training distribution. Handles both
+        HDF5 and NPZ formats with proper parameter extraction.
         
         Parameters
         ----------
         data_path : str
             Path to data file (.h5 or .npz).
+            
+        Notes
+        -----
+        The normalization statistics (flux_median, flux_iqr, delta_t_median,
+        delta_t_iqr) are loaded from the training checkpoint. If missing,
+        fallback computation from data is used with a warning, as this may
+        cause train/test distribution mismatch.
         """
         self.logger.info("\nLoading data...")
         data_dict = load_data_hybrid(data_path)
+        file_format = data_dict.get('_file_format', 'unknown')
         
         # Validate required datasets
         for key in ['flux', 'delta_t', 'labels']:
@@ -894,6 +920,9 @@ class RomanEvaluator:
         raw_flux = data_dict['flux']
         raw_delta_t = data_dict['delta_t']
         labels = data_dict['labels']
+        
+        # Store full labels for parameter extraction before subsampling
+        full_labels = labels.copy()
         
         # Optional subsampling for faster evaluation
         if self.n_samples is not None and self.n_samples < len(labels):
@@ -969,15 +998,14 @@ class RomanEvaluator:
             timestamps = np.tile(np.linspace(0, 200, max_len), (len(labels), 1))
             self.logger.warning("Timestamps missing, using default 0-200 days")
         
-        # Extract physical parameters with FIXED alignment
+        # =====================================================================
+        # CRITICAL FIX (v2.4): Parameter extraction with proper format handling
+        # =====================================================================
         try:
-            # For subsampled data, we need to handle parameter extraction carefully
             if self._subsampled_indices is not None:
-                # Create a temporary full labels array for parameter extraction
-                with h5py.File(data_path, 'r') as f:
-                    full_labels = f['labels'][:]
+                # For subsampled data, extract parameters using full labels first
+                # then subsample the resulting arrays
                 params_full = extract_parameters_aligned(data_dict, full_labels)
-                # Subsample the parameters
                 params = {k: v[self._subsampled_indices] for k, v in params_full.items()}
             else:
                 params = extract_parameters_aligned(data_dict, labels)
@@ -1011,12 +1039,21 @@ class RomanEvaluator:
         """
         Run batch inference on the test set with optimized memory handling.
         
+        Processes data in batches to avoid GPU memory overflow. Uses
+        torch.inference_mode() for maximum efficiency by disabling
+        gradient computation and autograd history.
+        
         Returns
         -------
         Tuple[np.ndarray, np.ndarray, np.ndarray]
             - probs: Class probabilities of shape (n_samples, 3)
             - preds: Predictions of shape (n_samples,)
             - confs: Confidences of shape (n_samples,)
+            
+        Notes
+        -----
+        Uses non_blocking=True for asynchronous CPU-GPU transfers when
+        data is already in pinned memory.
         """
         n = len(self.norm_flux)
         all_probs = []
@@ -1053,6 +1090,10 @@ class RomanEvaluator:
         """
         Compute comprehensive classification metrics.
         
+        Calculates a full suite of metrics including overall accuracy,
+        macro-averaged precision/recall/F1, and ROC-AUC scores. Also
+        computes per-class metrics for detailed analysis.
+        
         Returns
         -------
         Dict[str, float]
@@ -1061,11 +1102,16 @@ class RomanEvaluator:
             - precision_macro: Macro-averaged precision
             - recall_macro: Macro-averaged recall
             - f1_macro: Macro-averaged F1-score
-            - roc_auc_macro: Macro-averaged ROC-AUC
+            - roc_auc_macro: Macro-averaged ROC-AUC (one-vs-rest)
             - roc_auc_weighted: Weighted ROC-AUC
-            - per_class_precision: Precision for each class
-            - per_class_recall: Recall for each class
-            - per_class_f1: F1-score for each class
+            - precision_<class>: Precision for each class
+            - recall_<class>: Recall for each class
+            - f1_<class>: F1-score for each class
+            
+        Notes
+        -----
+        ROC-AUC is computed using one-vs-rest strategy and may return 0.0
+        if only one class is present in the test set.
         """
         self.logger.info("\n" + "=" * 80)
         self.logger.info("COMPUTING METRICS")
@@ -1136,7 +1182,8 @@ class RomanEvaluator:
         Notes
         -----
         Saves in all formats specified in self.save_formats with
-        600 DPI resolution for publication quality.
+        600 DPI resolution for publication quality. Supported formats
+        include 'png', 'pdf', and 'svg'.
         """
         for fmt in self.save_formats:
             filepath = self.output_dir / f"{name}.{fmt}"
@@ -1735,6 +1782,10 @@ class RomanEvaluator:
         t0_correct = t0_vals[correct]
         t0_incorrect = t0_vals[~correct]
         
+        if len(t0_incorrect) == 0:
+            self.logger.warning("No incorrect predictions for temporal bias check")
+            return
+        
         # KS test
         ks_stat, ks_pval = ks_2samp(t0_correct, t0_incorrect)
         
@@ -1826,7 +1877,7 @@ class RomanEvaluator:
                 for i in range(0, n, self.batch_size):
                     batch_end = min(i + self.batch_size, n)
                     
-                    # FIXED: Slice pre-created tensors (no creation in loop)
+                    # Slice pre-created tensors (no creation in loop)
                     flux_batch = flux_tensor[i:batch_end]
                     dt_batch = dt_tensor[i:batch_end]
                     len_batch = len_tensor[i:batch_end]
@@ -1854,7 +1905,7 @@ class RomanEvaluator:
             })
         
         # Plot
-        fractions = [r['fraction'] for r in results]
+        fractions_plot = [r['fraction'] for r in results]
         accuracies = [r['accuracy'] for r in results]
         acc_lower = [r['accuracy_ci_lower'] for r in results]
         acc_upper = [r['accuracy_ci_upper'] for r in results]
@@ -1866,12 +1917,12 @@ class RomanEvaluator:
         acc_err_lower = [a - l for a, l in zip(accuracies, acc_lower)]
         acc_err_upper = [u - a for a, u in zip(accuracies, acc_upper)]
         
-        ax.errorbar(np.array(fractions) * 100, accuracies, 
+        ax.errorbar(np.array(fractions_plot) * 100, accuracies, 
                    yerr=[acc_err_lower, acc_err_upper],
                    fmt='o-', label='Accuracy', color=self.colors[1], 
                    capsize=4, linewidth=1.5, markersize=5)
         
-        ax.plot(np.array(fractions) * 100, f1_scores, 's--', 
+        ax.plot(np.array(fractions_plot) * 100, f1_scores, 's--', 
                label='F1 (macro)', color=self.colors[2], 
                linewidth=1.5, markersize=5)
         
@@ -1963,7 +2014,7 @@ class RomanEvaluator:
             'metrics': self.metrics,
             'config': self.config_dict,
             'timestamp': datetime.now().isoformat(),
-            'version': '2.3'
+            'version': '2.4'
         }
         
         with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
@@ -2007,38 +2058,47 @@ class RomanEvaluator:
 # =============================================================================
 
 def main():
-    """Parse arguments and run evaluation."""
+    """
+    Parse arguments and run evaluation.
+    
+    Entry point for command-line execution. Parses all arguments,
+    initializes the RomanEvaluator, and runs the complete analysis suite.
+    """
     parser = argparse.ArgumentParser(
         description="Roman Microlensing Classifier Evaluation",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    parser.add_argument('--experiment_name', required=True,
+    # Required arguments
+    parser.add_argument('--experiment-name', required=True,
                        help="Name of experiment to evaluate")
     parser.add_argument('--data', required=True,
                        help="Path to test dataset (.h5 or .npz)")
     
-    parser.add_argument('--output_dir', default=None,
+    # Optional arguments
+    parser.add_argument('--output-dir', default=None,
                        help="Custom output directory")
-    parser.add_argument('--batch_size', type=int, default=128,
+    parser.add_argument('--batch-size', type=int, default=128,
                        help="Batch size for inference")
-    parser.add_argument('--n_samples', type=int, default=None,
+    parser.add_argument('--n-samples', type=int, default=None,
                        help="Subsample test set")
     parser.add_argument('--device', default='cuda',
                        help="Device: cuda or cpu")
     
-    parser.add_argument('--early_detection', action='store_true',
+    # Analysis options
+    parser.add_argument('--early-detection', action='store_true',
                        help="Run early detection analysis")
-    parser.add_argument('--n_evolution_per_type', type=int, default=10,
+    parser.add_argument('--n-evolution-per-type', type=int, default=10,
                        help="Evolution plots per class")
-    parser.add_argument('--n_example_grid_per_type', type=int, default=4,
+    parser.add_argument('--n-example-grid-per-type', type=int, default=4,
                        help="Examples per class in grid")
     
-    parser.add_argument('--colorblind_safe', action='store_true',
+    # Output options
+    parser.add_argument('--colorblind-safe', action='store_true',
                        help="Use colorblind-safe palette")
-    parser.add_argument('--use_latex', action='store_true',
+    parser.add_argument('--use-latex', action='store_true',
                        help="Enable LaTeX rendering")
-    parser.add_argument('--save_formats', nargs='+', default=['png'],
+    parser.add_argument('--save-formats', nargs='+', default=['png'],
                        choices=['png', 'pdf', 'svg'],
                        help="Output formats")
     parser.add_argument('--verbose', action='store_true',
@@ -2046,6 +2106,7 @@ def main():
     
     args = parser.parse_args()
     
+    # Convert hyphenated args to underscored for kwargs
     evaluator = RomanEvaluator(
         experiment_name=args.experiment_name,
         data_path=args.data,
