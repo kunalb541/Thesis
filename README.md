@@ -339,7 +339,7 @@ for preset in baseline stellar planetary distinct; do
     --experiment-name distinct \
     --data ../data/raw/${preset}.h5 \
     --batch-size 512 \
-    --n-samples 500000 \
+    --n-samples 300000 \
     --early-detection \
     --save-formats png pdf
 done
