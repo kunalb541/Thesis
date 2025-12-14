@@ -119,6 +119,8 @@ python simulate.py \
 - Parameters: `params_flat`, `params_pspl`, `params_binary` (structured arrays)
 - Metadata: Mission duration, cadence, seed, etc.
 
+### Advanced Options 
+
 ```bash
 cd ~/Thesis/code
 conda activate microlens_amd
