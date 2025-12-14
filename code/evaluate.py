@@ -103,7 +103,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__ = "2.5.0"
+__version__ = "2.4.0"
 
 # =============================================================================
 # CONSTANTS
