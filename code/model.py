@@ -47,7 +47,7 @@ Performance
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.0
+Version: 2.1
 """
 
 from __future__ import annotations
