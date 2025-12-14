@@ -2009,9 +2009,7 @@ class RomanEvaluator:
                 flux_valid = flux[valid_mask]
                 
                 # Plot
-                ax.scatter(times_valid, flux_valid, 
-                       'o-', color=self.colors[class_idx], 
-                       markersize=2, linewidth=0.8, alpha=0.7)
+                ax.scatter(times_valid, flux_valid)
                 
                 # Formatting
                 ax.invert_yaxis()
@@ -2297,8 +2295,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.plot(times_valid, flux_valid, 
-                'o-', color=self.colors[true_label], markersize=3, linewidth=1, alpha=0.7)
+        ax1.scatter(times_valid, flux_valid)
         ax1.invert_yaxis()
         ax1.set_ylabel('Magnitude (AB)', fontsize=11)
         ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
@@ -2307,7 +2304,7 @@ class RomanEvaluator:
         
         # Panel 2: Probability evolution
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
-            ax2.scatter(times_evolution, probs_evolution[:, i], 
+            ax2.plot(times_evolution, probs_evolution[:, i], 
                     'o-', color=color, label=name, linewidth=2, markersize=4)
         
         ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
