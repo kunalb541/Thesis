@@ -556,7 +556,7 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## Development Status
 
-**Version 2.0 (Current)**
+**Version 2.4 (Current)**
 - Status: Production-ready
 - All critical bugs fixed
 - Comprehensive testing complete
