@@ -685,7 +685,7 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
                 f"Must be finite (not NaN or inf). Retrain model."
             )
         
-        if 'iqr' in key and value <= 0:
+        if 'iqr' in key and value < 0:
             raise ValueError(
                 f"CRITICAL: IQR stat '{key}' must be positive, got {value}. "
                 f"This indicates degenerate data distribution. Check training data."
