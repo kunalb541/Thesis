@@ -1,0 +1,104 @@
+{
+  "experiment": "fast_training",
+  "model_path": "../results/fast_training/best_model.pt",
+  "data_path": "../data/raw/distinct.h5",
+  "data_size": 3000,
+  "class_distribution": {
+    "Flat": 1000,
+    "PSPL": 1000,
+    "Binary": 1000
+  },
+  "normalization": {
+    "flux_median": 20.741943359375,
+    "flux_iqr": 3.094325542449951,
+    "delta_t_median": 0.08336807042360306,
+    "delta_t_iqr": 0.0
+  },
+  "metrics": {
+    "accuracy": 0.553,
+    "accuracy_ci_lower": 0.534,
+    "accuracy_ci_upper": 0.571,
+    "precision_macro": 0.4731271951002893,
+    "recall_macro": 0.553,
+    "f1_macro": 0.4643680774265173,
+    "precision_weighted": 0.4731271951002893,
+    "recall_weighted": 0.553,
+    "f1_weighted": 0.4643680774265173,
+    "precision_Flat": 0.0,
+    "recall_Flat": 0.0,
+    "f1_Flat": 0.0,
+    "precision_PSPL": 0.4268554268554269,
+    "recall_PSPL": 0.995,
+    "f1_PSPL": 0.5974181927349145,
+    "precision_Binary": 0.992526158445441,
+    "recall_Binary": 0.664,
+    "f1_Binary": 0.7956860395446375,
+    "roc_auc_macro": 0.9126326666666666,
+    "roc_auc_weighted": 0.9126326666666668,
+    "roc_auc_Flat": 0.9648365,
+    "roc_auc_PSPL": 0.8516725,
+    "roc_auc_Binary": 0.9213889999999999,
+    "confusion_matrix": [
+      [
+        0,
+        1000,
+        0
+      ],
+      [
+        0,
+        995,
+        5
+      ],
+      [
+        0,
+        336,
+        664
+      ]
+    ],
+    "confusion_matrix_normalized": [
+      [
+        0.0,
+        0.99999999999,
+        0.0
+      ],
+      [
+        0.0,
+        0.99499999999005,
+        0.00499999999995
+      ],
+      [
+        0.0,
+        0.33599999999664,
+        0.66399999999336
+      ]
+    ]
+  },
+  "config": {
+    "d_model": 64,
+    "n_layers": 4,
+    "dropout": 0.2,
+    "window_size": 7,
+    "max_seq_len": 2400,
+    "n_classes": 3,
+    "hierarchical": true,
+    "use_residual": true,
+    "use_layer_norm": true,
+    "feature_extraction": "conv",
+    "use_attention_pooling": true,
+    "use_amp": false,
+    "use_gradient_checkpointing": false,
+    "use_flash_attention": true,
+    "num_attention_heads": 2,
+    "gru_dropout": 0.1,
+    "bn_momentum": 0.2,
+    "init_scale": 1.0
+  },
+  "parameters": {
+    "batch_size": 512,
+    "calibration_n_bins": 10,
+    "roc_bootstrap_ci": true,
+    "seed": 42
+  },
+  "timestamp": "2025-12-14T20:12:20.611083",
+  "version": "2.5"
+}

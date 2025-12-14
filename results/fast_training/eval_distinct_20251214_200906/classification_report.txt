@@ -1,0 +1,9 @@
+              precision    recall  f1-score   support
+
+        Flat     0.0000    0.0000    0.0000      1000
+        PSPL     0.4269    0.9950    0.5974      1000
+      Binary     0.9925    0.6640    0.7957      1000
+
+    accuracy                         0.5530      3000
+   macro avg     0.4731    0.5530    0.4644      3000
+weighted avg     0.4731    0.5530    0.4644      3000
