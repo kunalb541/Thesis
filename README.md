@@ -97,10 +97,10 @@ python evaluate.py --experiment-name roman --data ../data/raw/test.h5
 ```bash
 python simulate.py \
     --n_flat 100000 \
-    --n_pspl 500000 \
-    --n_binary 500000 \
-    --binary_preset distinct \
-    --output ../data/raw/distinct.h5 \
+    --n_pspl 100000 \
+    --n_binary 100000 \
+    --binary_preset baseline \
+    --output ../data/raw/baseline.h5 \
     --num_workers 32 \
     --seed 42
 ```
@@ -119,48 +119,6 @@ python simulate.py \
 - Parameters: `params_flat`, `params_pspl`, `params_binary` (structured arrays)
 - Metadata: Mission duration, cadence, seed, etc.
 
-### Advanced Options 
-
-```bash
-cd ~/Thesis/code
-conda activate microlens_amd
-
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export NUMBA_NUM_THREADS=1
-
-srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
-  --gres=gpu:4 --exclusive --time=00:30:00 \
-  python -u simulate.py --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
-  --binary_preset distinct --output ../data/raw/distinct.h5 \
-  --num_workers 32 --seed 42 > log_distinct.txt 2>&1 &
-
-srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
-  --gres=gpu:4 --exclusive --time=00:30:00 \
-  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
-  --binary_preset stellar --output ../data/raw/stellar.h5 \
-  --num_workers 32 --seed 43 > log_stellar.txt 2>&1 &
-
-srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
-  --gres=gpu:4 --exclusive --time=00:30:00 \
-  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
-  --binary_preset planetary --output ../data/raw/planetary.h5 \
-  --num_workers 32 --seed 44 > log_planetary.txt 2>&1 &
-
-srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
-  --gres=gpu:4 --exclusive --time=00:30:00 \
-  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
-  --binary_preset baseline --output ../data/raw/baseline.h5 \
-  --num_workers 32 --seed 45 > log_baseline.txt 2>&1 &
-
-rm *txt
-
-echo "Jobs submitted. Waiting for completion..."
-wait
-echo "All jobs finished."
-```
-
 ---
 
 ## Training
@@ -169,8 +127,8 @@ echo "All jobs finished."
 
 ```bash
 python train.py \
-    --data ../data/raw/distinct.h5 \
-    --experiment-name distinct \
+    --data ../data/raw/baseline.h5 \
+    --experiment-name baseline \
     --epochs 50 \
     --batch-size 64 \
     --lr 1e-3 \
@@ -323,7 +281,7 @@ python evaluate.py --data ../data/raw/distinct.h5   --experiment_name distinct -
 # Evaluate on multiple test sets
 for preset in baseline stellar planetary distinct; do
   python evaluate.py \
-    --experiment-name baseline \
+    --experiment-name distinct \
     --data ../data/raw/${preset}.h5 \
     --batch-size 512 \
     --n-samples 100000 \
@@ -344,6 +302,8 @@ conda activate microlens
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMBA_NUM_THREADS=1
 
 # Launch 4 parallel simulation jobs
 for preset in distinct stellar planetary baseline; do
