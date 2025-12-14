@@ -25,15 +25,20 @@ Performance Characteristics
     - Multiprocessing using `spawn` for safe VBBinaryLensing usage
     - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
 
-Fixes Applied (v2.3)
+Fixes Applied (v2.4)
 --------------------
-    * CRITICAL: Fixed fallback noise model when Numba unavailable
-    * Added comprehensive error messages for debugging
-    * Improved VBBinaryLensing fallback handling
-    * Enhanced parameter validation
-    * Better structured array handling for parameter saving
-    * Added version tracking (__version__ = "2.3.0")
-    * Complete docstring coverage (100%)
+    * CRITICAL: Fixed PSPL extreme magnifications by capping u0 and A
+    * CRITICAL: Fixed binary flat events by strengthening acceptance criteria
+    * Updated binary baseline preset: tighter u0_range (0.001-0.5 instead of 0.001-1.0)
+    * Updated binary baseline preset: smaller rho_range for sharper caustic features
+    * Magnification now capped at 100x for physical realism
+    * Binary events now require max_mag > 1.5 AND mag_range > 0.3
+    * Increased binary generation attempts from 3 to 5
+    * Previous fixes (v2.3):
+      - Fixed fallback noise model when Numba unavailable
+      - Added comprehensive error messages for debugging
+      - Improved VBBinaryLensing fallback handling
+      - Enhanced parameter validation
 
 This module powers downstream ML pipelines such as CNN-GRU classifiers.
 
@@ -468,10 +473,10 @@ class BinaryPresets:
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)
         },
         'baseline': {
-            's_range': (0.1, 3.0),
-            'q_range': (1e-4, 1.0),
-            'u0_range': (0.001, 1.0),
-            'rho_range': (1e-3, 0.1),
+            's_range': (0.5, 2.0),           # Narrower s range for better caustics
+            'q_range': (1e-3, 1.0),          # Keep wide q range
+            'u0_range': (0.001, 0.5),        # CRITICAL: Cap at 0.5 for detectable events (was 1.0)
+            'rho_range': (1e-4, 0.05),       # Smaller rho for sharper features (was 0.1)
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)
@@ -484,13 +489,16 @@ class PSPLParams:
     PSPL (Point Source Point Lens) parameter ranges.
     
     Defines the parameter space for single-lens microlensing events.
+    
+    v2.5 FIX: Tightened u0 range to avoid unrealistic extreme magnifications
+    and focus on observable events.
     """
     T0_MIN: float = BinaryPresets.SHARED_T0_MIN
     T0_MAX: float = BinaryPresets.SHARED_T0_MAX
     TE_MIN: float = BinaryPresets.SHARED_TE_MIN
     TE_MAX: float = BinaryPresets.SHARED_TE_MAX
-    U0_MIN: float = 0.001
-    U0_MAX: float = 1.0
+    U0_MIN: float = 0.01   # Avoid extreme magnifications (was 0.001)
+    U0_MAX: float = 0.5    # Focus on detectable events (was 1.0)
 
 
 # =============================================================================
@@ -673,6 +681,11 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
         tE = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
         u0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
         A = pspl_magnification(t_grid, tE, u0, t0)
+        
+        # v2.5 FIX: Cap extreme magnifications for realism
+        # Max 100x magnification = ~5 mag amplification
+        A = np.minimum(A, 100.0)
+        
         label = 1
         meta.update({'t0': float(t0), 'tE': float(tE), 'u0': float(u0)})
         
@@ -682,7 +695,9 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
         tE = np.random.uniform(*p['tE_range'])
         
         # Try to generate binary event with retries
-        for attempt in range(3):
+        # v2.5 FIX: Increased attempts and stricter acceptance criteria
+        max_attempts = 5
+        for attempt in range(max_attempts):
             s = np.random.uniform(*p['s_range'])
             q = 10**np.random.uniform(*np.log10(p['q_range']))
             u0 = np.random.uniform(*p['u0_range'])
@@ -691,11 +706,18 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
             
             try:
                 A = binary_magnification_vbb(t_grid, tE, u0, t0, s, q, alpha, rho)
-                if np.max(A) > 1.1:
-                    break
+                max_mag = np.max(A)
+                
+                # v2.5 FIX: Require significant magnification with visible variation
+                # Old criterion (>1.1) was too weak - accepted nearly flat events
+                if max_mag > 1.5 and max_mag < 100:  # Detectable range
+                    mag_range = np.max(A) - np.min(A)
+                    if mag_range > 0.3:  # Ensure visible caustic features
+                        break
+                        
             except (RuntimeError, ValueError, TypeError, MemoryError):
                 # Continue to next attempt; if final attempt, fall through to else clause
-                if attempt == 2:
+                if attempt == max_attempts - 1:
                     meta['vbb_failed'] = True
         else:
             # Fallback to PSPL if all binary attempts fail (no break occurred)
