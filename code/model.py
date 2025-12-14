@@ -142,7 +142,7 @@ class ModelConfig:
     use_packed_sequences: bool = False
     
     # Advanced options
-    num_attention_heads: int = 3
+    num_attention_heads: int = 4
     gru_dropout: float = 0.1
     bn_momentum: float = BN_MOMENTUM
     init_scale: float = 1.0
