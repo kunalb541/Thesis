@@ -201,7 +201,7 @@ class ModelConfig:
     use_attention_pooling: bool = True
     
     # Performance options
-    use_amp: bool = True
+    use_amp: bool = False
     use_gradient_checkpointing: bool = False
     use_flash_attention: bool = True
     
