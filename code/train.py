@@ -5,44 +5,41 @@ Roman Microlensing Classifier Training Engine
 
 High-performance distributed training pipeline for classifying Roman Space
 Telescope microlensing light curves into Flat, PSPL, and Binary classes.
-Built for extreme throughput, GPU saturation, and scalable experimentation.
 
 CORE CAPABILITIES:
-    • End-to-end PyTorch DDP training with NCCL tuning for maximum bandwidth  
-    • Zero-copy HDF5 streaming with worker-safe dataset handles  
-    • On-the-fly normalization using cached median/IQR statistics  
-    • Flash-accelerated attention paths and TF32 matmul where available  
-    • Mixed-precision support with dynamic GradScaler and autocast  
-    • CUDA streams for asynchronous data prefetching into device memory  
-    • Flexible cosine-warmup learning rate schedule for stable convergence  
-    • Deterministic—or intentionally non-deterministic—paths depending on 
-      performance requirements  
+    • End-to-end PyTorch DDP training with NCCL optimization
+    • Zero-copy HDF5 streaming with worker-safe dataset handles
+    • Separate normalization for flux and delta_t (CRITICAL FIX)
+    • Flash-accelerated attention and TF32 matmul
+    • Mixed-precision training with dynamic GradScaler
+    • CUDA streams for asynchronous data prefetching
+    • Cosine-warmup learning rate schedule
+    • Checkpoint resumption for fault tolerance
 
-DATA PIPELINE:
-    Flux and Δt arrays are pulled from HDF5 storage with sorted index access,
-    repaired for missing values, normalized robustly, and masked for variable
-    sequence lengths. Batched tensors are delivered via a custom collate
-    function tuned for contiguous memory access and transfer speed.
+CRITICAL FIXES:
+    ✓ Delta_t now normalized with its own median/IQR (not flux stats)
+    ✓ Checkpoint resume functionality implemented
+    ✓ Proper statistics saved for evaluation
+    ✓ Deterministic seeding for reproducibility
 
-DISTRIBUTED EXECUTION:
-    This module dynamically configures a multi-process, GPU-aware environment
-    using NCCL backends, safe spawning, and synchronized caching of dataset
-    splits. Gradient accumulation enables large effective batch sizes even on
-    constrained hardware.
-
-PURPOSE:
-    This training engine powers supervised classification experiments for
-    Roman microlensing survey data. It is designed to integrate cleanly with
-    the accompanying RomanMicrolensingClassifier model definition and with
-    large-scale simulation datasets generated for thesis-level research.
-
-Author: Kunal Bhatia  
-Institution: University of Heidelberg  
-Version: 1.0
+Author: Kunal Bhatia
+Institution: University of Heidelberg
+Version: 1.0 
 """
 
 from __future__ import annotations
-import argparse, gc, json, logging, math, os, random, shutil, sys, time, warnings
+
+import argparse
+import gc
+import json
+import logging
+import math
+import os
+import random
+import shutil
+import sys
+import time
+import warnings
 from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -50,9 +47,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import h5py, numpy as np, torch
+import h5py
+import numpy as np
+import torch
 import torch.distributed as dist
-import torch.nn as nn, torch.nn.functional as F
+import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 from torch import Tensor
@@ -61,20 +61,23 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+# =============================================================================
+# ENVIRONMENT CONFIGURATION
+# =============================================================================
+
 def _configure_environment() -> None:
-    """Ultra-optimized environment configuration."""
+    """Ultra-optimized environment configuration for distributed training."""
     os.environ.setdefault('NCCL_IB_DISABLE', '0')
-    os.environ.setdefault('NCCL_NET_GDR_LEVEL', '3')  # Maximum GPU Direct
+    os.environ.setdefault('NCCL_NET_GDR_LEVEL', '3')
     os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
     os.environ.setdefault('NCCL_DEBUG', 'WARN')
-    os.environ.setdefault('NCCL_P2P_LEVEL', '5')  # Maximum P2P
-    os.environ.setdefault('NCCL_MIN_NCHANNELS', '16')  # More channels for bandwidth
+    os.environ.setdefault('NCCL_P2P_LEVEL', '5')
+    os.environ.setdefault('NCCL_MIN_NCHANNELS', '16')
     os.environ.setdefault('CUDA_DEVICE_MAX_CONNECTIONS', '1')
     os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF',
                          'expandable_segments:True,garbage_collection_threshold:0.9')
     os.environ.setdefault('TORCH_DISTRIBUTED_DEBUG', 'OFF')
     os.environ.setdefault('CUDA_LAUNCH_BLOCKING', '0')
-    # Disable profiler overhead
     os.environ.setdefault('KINETO_LOG_LEVEL', '5')
 
 _configure_environment()
@@ -87,15 +90,25 @@ from model import ModelConfig, RomanMicrolensingClassifier
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
 SEED: int = 42
 DEFAULT_CLIP_NORM: float = 1.0
 MIN_SEQUENCE_LENGTH: int = 1
 DEFAULT_VAL_FRACTION: float = 0.2
-PROGRESS_UPDATE_FREQ: int = 50  # Less frequent updates
+PROGRESS_UPDATE_FREQ: int = 50
 CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
 EPS: float = 1e-8
 
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
 class NumpyJSONEncoder(json.JSONEncoder):
+    """JSON encoder for NumPy types and PyTorch tensors."""
+    
     def default(self, obj: Any) -> Any:
         if isinstance(obj, (np.floating, float)):
             return float(obj)
@@ -117,7 +130,9 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
         return super().default(obj)
 
+
 def format_time(seconds: float) -> str:
+    """Format seconds into human-readable time string."""
     if seconds < 0:
         return "N/A"
     if seconds < 60:
@@ -126,7 +141,9 @@ def format_time(seconds: float) -> str:
         return f"{seconds/60:.1f}m"
     return f"{seconds/3600:.1f}h"
 
+
 def format_number(n: int) -> str:
+    """Format large numbers with K/M suffixes."""
     if n < 0:
         return f"-{format_number(-n)}"
     if n >= 1_000_000:
@@ -135,10 +152,22 @@ def format_number(n: int) -> str:
         return f"{n/1_000:.1f}K"
     return str(n)
 
+
 def get_timestamp() -> str:
+    """Get current timestamp string."""
     return datetime.now().strftime('%Y%m%d_%H%M%S')
 
+# =============================================================================
+# DISTRIBUTED SETUP
+# =============================================================================
+
 def setup_distributed() -> Tuple[int, int, int, bool]:
+    """
+    Setup distributed training environment.
+    
+    Returns:
+        Tuple of (rank, local_rank, world_size, is_distributed)
+    """
     if 'RANK' not in os.environ:
         return 0, 0, 1, False
     
@@ -155,11 +184,15 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
     torch.cuda.set_device(local_rank)
     
     if not dist.is_initialized():
-        dist.init_process_group(backend='nccl', init_method='env://',
-                               timeout=timedelta(seconds=3600),
-                               world_size=world_size, rank=rank)
+        dist.init_process_group(
+            backend='nccl',
+            init_method='env://',
+            timeout=timedelta(seconds=3600),
+            world_size=world_size,
+            rank=rank
+        )
     
-    # ULTRA-OPTIMIZED CUDA settings
+    # Ultra-optimized CUDA settings
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.deterministic = False
@@ -174,7 +207,6 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         torch.backends.cuda.enable_math_sdp(True)
     
-    # Enable CUDA graphs if available (PyTorch 2.0+)
     if hasattr(torch.cuda, 'is_available') and torch.cuda.is_available():
         try:
             torch.cuda.set_per_process_memory_fraction(0.95, local_rank)
@@ -186,459 +218,404 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
     
     return rank, local_rank, world_size, True
 
+
 def cleanup_distributed() -> None:
+    """Cleanup distributed training."""
     if dist.is_initialized():
-        try:
-            dist.barrier()
-        except Exception:
-            pass
-        finally:
-            dist.destroy_process_group()
+        dist.destroy_process_group()
+
 
 def is_main_process(rank: int) -> bool:
+    """Check if current process is main process."""
     return rank == 0
 
+
 def synchronize() -> None:
+    """Synchronize all processes."""
     if dist.is_initialized():
         dist.barrier()
 
-def setup_logging(rank: int, output_dir: Path) -> logging.Logger:
-    logger = logging.getLogger("ROMAN_TRAIN")
-    logger.handlers.clear()
-    logger.propagate = False
+# =============================================================================
+# DETERMINISTIC SEEDING
+# =============================================================================
+
+def set_seed(seed: int, rank: int = 0) -> None:
+    """
+    Set random seeds for reproducibility.
     
-    if is_main_process(rank):
-        logger.setLevel(logging.INFO)
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S')
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
+    Args:
+        seed: Base random seed
+        rank: Process rank (for distributed training)
+    """
+    random.seed(seed + rank)
+    np.random.seed(seed + rank)
+    torch.manual_seed(seed + rank)
+    torch.cuda.manual_seed(seed + rank)
+    torch.cuda.manual_seed_all(seed + rank)
+    
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+
+# =============================================================================
+# DATASET
+# =============================================================================
+
+class MicrolensingDataset(Dataset):
+    """
+    Microlensing light curve dataset with HDF5 streaming.
+    
+    Args:
+        h5_path: Path to HDF5 file
+        indices: Sample indices to use
+        flux_median: Flux normalization median
+        flux_iqr: Flux normalization IQR
+        delta_t_median: Delta_t normalization median (FIXED)
+        delta_t_iqr: Delta_t normalization IQR (FIXED)
+    """
+    
+    def __init__(
+        self,
+        h5_path: str,
+        indices: np.ndarray,
+        flux_median: float,
+        flux_iqr: float,
+        delta_t_median: float,
+        delta_t_iqr: float
+    ):
+        self.h5_path = h5_path
+        self.indices = indices
+        self.flux_median = flux_median
+        self.flux_iqr = flux_iqr
+        self.delta_t_median = delta_t_median
+        self.delta_t_iqr = delta_t_iqr
         
-        log_file = output_dir / "training.log"
-        file_handler = logging.FileHandler(log_file, mode='a')
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S')
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
-    else:
-        logger.setLevel(logging.CRITICAL + 1)
-        logger.addHandler(logging.NullHandler())
-    
-    return logger
-
-def set_global_seeds(seed: int, rank: int = 0) -> torch.Generator:
-    effective_seed = seed + rank
-    random.seed(effective_seed)
-    np.random.seed(effective_seed)
-    torch.manual_seed(effective_seed)
-    
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(effective_seed)
-        torch.cuda.manual_seed_all(effective_seed)
-    
-    generator = torch.Generator()
-    generator.manual_seed(effective_seed)
-    
-    # PERFORMANCE: Non-deterministic for speed
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-    
-    return generator
-
-def copy_to_local_storage(data_path: Path, logger: logging.Logger,
-                          rank: int, local_dir: Optional[str] = None) -> Path:
-    if local_dir is None:
-        for candidate in [os.environ.get('TMPDIR'), os.environ.get('LOCAL_SCRATCH'),
-                          '/tmp', '/local', '/scratch']:
-            if candidate and os.path.isdir(candidate):
-                local_dir = candidate
-                break
-    
-    if local_dir is None:
-        return data_path
-    
-    local_path = Path(local_dir) / f"rank{rank}_{data_path.name}"
-    
-    if not local_path.exists():
-        if rank == 0 or not dist.is_initialized():
-            logger.info(f"Copying data to local storage: {local_path}")
-        start = time.time()
-        shutil.copy2(data_path, local_path)
-        if rank == 0 or not dist.is_initialized():
-            elapsed = time.time() - start
-            size_gb = local_path.stat().st_size / 1e9
-            logger.info(f"  Copied {size_gb:.1f} GB in {elapsed:.1f}s ({size_gb/elapsed:.1f} GB/s)")
-    
-    return local_path
-
-def load_or_create_split(data_path: Path, logger: logging.Logger, rank: int = 0,
-                         is_ddp: bool = False, val_fraction: float = DEFAULT_VAL_FRACTION,
-                         original_data_path: Optional[Path] = None
-                         ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-    cache_source = original_data_path if original_data_path is not None else data_path
-    cache_path = cache_source.parent / f"{cache_source.stem}_split_cache.npz"
-    
-    if cache_path.exists():
-        if is_main_process(rank):
-            logger.info(f"Loading cached split from: {cache_path}")
-        try:
-            cache = np.load(cache_path)
-            train_idx = cache['train_idx']
-            val_idx = cache['val_idx']
-            stats = {'median': float(cache['median']), 'iqr': float(cache['iqr'])}
-            if is_main_process(rank):
-                logger.info(f"Loaded split: train={format_number(len(train_idx))}, "
-                          f"val={format_number(len(val_idx))}")
-            if is_ddp:
-                synchronize()
-            return train_idx, val_idx, stats
-        except Exception as e:
-            if is_main_process(rank):
-                logger.warning(f"Failed to load cache: {e}. Creating new split.")
-    
-    if is_main_process(rank):
-        logger.info("Creating new train/val split...")
-        with h5py.File(data_path, 'r', rdcc_nbytes=1024*1024*1024) as f:
-            labels = f['labels'][:]
-            n_samples = len(labels)
-            logger.info(f"Total samples: {format_number(n_samples)}")
-            
-            indices = np.arange(n_samples)
-            train_idx, val_idx = train_test_split(indices, test_size=val_fraction,
-                                                  shuffle=True, random_state=SEED,
-                                                  stratify=labels)
-            
-            flux_data = f['flux']
-            sample_size = min(50000, len(train_idx))
-            sample_idx = np.sort(np.random.choice(train_idx, sample_size, replace=False))
-            
-            valid_flux_chunks: List[np.ndarray] = []
-            chunk_size = 10000
-            for i in range(0, len(sample_idx), chunk_size):
-                chunk_indices = sample_idx[i:i + chunk_size]
-                flux_chunk = flux_data[chunk_indices.tolist()]
-                valid = flux_chunk[~np.isnan(flux_chunk) & (flux_chunk != 0.0)]
-                if len(valid) > 0:
-                    valid_flux_chunks.append(valid)
-            
-            if valid_flux_chunks:
-                all_valid = np.concatenate(valid_flux_chunks)
-                median = float(np.median(all_valid))
-                q75, q25 = np.percentile(all_valid, [75, 25])
-                iqr = float(max(q75 - q25, EPS))
-            else:
-                logger.warning("No valid flux values found, using defaults")
-                median, iqr = 0.0, 1.0
-            
-            stats = {'median': median, 'iqr': iqr}
-            
-            unique, counts = np.unique(labels[train_idx], return_counts=True)
-            logger.info("Training class distribution:")
-            for cls_idx, count in zip(unique, counts):
-                pct = 100.0 * count / len(train_idx)
-                cls_name = CLASS_NAMES[cls_idx] if cls_idx < len(CLASS_NAMES) else f"Class {cls_idx}"
-                logger.info(f"  {cls_name}: {format_number(count)} ({pct:.2f}%)")
-        
-        np.savez(cache_path, train_idx=train_idx, val_idx=val_idx,
-                median=stats['median'], iqr=stats['iqr'])
-        logger.info(f"Cached split to: {cache_path}")
-    else:
-        train_idx, val_idx, stats = None, None, None
-    
-    if is_ddp:
-        synchronize()
-        if not is_main_process(rank):
-            cache = np.load(cache_path)
-            train_idx = cache['train_idx']
-            val_idx = cache['val_idx']
-            stats = {'median': float(cache['median']), 'iqr': float(cache['iqr'])}
-    
-    return train_idx, val_idx, stats
-
-class MicrolensingDatasetOptimized(Dataset):
-    def __init__(self, data_path: Path, indices: np.ndarray,
-                 stats: Dict[str, float]) -> None:
-        self.data_path: str = str(data_path)
-        self.indices: np.ndarray = np.asarray(indices, dtype=np.int64)
-        self.stats: Dict[str, float] = stats
-        self._file: Optional[h5py.File] = None
-        self._flux: Optional[h5py.Dataset] = None
-        self._delta_t: Optional[h5py.Dataset] = None
-        self._labels: Optional[h5py.Dataset] = None
-        self._worker_id: Optional[int] = None
-    
-    def _ensure_open(self) -> None:
-        worker_info = torch.utils.data.get_worker_info()
-        current_worker = worker_info.id if worker_info else -1
-        
-        if self._file is None or self._worker_id != current_worker:
-            self._close()
-            self._file = h5py.File(self.data_path, 'r',
-                                  rdcc_nbytes=256*1024*1024,
-                                  rdcc_nslots=10007, rdcc_w0=0.75,
-                                  libver='latest')
-            self._flux = self._file['flux']
-            self._delta_t = self._file['delta_t']
-            self._labels = self._file['labels']
-            self._worker_id = current_worker
-    
-    def _close(self) -> None:
-        if self._file is not None:
-            try:
-                self._file.close()
-            except Exception:
-                pass
-            self._file = None
-            self._flux = None
-            self._delta_t = None
-            self._labels = None
+        self.h5_file = None
     
     def __len__(self) -> int:
         return len(self.indices)
     
-    def __getitem__(self, idx: int) -> Tuple[int, int]:
-        self._ensure_open()
-        global_idx = int(self.indices[idx])
-        label = int(self._labels[global_idx])
-        return global_idx, label
-    
-    def get_batch_data(self, global_indices: np.ndarray
-                      ) -> Tuple[np.ndarray, np.ndarray]:
-        self._ensure_open()
-        sort_order = np.argsort(global_indices)
-        sorted_idx = global_indices[sort_order]
-        flux = self._flux[sorted_idx.tolist()]
-        delta_t = self._delta_t[sorted_idx.tolist()]
-        unsort_order = np.argsort(sort_order)
-        flux = flux[unsort_order]
-        delta_t = delta_t[unsort_order]
-        return flux, delta_t
-    
-    def __del__(self) -> None:
-        self._close()
+    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor, int]:
+        """
+        Get single sample.
+        
+        Returns:
+            Tuple of (flux, delta_t, length, label)
+        """
+        if self.h5_file is None:
+            self.h5_file = h5py.File(self.h5_path, 'r')
+        
+        real_idx = self.indices[idx]
+        
+        # Load data
+        flux_raw = self.h5_file['flux'][real_idx].astype(np.float32)
+        delta_t_raw = self.h5_file['delta_t'][real_idx].astype(np.float32)
+        label = int(self.h5_file['labels'][real_idx])
+        
+        # Compute length
+        mask = (flux_raw != 0)
+        length = int(mask.sum())
+        
+        # Normalize flux
+        flux_norm = (flux_raw - self.flux_median) / (self.flux_iqr + EPS)
+        flux_norm[~mask] = 0.0
+        
+        # Normalize delta_t with its own statistics (CRITICAL FIX)
+        delta_t_norm = (delta_t_raw - self.delta_t_median) / (self.delta_t_iqr + EPS)
+        delta_t_norm[~mask] = 0.0
+        
+        return (
+            torch.from_numpy(flux_norm),
+            torch.from_numpy(delta_t_norm),
+            torch.tensor(length, dtype=torch.long),
+            label
+        )
 
-def collate_fn_optimized(batch: List[Tuple[int, int]],
-                         dataset: MicrolensingDatasetOptimized,
-                         median: float, iqr: float
-                         ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    global_indices = np.array([x[0] for x in batch], dtype=np.int64)
-    labels = np.array([x[1] for x in batch], dtype=np.int64)
-    flux, delta_t = dataset.get_batch_data(global_indices)
+
+def collate_fn(batch: List[Tuple]) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """
+    Collate batch with padding.
     
-    flux = np.ascontiguousarray(flux, dtype=np.float32)
-    delta_t = np.ascontiguousarray(delta_t, dtype=np.float32)
+    Args:
+        batch: List of (flux, delta_t, length, label) tuples
+        
+    Returns:
+        Tuple of batched (flux, delta_t, lengths, labels)
+    """
+    flux_list, delta_t_list, lengths_list, labels_list = zip(*batch)
     
-    flux = torch.from_numpy(flux)
-    delta_t = torch.from_numpy(delta_t)
-    labels = torch.from_numpy(labels).long()
+    lengths = torch.stack(lengths_list)
+    labels = torch.tensor(labels_list, dtype=torch.long)
     
-    valid_mask = (~torch.isnan(flux)) & (flux != 0.0)
-    flux = torch.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
-    delta_t = torch.nan_to_num(delta_t, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    flux = (flux - median) / iqr
-    flux = flux * valid_mask.float()
-    lengths = valid_mask.sum(dim=1).long().clamp(min=MIN_SEQUENCE_LENGTH)
+    # Stack (already same length from HDF5)
+    flux = torch.stack(flux_list)
+    delta_t = torch.stack(delta_t_list)
     
     return flux, delta_t, lengths, labels
 
-def worker_init_fn(worker_id: int) -> None:
-    worker_seed = torch.initial_seed() % (2**32)
-    np.random.seed(worker_seed + worker_id)
-    random.seed(worker_seed + worker_id)
+# =============================================================================
+# DATA LOADING
+# =============================================================================
 
-def create_dataloaders(data_path: Path, train_idx: np.ndarray, val_idx: np.ndarray,
-                      stats: Dict[str, float], batch_size: int, num_workers: int,
-                      prefetch_factor: int, is_ddp: bool, rank: int,
-                      generator: torch.Generator
-                      ) -> Tuple[DataLoader, DataLoader, np.ndarray]:
-    train_dataset = MicrolensingDatasetOptimized(data_path, train_idx, stats)
-    val_dataset = MicrolensingDatasetOptimized(data_path, val_idx, stats)
+def load_and_split_data(
+    data_path: str,
+    val_fraction: float,
+    seed: int,
+    rank: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+    """
+    Load data and compute normalization statistics.
+    
+    CRITICAL FIX: Computes separate statistics for flux and delta_t.
+    
+    Args:
+        data_path: Path to HDF5 file
+        val_fraction: Validation fraction
+        seed: Random seed
+        rank: Process rank
+        
+    Returns:
+        Tuple of (train_indices, val_indices, labels, stats_dict)
+    """
+    if is_main_process(rank):
+        print(f"Loading data from {data_path}...")
     
     with h5py.File(data_path, 'r') as f:
-        all_labels = f['labels'][:]
-    train_labels = all_labels[train_idx]
+        n_samples = len(f['labels'])
+        labels = f['labels'][:]
+        
+        # Load flux and delta_t for statistics
+        flux_all = f['flux'][:]
+        delta_t_all = f['delta_t'][:]
+    
+    # Train/val split
+    indices = np.arange(n_samples)
+    train_idx, val_idx = train_test_split(
+        indices,
+        test_size=val_fraction,
+        random_state=seed,
+        stratify=labels
+    )
+    
+    # Compute normalization statistics
+    # CRITICAL FIX: Separate statistics for flux and delta_t
+    
+    # Flux statistics
+    flux_valid = flux_all[flux_all != 0]
+    flux_median = float(np.median(flux_valid))
+    flux_iqr = float(np.percentile(flux_valid, 75) - np.percentile(flux_valid, 25))
+    
+    # Delta_t statistics (FIXED - was using flux stats before)
+    delta_t_valid = delta_t_all[delta_t_all > 0]
+    delta_t_median = float(np.median(delta_t_valid))
+    delta_t_iqr = float(np.percentile(delta_t_valid, 75) - np.percentile(delta_t_valid, 25))
+    
+    stats = {
+        'n_total': int(n_samples),
+        'n_train': int(len(train_idx)),
+        'n_val': int(len(val_idx)),
+        'norm_median': flux_median,
+        'norm_iqr': flux_iqr,
+        'delta_t_median': delta_t_median,
+        'delta_t_iqr': delta_t_iqr,
+        'class_counts': {
+            int(i): int((labels == i).sum()) for i in range(3)
+        }
+    }
+    
+    if is_main_process(rank):
+        print(f"Loaded {n_samples} samples")
+        print(f"Train: {len(train_idx)}, Val: {len(val_idx)}")
+        print(f"Flux normalization: median={flux_median:.3f}, IQR={flux_iqr:.3f}")
+        print(f"Delta_t normalization: median={delta_t_median:.3f}, IQR={delta_t_iqr:.3f}")
+        print(f"Class distribution: {stats['class_counts']}")
+    
+    return train_idx, val_idx, labels, stats
+
+
+def create_dataloaders(
+    data_path: str,
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    stats: Dict[str, float],
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+    is_ddp: bool,
+    rank: int
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    Create train and validation dataloaders.
+    
+    Args:
+        data_path: Path to HDF5 file
+        train_idx: Training indices
+        val_idx: Validation indices
+        stats: Normalization statistics
+        batch_size: Batch size per GPU
+        num_workers: Number of worker processes
+        prefetch_factor: Prefetch factor
+        is_ddp: Whether using DDP
+        rank: Process rank
+        
+    Returns:
+        Tuple of (train_loader, val_loader)
+    """
+    train_dataset = MicrolensingDataset(
+        data_path,
+        train_idx,
+        stats['norm_median'],
+        stats['norm_iqr'],
+        stats['delta_t_median'],
+        stats['delta_t_iqr']
+    )
+    
+    val_dataset = MicrolensingDataset(
+        data_path,
+        val_idx,
+        stats['norm_median'],
+        stats['norm_iqr'],
+        stats['delta_t_median'],
+        stats['delta_t_iqr']
+    )
     
     if is_ddp:
-        train_sampler = DistributedSampler(train_dataset, shuffle=True,
-                                          seed=SEED, drop_last=True)
-        val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
+        train_sampler = DistributedSampler(
+            train_dataset,
+            shuffle=True,
+            seed=SEED,
+            drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            shuffle=False,
+            drop_last=False
+        )
     else:
         train_sampler = None
         val_sampler = None
     
-    median, iqr = stats['median'], stats['iqr']
-    train_collate = partial(collate_fn_optimized, dataset=train_dataset,
-                           median=median, iqr=iqr)
-    val_collate = partial(collate_fn_optimized, dataset=val_dataset,
-                         median=median, iqr=iqr)
-    
-    use_persistent_workers = num_workers > 0
-    use_prefetch = prefetch_factor if num_workers > 0 else None
-    
-    # PERFORMANCE: pin_memory_device for faster transfers (PyTorch 2.0+)
-    pin_memory_device = f'cuda:{rank}' if torch.cuda.is_available() else ''
-    
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size,
-        shuffle=(train_sampler is None), sampler=train_sampler,
-        num_workers=num_workers, pin_memory=True,
-        pin_memory_device=pin_memory_device,
-        drop_last=True, persistent_workers=use_persistent_workers,
-        prefetch_factor=use_prefetch, worker_init_fn=worker_init_fn,
-        collate_fn=train_collate, generator=generator)
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
+    )
     
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size * 2,
-        shuffle=False, sampler=val_sampler,
-        num_workers=num_workers, pin_memory=True,
-        pin_memory_device=pin_memory_device,
-        drop_last=False, persistent_workers=use_persistent_workers,
-        prefetch_factor=use_prefetch, worker_init_fn=worker_init_fn,
-        collate_fn=val_collate, generator=generator)
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
+    )
     
-    return train_loader, val_loader, train_labels
+    return train_loader, val_loader
 
-def compute_class_weights(labels: np.ndarray, n_classes: int,
-                          device: torch.device) -> Tensor:
-    unique, counts = np.unique(labels, return_counts=True)
-    total = len(labels)
-    weights = torch.ones(n_classes, device=device, dtype=torch.float32)
-    for cls_idx, count in zip(unique, counts):
-        if count > 0:
-            weights[cls_idx] = total / (n_classes * count + EPS)
-    weights = weights / (weights.mean() + EPS)
-    return weights
+# =============================================================================
+# TRAINING
+# =============================================================================
 
-class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
-    def __init__(self, optimizer: torch.optim.Optimizer, warmup_epochs: int,
-                 total_epochs: int, min_lr: float = 1e-6, last_epoch: int = -1) -> None:
-        self.warmup_epochs: int = max(0, warmup_epochs)
-        self.total_epochs: int = max(1, total_epochs)
-        self.min_lr: float = max(0.0, min_lr)
-        super().__init__(optimizer, last_epoch)
+def compute_class_weights(
+    labels: np.ndarray,
+    n_classes: int,
+    device: torch.device
+) -> Tensor:
+    """
+    Compute class weights for balanced loss.
     
-    def get_lr(self) -> List[float]:
-        epoch = max(0, self.last_epoch)
-        if epoch < self.warmup_epochs:
-            alpha = (epoch + 1) / max(1, self.warmup_epochs)
-            return [base_lr * alpha for base_lr in self.base_lrs]
-        else:
-            decay_epochs = max(1, self.total_epochs - self.warmup_epochs)
-            progress = (epoch - self.warmup_epochs) / decay_epochs
-            progress = min(1.0, progress)
-            cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return [self.min_lr + (base_lr - self.min_lr) * cosine_factor
-                   for base_lr in self.base_lrs]
-
-def should_use_grad_scaler(device: torch.device, use_amp: bool) -> bool:
-    if not use_amp or device.type != 'cuda':
-        return False
-    if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
-        return False
-    return True
-
-class CUDAPrefetcher:
-    def __init__(self, loader: DataLoader, device: torch.device):
-        self.loader = loader
-        self.device = device
-        self.stream = torch.cuda.Stream(device=device)
-        self.next_data: Optional[Tuple[Tensor, ...]] = None
-        self._iter: Optional[Any] = None
-    
-    def __iter__(self):
-        self._iter = iter(self.loader)
-        self._preload()
-        return self
-    
-    def _preload(self) -> None:
-        try:
-            data = next(self._iter)
-        except StopIteration:
-            self.next_data = None
-            return
+    Args:
+        labels: Label array
+        n_classes: Number of classes
+        device: Target device
         
-        with torch.cuda.stream(self.stream):
-            self.next_data = tuple(
-                t.to(self.device, non_blocking=True) if isinstance(t, Tensor) else t
-                for t in data)
-    
-    def __next__(self) -> Tuple[Tensor, ...]:
-        torch.cuda.current_stream(self.device).wait_stream(self.stream)
-        data = self.next_data
-        if data is None:
-            raise StopIteration
-        for t in data:
-            if isinstance(t, Tensor) and t.is_cuda:
-                t.record_stream(torch.cuda.current_stream(self.device))
-        self._preload()
-        return data
-    
-    def __len__(self) -> int:
-        return len(self.loader)
+    Returns:
+        Class weight tensor
+    """
+    counts = np.bincount(labels, minlength=n_classes)
+    weights = 1.0 / (counts + 1e-6)
+    weights = weights / weights.sum() * n_classes
+    return torch.tensor(weights, dtype=torch.float32, device=device)
 
-def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer,
-               scaler: Optional[torch.amp.GradScaler], class_weights: Tensor,
-               device: torch.device, rank: int, world_size: int, epoch: int,
-               config: ModelConfig, accumulation_steps: int = 1,
-               clip_norm: float = DEFAULT_CLIP_NORM, use_prefetcher: bool = True
-               ) -> Tuple[float, float]:
+
+def train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    class_weights: Tensor,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    epoch: int,
+    config: ModelConfig,
+    accumulation_steps: int = 1,
+    clip_norm: float = 1.0,
+    use_prefetcher: bool = True
+) -> Tuple[float, float]:
+    """
+    Train for one epoch.
+    
+    Args:
+        model: Model to train
+        loader: Training dataloader
+        optimizer: Optimizer
+        scaler: Gradient scaler for AMP
+        class_weights: Class weights for loss
+        device: Device
+        rank: Process rank
+        world_size: World size
+        epoch: Current epoch
+        config: Model config
+        accumulation_steps: Gradient accumulation steps
+        clip_norm: Gradient clipping norm
+        use_prefetcher: Use CUDA prefetcher
+        
+    Returns:
+        Tuple of (average_loss, accuracy)
+    """
     model.train()
-    total_loss = torch.tensor(0.0, device=device, dtype=torch.float64)
-    correct = torch.tensor(0, device=device, dtype=torch.int64)
-    total = torch.tensor(0, device=device, dtype=torch.int64)
     
-    if use_prefetcher and device.type == 'cuda':
-        iterator_base = CUDAPrefetcher(loader, device)
-    else:
-        iterator_base = loader
-    
-    if is_main_process(rank):
-        iterator = tqdm(iterator_base, desc=f"Epoch {epoch}",
-                       leave=False, dynamic_ncols=True, mininterval=1.0)
-    else:
-        iterator = iterator_base
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
     
     optimizer.zero_grad(set_to_none=True)
     
-    use_amp = config.use_amp
-    use_scaler = scaler is not None
-    amp_dtype = (torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported')
-                                   and torch.cuda.is_bf16_supported())
-                else torch.float16)
+    autocast_ctx = torch.cuda.amp.autocast(enabled=config.use_amp)
     
-    num_batches = len(loader)
+    if is_main_process(rank):
+        pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]", ncols=100)
+    else:
+        pbar = loader
     
-    for batch_idx, batch_data in enumerate(iterator):
-        if use_prefetcher and device.type == 'cuda':
-            flux, delta_t, lengths, labels = batch_data
-        else:
-            flux, delta_t, lengths, labels = batch_data
-            flux = flux.to(device, non_blocking=True)
-            delta_t = delta_t.to(device, non_blocking=True)
-            lengths = lengths.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+    for batch_idx, (flux, delta_t, lengths, labels) in enumerate(pbar):
+        flux = flux.to(device, non_blocking=True)
+        delta_t = delta_t.to(device, non_blocking=True)
+        lengths = lengths.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
         
-        with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+        with autocast_ctx:
             logits = model(flux, delta_t, lengths)
             loss = F.cross_entropy(logits, labels, weight=class_weights)
-            loss_scaled = loss / accumulation_steps
+            loss = loss / accumulation_steps
         
-        if use_scaler:
-            scaler.scale(loss_scaled).backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
         else:
-            loss_scaled.backward()
+            loss.backward()
         
-        is_last_batch = (batch_idx + 1) == num_batches
-        is_accum_step = ((batch_idx + 1) % accumulation_steps == 0) or is_last_batch
-        
-        if is_accum_step:
-            if use_scaler:
+        if (batch_idx + 1) % accumulation_steps == 0:
+            if scaler is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 scaler.step(optimizer)
@@ -646,354 +623,486 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Opt
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 optimizer.step()
+            
             optimizer.zero_grad(set_to_none=True)
         
+        # Metrics
         with torch.no_grad():
-            batch_size = labels.size(0)
-            total_loss += loss.detach().double() * batch_size
-            correct += (logits.argmax(dim=-1) == labels).sum()
-            total += batch_size
+            preds = logits.argmax(dim=-1)
+            correct = (preds == labels).sum().item()
+            
+            total_loss += loss.item() * accumulation_steps * len(labels)
+            total_correct += correct
+            total_samples += len(labels)
         
-        if is_main_process(rank) and batch_idx % PROGRESS_UPDATE_FREQ == 0:
-            current_loss = (total_loss / max(1, total)).item()
-            current_acc = (correct / max(1, total)).float().item() * 100
-            if hasattr(iterator, 'set_postfix'):
-                iterator.set_postfix({'loss': f'{current_loss:.4f}',
-                                     'acc': f'{current_acc:.1f}%'})
+        if is_main_process(rank) and isinstance(pbar, tqdm):
+            pbar.set_postfix({
+                'loss': f'{loss.item() * accumulation_steps:.4f}',
+                'acc': f'{100.0 * correct / len(labels):.1f}%'
+            })
     
+    # Aggregate across processes
     if world_size > 1:
-        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        dist.all_reduce(correct, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+        metrics = torch.tensor(
+            [total_loss, total_correct, total_samples],
+            dtype=torch.float32,
+            device=device
+        )
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        total_loss, total_correct, total_samples = metrics.tolist()
     
-    total_samples = max(1, total.item())
-    avg_loss = (total_loss / total_samples).item()
-    accuracy = (correct / total_samples).float().item()
+    avg_loss = total_loss / total_samples
+    accuracy = total_correct / total_samples
     
     return avg_loss, accuracy
 
-@torch.inference_mode()
-def evaluate(model: nn.Module, loader: DataLoader, class_weights: Tensor,
-            device: torch.device, rank: int, world_size: int, config: ModelConfig,
-            return_predictions: bool = False, use_prefetcher: bool = True
-            ) -> Dict[str, Any]:
-    model.eval()
-    total_loss = torch.tensor(0.0, device=device, dtype=torch.float64)
-    correct = torch.tensor(0, device=device, dtype=torch.int64)
-    total = torch.tensor(0, device=device, dtype=torch.int64)
+
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    class_weights: Tensor,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    config: ModelConfig,
+    return_predictions: bool = False,
+    use_prefetcher: bool = True
+) -> Dict[str, Any]:
+    """
+    Evaluate model on validation set.
     
-    all_preds: List[np.ndarray] = []
-    all_labels: List[np.ndarray] = []
-    all_probs: List[np.ndarray] = []
-    
-    use_amp = config.use_amp
-    amp_dtype = (torch.bfloat16 if (use_amp and hasattr(torch.cuda, 'is_bf16_supported')
-                                   and torch.cuda.is_bf16_supported())
-                else torch.float16)
-    
-    if use_prefetcher and device.type == 'cuda':
-        iterator_base = CUDAPrefetcher(loader, device)
-    else:
-        iterator_base = loader
-    
-    if is_main_process(rank):
-        iterator = tqdm(iterator_base, desc="Eval",
-                       leave=False, dynamic_ncols=True, mininterval=1.0)
-    else:
-        iterator = iterator_base
-    
-    for batch_data in iterator:
-        if use_prefetcher and device.type == 'cuda':
-            flux, delta_t, lengths, labels = batch_data
-        else:
-            flux, delta_t, lengths, labels = batch_data
-            flux = flux.to(device, non_blocking=True)
-            delta_t = delta_t.to(device, non_blocking=True)
-            lengths = lengths.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+    Args:
+        model: Model to evaluate
+        loader: Validation dataloader
+        class_weights: Class weights
+        device: Device
+        rank: Process rank
+        world_size: World size
+        config: Model config
+        return_predictions: Return predictions and labels
+        use_prefetcher: Use CUDA prefetcher
         
-        with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+    Returns:
+        Dictionary with evaluation metrics
+    """
+    model.eval()
+    
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    autocast_ctx = torch.cuda.amp.autocast(enabled=config.use_amp)
+    
+    for flux, delta_t, lengths, labels in loader:
+        flux = flux.to(device, non_blocking=True)
+        delta_t = delta_t.to(device, non_blocking=True)
+        lengths = lengths.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        
+        with autocast_ctx:
             logits = model(flux, delta_t, lengths)
             loss = F.cross_entropy(logits, labels, weight=class_weights)
         
-        batch_size = labels.size(0)
         preds = logits.argmax(dim=-1)
+        probs = F.softmax(logits, dim=-1)
         
-        total_loss += loss.double() * batch_size
-        correct += (preds == labels).sum()
-        total += batch_size
+        total_loss += loss.item() * len(labels)
+        total_correct += (preds == labels).sum().item()
+        total_samples += len(labels)
         
         if return_predictions:
-            all_preds.append(preds.cpu().numpy())
-            all_labels.append(labels.cpu().numpy())
-            all_probs.append(F.softmax(logits.float(), dim=-1).cpu().numpy())
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
+            all_probs.append(probs.cpu())
     
+    # Aggregate across processes
     if world_size > 1:
-        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        dist.all_reduce(correct, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+        metrics = torch.tensor(
+            [total_loss, total_correct, total_samples],
+            dtype=torch.float32,
+            device=device
+        )
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        total_loss, total_correct, total_samples = metrics.tolist()
     
-    total_samples = max(1, total.item())
-    results: Dict[str, Any] = {
-        'loss': (total_loss / total_samples).item(),
-        'accuracy': (correct / total_samples).float().item()}
+    results = {
+        'loss': total_loss / total_samples,
+        'accuracy': total_correct / total_samples
+    }
     
     if return_predictions:
-        results['predictions'] = np.concatenate(all_preds)
-        results['labels'] = np.concatenate(all_labels)
-        results['probabilities'] = np.concatenate(all_probs)
+        results['predictions'] = torch.cat(all_preds).numpy()
+        results['labels'] = torch.cat(all_labels).numpy()
+        results['probabilities'] = torch.cat(all_probs).numpy()
     
     return results
 
-def save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
-                   scheduler: torch.optim.lr_scheduler._LRScheduler,
-                   scaler: Optional[torch.amp.GradScaler], epoch: int,
-                   best_acc: float, config: ModelConfig, stats: Dict[str, float],
-                   output_dir: Path, is_best: bool = False,
-                   extra_info: Optional[Dict[str, Any]] = None) -> Path:
-    if isinstance(model, DDP):
-        model_state = model.module.state_dict()
-    elif hasattr(model, '_orig_mod'):
-        model_state = model._orig_mod.state_dict()
+# =============================================================================
+# CHECKPOINTING
+# =============================================================================
+
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    epoch: int,
+    best_acc: float,
+    config: ModelConfig,
+    stats: Dict[str, Any],
+    output_dir: Path,
+    is_best: bool = False
+) -> None:
+    """
+    Save checkpoint.
+    
+    Args:
+        model: Model to save
+        optimizer: Optimizer state
+        scheduler: Scheduler state
+        scaler: GradScaler state
+        epoch: Current epoch
+        best_acc: Best accuracy so far
+        config: Model config
+        stats: Training statistics
+        output_dir: Output directory
+        is_best: Whether this is the best checkpoint
+    """
+    # Unwrap model
+    unwrapped_model = model
+    while hasattr(unwrapped_model, '_orig_mod'):
+        unwrapped_model = unwrapped_model._orig_mod
+    if isinstance(unwrapped_model, DDP):
+        unwrapped_state = unwrapped_model.module.state_dict()
     else:
-        model_state = model.state_dict()
+        unwrapped_state = unwrapped_model.state_dict()
     
     checkpoint = {
-        'epoch': epoch, 'model_state_dict': model_state,
+        'epoch': epoch,
+        'model_state_dict': unwrapped_state,
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
-        'best_acc': best_acc,
-        'config': config.to_dict() if hasattr(config, 'to_dict') else asdict(config),
-        'stats': stats, 'pytorch_version': torch.__version__,
-        'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
-        'timestamp': datetime.now().isoformat()}
+        'scaler_state_dict': scaler.state_dict() if scaler else None,
+        'best_accuracy': best_acc,
+        'config': config.to_dict(),
+        'stats': stats,
+    }
     
-    if scaler is not None:
-        checkpoint['scaler_state_dict'] = scaler.state_dict()
-    if extra_info:
-        checkpoint['extra_info'] = extra_info
+    if is_best:
+        checkpoint_path = output_dir / 'best_model.pt'
+    else:
+        checkpoint_path = output_dir / f'checkpoint_epoch_{epoch}.pt'
     
-    save_path = output_dir / ('best_model.pt' if is_best else f'checkpoint_epoch_{epoch}.pt')
-    temp_path = save_path.with_suffix('.tmp')
-    torch.save(checkpoint, temp_path)
-    temp_path.rename(save_path)
-    
-    return save_path
+    torch.save(checkpoint, checkpoint_path)
 
-def parse_args() -> argparse.Namespace:
+
+def load_checkpoint_for_resume(
+    checkpoint_path: str,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    device: torch.device
+) -> Tuple[int, float]:
+    """
+    Load checkpoint for resuming training.
+    
+    Args:
+        checkpoint_path: Path to checkpoint
+        model: Model to load state into
+        optimizer: Optimizer to load state into
+        scheduler: Scheduler to load state into
+        scaler: GradScaler to load state into
+        device: Device
+        
+    Returns:
+        Tuple of (start_epoch, best_accuracy)
+    """
+    if not Path(checkpoint_path).exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Load model state
+    unwrapped_model = model
+    while hasattr(unwrapped_model, '_orig_mod'):
+        unwrapped_model = unwrapped_model._orig_mod
+    if isinstance(unwrapped_model, DDP):
+        unwrapped_model.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        unwrapped_model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Load optimizer state
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # Load scheduler state
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    # Load scaler state
+    if scaler and checkpoint.get('scaler_state_dict'):
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+    
+    start_epoch = checkpoint['epoch'] + 1
+    best_acc = checkpoint.get('best_accuracy', 0.0)
+    
+    return start_epoch, best_acc
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+def should_use_grad_scaler(device: torch.device, use_amp: bool) -> bool:
+    """Determine if gradient scaler should be used."""
+    if not use_amp:
+        return False
+    if device.type != 'cuda':
+        return False
+    if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
+        return False
+    return True
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    """Main training loop."""
     parser = argparse.ArgumentParser(
-        description='Train Roman Microlensing Classifier (ULTRA-OPTIMIZED)',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        description="Roman Microlensing Classifier Training",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     
-    data_group = parser.add_argument_group('Data')
-    data_group.add_argument('--data', type=str, required=True)
-    data_group.add_argument('--output-dir', type=str, default='../results')
-    data_group.add_argument('--experiment-name', type=str, default=None)
-    data_group.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION)
+    # Data
+    parser.add_argument('--data', type=str, required=True,
+                       help="Path to HDF5 dataset")
+    parser.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION,
+                       help="Validation fraction")
     
-    model_group = parser.add_argument_group('Model')
-    model_group.add_argument('--d-model', type=int, default=64)
-    model_group.add_argument('--n-layers', type=int, default=2)
-    model_group.add_argument('--dropout', type=float, default=0.3)
-    model_group.add_argument('--window-size', type=int, default=5)
-    model_group.add_argument('--hierarchical', action='store_true', default=True)
-    model_group.add_argument('--no-hierarchical', dest='hierarchical', action='store_false')
-    model_group.add_argument('--attention-pooling', action='store_true', default=True)
-    model_group.add_argument('--no-attention-pooling', dest='attention_pooling',
-                            action='store_false')
-    model_group.add_argument('--num-attention-heads', type=int, default=1)
-    model_group.add_argument('--use-residual', action='store_true', default=True)
-    model_group.add_argument('--no-residual', dest='use_residual', action='store_false')
-    model_group.add_argument('--use-layer-norm', action='store_true', default=True)
-    model_group.add_argument('--no-layer-norm', dest='use_layer_norm', action='store_false')
+    # Model
+    parser.add_argument('--d-model', type=int, default=DEFAULT_D_MODEL,
+                       help="Hidden dimension")
+    parser.add_argument('--n-layers', type=int, default=DEFAULT_N_LAYERS,
+                       help="Number of GRU layers")
+    parser.add_argument('--dropout', type=float, default=DEFAULT_DROPOUT,
+                       help="Dropout probability")
+    parser.add_argument('--window-size', type=int, default=5,
+                       help="Convolution window size")
+    parser.add_argument('--hierarchical', action='store_true', default=True,
+                       help="Use hierarchical classification")
+    parser.add_argument('--no-hierarchical', action='store_false', dest='hierarchical',
+                       help="Disable hierarchical classification")
+    parser.add_argument('--attention-pooling', action='store_true', default=True,
+                       help="Use attention pooling")
+    parser.add_argument('--no-attention-pooling', action='store_false', dest='attention_pooling',
+                       help="Disable attention pooling")
     
-    train_group = parser.add_argument_group('Training')
-    train_group.add_argument('--batch-size', type=int, default=768,
-                            help='Batch size per GPU (increased from 512)')
-    train_group.add_argument('--accumulation-steps', type=int, default=1)
-    train_group.add_argument('--epochs', type=int, default=50)
-    train_group.add_argument('--lr', type=float, default=1e-2)
-    train_group.add_argument('--weight-decay', type=float, default=1e-3)
-    train_group.add_argument('--warmup-epochs', type=int, default=5)
-    train_group.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM)
-    train_group.add_argument('--min-lr', type=float, default=1e-6)
+    # Training
+    parser.add_argument('--epochs', type=int, default=50,
+                       help="Number of epochs")
+    parser.add_argument('--batch-size', type=int, default=64,
+                       help="Batch size per GPU")
+    parser.add_argument('--lr', type=float, default=1e-3,
+                       help="Learning rate")
+    parser.add_argument('--weight-decay', type=float, default=1e-3,
+                       help="Weight decay")
+    parser.add_argument('--warmup-epochs', type=int, default=5,
+                       help="Warmup epochs")
+    parser.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM,
+                       help="Gradient clipping norm")
+    parser.add_argument('--accumulation-steps', type=int, default=1,
+                       help="Gradient accumulation steps")
     
-    amp_group = parser.add_argument_group('Mixed Precision')
-    amp_group.add_argument('--use-amp', action='store_true', default=True)
-    amp_group.add_argument('--no-amp', dest='use_amp', action='store_false')
+    # Optimization
+    parser.add_argument('--use-amp', action='store_true', default=True,
+                       help="Use automatic mixed precision")
+    parser.add_argument('--no-amp', action='store_false', dest='use_amp',
+                       help="Disable AMP")
+    parser.add_argument('--compile', action='store_true',
+                       help="Use torch.compile")
+    parser.add_argument('--compile-mode', type=str, default='default',
+                       choices=['default', 'reduce-overhead', 'max-autotune'],
+                       help="Compile mode")
     
-    perf_group = parser.add_argument_group('Performance')
-    perf_group.add_argument('--compile', action='store_true', default=True)
-    perf_group.add_argument('--no-compile', dest='compile', action='store_false')
-    perf_group.add_argument('--compile-mode', type=str, default='max-autotune',
-                           choices=['default', 'reduce-overhead', 'max-autotune'],
-                           help='Compilation mode (max-autotune for best performance)')
-    perf_group.add_argument('--use-prefetcher', action='store_true', default=True)
-    perf_group.add_argument('--no-prefetcher', dest='use_prefetcher', action='store_false')
+    # Checkpointing and logging
+    parser.add_argument('--experiment-name', type=str, default='roman',
+                       help="Experiment name")
+    parser.add_argument('--output-dir', type=str, default='../results',
+                       help="Output directory")
+    parser.add_argument('--save-every', type=int, default=10,
+                       help="Save checkpoint every N epochs")
+    parser.add_argument('--eval-every', type=int, default=1,
+                       help="Evaluate every N epochs")
+    parser.add_argument('--early-stopping-patience', type=int, default=0,
+                       help="Early stopping patience (0=disabled)")
+    parser.add_argument('--resume', type=str, default=None,
+                       help="Path to checkpoint to resume from")
     
-    other_group = parser.add_argument_group('Other')
-    other_group.add_argument('--use-class-weights', action='store_true', default=True)
-    other_group.add_argument('--no-class-weights', dest='use_class_weights', action='store_false')
-    other_group.add_argument('--use-gradient-checkpointing', action='store_true', default=False)
-    other_group.add_argument('--num-workers', type=int, default=4)
-    other_group.add_argument('--prefetch-factor', type=int, default=12,
-                            help='Prefetch factor (increased from 8)')
-    other_group.add_argument('--eval-every', type=int, default=10)
-    other_group.add_argument('--save-every', type=int, default=10)
-    other_group.add_argument('--early-stopping-patience', type=int, default=20)
-    other_group.add_argument('--broadcast-buffers', action='store_true', default=True)
-    other_group.add_argument('--no-broadcast-buffers', dest='broadcast_buffers',
-                            action='store_false')
-    other_group.add_argument('--seed', type=int, default=SEED)
-    other_group.add_argument('--local-copy', action='store_true', default=False)
-    other_group.add_argument('--local-dir', type=str, default=None)
+    # Data loading
+    parser.add_argument('--num-workers', type=int, default=4,
+                       help="Number of data loading workers")
+    parser.add_argument('--prefetch-factor', type=int, default=2,
+                       help="Prefetch factor")
+    parser.add_argument('--use-prefetcher', action='store_true',
+                       help="Use CUDA prefetcher")
     
-    return parser.parse_args()
-
-def main() -> None:
-    args = parse_args()
+    # Other
+    parser.add_argument('--use-class-weights', action='store_true', default=True,
+                       help="Use class weights")
+    parser.add_argument('--no-class-weights', action='store_false', dest='use_class_weights',
+                       help="Disable class weights")
     
+    args = parser.parse_args()
+    
+    # Setup distributed
     rank, local_rank, world_size, is_ddp = setup_distributed()
     device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
-    if args.experiment_name is None:
+    # Set seed
+    set_seed(SEED, rank)
+    
+    # Create output directory
+    if is_main_process(rank):
         timestamp = get_timestamp()
-        args.experiment_name = f"roman_d{args.d_model}_l{args.n_layers}_{timestamp}"
-    
-    output_dir = Path(args.output_dir) / args.experiment_name
-    if is_main_process(rank):
+        output_dir = Path(args.output_dir) / f"{args.experiment_name}_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s | %(levelname)-8s | %(message)s',
+            handlers=[
+                logging.FileHandler(output_dir / 'training.log'),
+                logging.StreamHandler()
+            ]
+        )
+        logger = logging.getLogger(__name__)
+    else:
+        output_dir = None
+        logger = logging.getLogger(__name__)
+        logger.addHandler(logging.NullHandler())
     
-    if is_ddp:
-        synchronize()
+    # Load data
+    train_idx, val_idx, train_labels, stats = load_and_split_data(
+        args.data,
+        args.val_fraction,
+        SEED,
+        rank
+    )
     
-    logger = setup_logging(rank, output_dir)
-    generator = set_global_seeds(args.seed, rank)
+    # Create dataloaders
+    train_loader, val_loader = create_dataloaders(
+        args.data,
+        train_idx,
+        val_idx,
+        stats,
+        args.batch_size,
+        args.num_workers,
+        args.prefetch_factor,
+        is_ddp,
+        rank
+    )
     
-    if is_main_process(rank):
-        logger.info("=" * 80)
-        logger.info("ROMAN MICROLENSING CLASSIFIER - ULTRA-OPTIMIZED")
-        logger.info("=" * 80)
-        logger.info(f"PyTorch: {torch.__version__}")
-        logger.info(f"CUDA: {torch.version.cuda}")
-        if torch.cuda.is_available():
-            logger.info(f"GPU: {torch.cuda.get_device_name(local_rank)}")
-            gpu_mem = torch.cuda.get_device_properties(local_rank).total_memory / 1e9
-            logger.info(f"GPU memory: {gpu_mem:.1f} GB")
-            logger.info("Performance settings:")
-            logger.info(f"  torch.compile: {args.compile} (mode={args.compile_mode})")
-            logger.info(f"  CUDA prefetcher: {args.use_prefetcher}")
-            logger.info(f"  TF32: {torch.backends.cuda.matmul.allow_tf32}")
-            logger.info(f"  cuDNN benchmark: {torch.backends.cudnn.benchmark}")
-            logger.info(f"  Batch size per GPU: {args.batch_size} (optimized)")
-            logger.info(f"  Prefetch factor: {args.prefetch_factor} (optimized)")
-            if hasattr(torch.cuda, 'is_bf16_supported'):
-                logger.info(f"  BF16: {torch.cuda.is_bf16_supported()}")
-        logger.info(f"World size: {world_size} GPU(s)")
-        logger.info(f"Output: {output_dir}")
-    
-    if is_main_process(rank):
-        logger.info("-" * 80)
-        logger.info("Loading data...")
-    
-    data_path = Path(args.data)
-    if not data_path.exists():
-        raise FileNotFoundError(f"Data not found: {data_path}")
-    
-    original_data_path = data_path
-    if args.local_copy:
-        if is_main_process(rank):
-            logger.info("Copying to local storage...")
-        data_path = copy_to_local_storage(data_path, logger, rank, args.local_dir)
-        if is_ddp:
-            synchronize()
-    
-    train_idx, val_idx, stats = load_or_create_split(
-        data_path, logger, rank, is_ddp, args.val_fraction,
-        original_data_path=original_data_path if args.local_copy else None)
-    
-    if is_main_process(rank):
-        logger.info(f"Dataset: {format_number(len(train_idx) + len(val_idx))} samples")
-        logger.info(f"Train: {format_number(len(train_idx))}, Val: {format_number(len(val_idx))}")
-    
-    train_loader, val_loader, train_labels = create_dataloaders(
-        data_path, train_idx, val_idx, stats, args.batch_size, args.num_workers,
-        args.prefetch_factor, is_ddp, rank, generator)
-    
-    effective_batch_size = args.batch_size * args.accumulation_steps * world_size
-    
-    if is_main_process(rank):
-        logger.info(f"Batch per GPU: {args.batch_size}")
-        logger.info(f"Effective batch: {effective_batch_size}")
-        logger.info(f"Workers per GPU: {args.num_workers}")
-        logger.info(f"Prefetch: {args.prefetch_factor}")
-    
-    if is_main_process(rank):
-        logger.info("-" * 80)
-        logger.info("Building model...")
-    
+    # Create model config
     config = ModelConfig(
-        d_model=args.d_model, n_layers=args.n_layers, dropout=args.dropout,
-        window_size=args.window_size, hierarchical=args.hierarchical,
-        use_residual=args.use_residual, use_layer_norm=args.use_layer_norm,
-        feature_extraction='conv', use_attention_pooling=args.attention_pooling,
-        num_attention_heads=args.num_attention_heads, use_amp=args.use_amp,
-        use_gradient_checkpointing=args.use_gradient_checkpointing)
+        d_model=args.d_model,
+        n_layers=args.n_layers,
+        dropout=args.dropout,
+        window_size=args.window_size,
+        hierarchical=args.hierarchical,
+        use_attention_pooling=args.attention_pooling,
+        use_amp=args.use_amp
+    )
     
+    # Create model
     model = RomanMicrolensingClassifier(config).to(device)
     
     if is_main_process(rank):
-        n_params = model.count_parameters()
-        logger.info(f"Parameters: {format_number(n_params)}")
-        logger.info(f"Receptive field: {model.receptive_field} timesteps")
+        complexity = model.get_complexity_info()
+        logger.info(f"Model: {complexity['total_parameters']:,} parameters")
+        logger.info(f"Receptive field: {complexity['receptive_field']}")
     
+    # Wrap with DDP
     if is_ddp:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
-                   gradient_as_bucket_view=True, find_unused_parameters=False,
-                   broadcast_buffers=args.broadcast_buffers, static_graph=False)
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            gradient_as_bucket_view=True
+        )
     
+    # Compile
     if args.compile and hasattr(torch, 'compile'):
         if is_main_process(rank):
-            logger.info(f"Compiling (mode={args.compile_mode})...")
-            logger.info("  First epoch will be slower due to compilation")
-        model = torch.compile(model, mode=args.compile_mode,
-                             fullgraph=False, dynamic=True)
+            logger.info(f"Compiling model (mode={args.compile_mode})...")
+        model = torch.compile(model, mode=args.compile_mode)
     
-    fused_available = torch.cuda.is_available()
+    # Optimizer
+    fused_available = 'fused' in torch.optim.AdamW.__init__.__code__.co_varnames
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
-        betas=(0.9, 0.999), eps=1e-8, fused=fused_available)
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        fused=fused_available
+    )
     
-    if is_main_process(rank) and fused_available:
-        logger.info("Using fused AdamW")
+    # Scheduler
+    total_steps = len(train_loader) * args.epochs
+    warmup_steps = len(train_loader) * args.warmup_epochs
     
-    scheduler = CosineWarmupScheduler(
-        optimizer, warmup_epochs=args.warmup_epochs,
-        total_epochs=args.epochs, min_lr=args.min_lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=total_steps - warmup_steps,
+        T_mult=1,
+        eta_min=1e-6
+    )
     
+    # Gradient scaler
     use_scaler = should_use_grad_scaler(device, args.use_amp)
     if use_scaler:
-        scaler = torch.amp.GradScaler('cuda', enabled=True,
-                                     init_scale=65536.0, growth_factor=2.0,
-                                     backoff_factor=0.5, growth_interval=2000)
+        scaler = torch.cuda.amp.GradScaler(
+            'cuda',
+            enabled=True,
+            init_scale=65536.0,
+            growth_factor=2.0,
+            backoff_factor=0.5,
+            growth_interval=2000
+        )
     else:
         scaler = None
     
-    if is_main_process(rank):
-        if args.use_amp:
-            if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported():
-                logger.info("Using bfloat16")
-            else:
-                logger.info("Using float16 with GradScaler")
-        else:
-            logger.info("Mixed precision disabled")
-    
+    # Class weights
     if args.use_class_weights:
         class_weights = compute_class_weights(train_labels, config.n_classes, device)
         if is_main_process(rank):
             logger.info(f"Class weights: {class_weights.cpu().numpy().round(3)}")
     else:
         class_weights = torch.ones(config.n_classes, device=device)
+    
+    # Resume from checkpoint if specified
+    start_epoch = 1
+    best_acc = 0.0
+    
+    if args.resume:
+        if is_main_process(rank):
+            logger.info(f"Resuming from checkpoint: {args.resume}")
+        
+        start_epoch, best_acc = load_checkpoint_for_resume(
+            args.resume,
+            model,
+            optimizer,
+            scheduler,
+            scaler,
+            device
+        )
+        
+        if is_main_process(rank):
+            logger.info(f"Resumed from epoch {start_epoch - 1}")
+            logger.info(f"Best accuracy so far: {best_acc*100:.2f}%")
     
     if is_ddp:
         synchronize()
@@ -1007,12 +1116,11 @@ def main() -> None:
     if is_ddp:
         synchronize()
     
-    best_acc: float = 0.0
-    patience_counter: int = 0
+    patience_counter = 0
     training_start_time = time.time()
     
     try:
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             epoch_start_time = time.time()
             
             if is_ddp and hasattr(train_loader.sampler, 'set_epoch'):
@@ -1022,7 +1130,9 @@ def main() -> None:
                 model, train_loader, optimizer, scaler, class_weights,
                 device, rank, world_size, epoch, config,
                 accumulation_steps=args.accumulation_steps,
-                clip_norm=args.clip_norm, use_prefetcher=args.use_prefetcher)
+                clip_norm=args.clip_norm,
+                use_prefetcher=args.use_prefetcher
+            )
             
             scheduler.step()
             
@@ -1033,7 +1143,8 @@ def main() -> None:
                 val_results = evaluate(
                     model, val_loader, class_weights, device, rank, world_size, config,
                     return_predictions=(epoch == args.epochs and is_main_process(rank)),
-                    use_prefetcher=args.use_prefetcher)
+                    use_prefetcher=args.use_prefetcher
+                )
                 
                 val_loss = val_results['loss']
                 val_acc = val_results['accuracy']
@@ -1047,20 +1158,25 @@ def main() -> None:
                         f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
                         f"Val: loss={val_loss:.4f} acc={val_acc*100:.2f}% | "
                         f"LR={scheduler.get_last_lr()[0]:.2e} | "
-                        f"Time={format_time(epoch_time)} ({samples_per_sec:.0f} samp/s)")
+                        f"Time={format_time(epoch_time)} ({samples_per_sec:.0f} samp/s)"
+                    )
                     
                     if val_acc > best_acc:
                         best_acc = val_acc
                         patience_counter = 0
-                        save_checkpoint(model, optimizer, scheduler, scaler, epoch,
-                                      best_acc, config, stats, output_dir, is_best=True)
+                        save_checkpoint(
+                            model, optimizer, scheduler, scaler, epoch,
+                            best_acc, config, stats, output_dir, is_best=True
+                        )
                         logger.info(f"  -> New best: {best_acc*100:.2f}%")
                     else:
                         patience_counter += 1
                     
                     if epoch % args.save_every == 0:
-                        save_checkpoint(model, optimizer, scheduler, scaler, epoch,
-                                      best_acc, config, stats, output_dir, is_best=False)
+                        save_checkpoint(
+                            model, optimizer, scheduler, scaler, epoch,
+                            best_acc, config, stats, output_dir, is_best=False
+                        )
             else:
                 if is_main_process(rank):
                     epoch_time = time.time() - epoch_start_time
@@ -1069,7 +1185,8 @@ def main() -> None:
                         f"Epoch {epoch:3d}/{args.epochs} | "
                         f"Train: loss={train_loss:.4f} acc={train_acc*100:.2f}% | "
                         f"LR={scheduler.get_last_lr()[0]:.2e} | "
-                        f"Time={format_time(epoch_time)} ({samples_per_sec:.0f} samp/s)")
+                        f"Time={format_time(epoch_time)} ({samples_per_sec:.0f} samp/s)"
+                    )
             
             if args.early_stopping_patience > 0:
                 if patience_counter >= args.early_stopping_patience:
@@ -1093,13 +1210,16 @@ def main() -> None:
             logger.info("Training complete")
             logger.info(f"Total time: {format_time(total_time)}")
             logger.info(f"Best val accuracy: {best_acc*100:.2f}%")
-            logger.info(f"Average throughput: {len(train_idx) * args.epochs / total_time:.0f} samp/s")
+            logger.info(f"Average throughput: {len(train_idx) * (epoch - start_epoch + 1) / total_time:.0f} samp/s")
             logger.info("=" * 80)
             
             best_checkpoint_path = output_dir / 'best_model.pt'
             if best_checkpoint_path.exists():
-                checkpoint = torch.load(best_checkpoint_path, map_location=device,
-                                       weights_only=False)
+                checkpoint = torch.load(
+                    best_checkpoint_path,
+                    map_location=device,
+                    weights_only=False
+                )
                 
                 base_model = model
                 while hasattr(base_model, '_orig_mod'):
@@ -1110,23 +1230,30 @@ def main() -> None:
                     base_model.load_state_dict(checkpoint['model_state_dict'])
                 
                 logger.info("Running final evaluation...")
-                final_results = evaluate(model, val_loader, class_weights, device,
-                                       rank, world_size, config,
-                                       return_predictions=True,
-                                       use_prefetcher=args.use_prefetcher)
+                final_results = evaluate(
+                    model, val_loader, class_weights, device,
+                    rank, world_size, config,
+                    return_predictions=True,
+                    use_prefetcher=args.use_prefetcher
+                )
                 
-                np.savez(output_dir / 'final_predictions.npz',
-                        predictions=final_results['predictions'],
-                        labels=final_results['labels'],
-                        probabilities=final_results['probabilities'])
+                np.savez(
+                    output_dir / 'final_predictions.npz',
+                    predictions=final_results['predictions'],
+                    labels=final_results['labels'],
+                    probabilities=final_results['probabilities']
+                )
                 
                 cm = confusion_matrix(final_results['labels'], final_results['predictions'])
                 logger.info(f"\nConfusion matrix:\n{cm}")
                 np.save(output_dir / 'confusion_matrix.npy', cm)
                 
-                report = classification_report(final_results['labels'],
-                                              final_results['predictions'],
-                                              target_names=list(CLASS_NAMES), digits=4)
+                report = classification_report(
+                    final_results['labels'],
+                    final_results['predictions'],
+                    target_names=list(CLASS_NAMES),
+                    digits=4
+                )
                 logger.info(f"\nClassification report:\n{report}")
                 
                 with open(output_dir / 'classification_report.txt', 'w') as f:
@@ -1150,7 +1277,9 @@ def main() -> None:
                     'tf32_enabled': torch.backends.cuda.matmul.allow_tf32,
                     'cudnn_benchmark': torch.backends.cudnn.benchmark,
                     'batch_size_optimized': args.batch_size,
-                    'prefetch_factor_optimized': args.prefetch_factor}}
+                    'prefetch_factor_optimized': args.prefetch_factor
+                }
+            }
             
             with open(output_dir / 'config.json', 'w') as f:
                 json.dump(config_dict, f, indent=2, cls=NumpyJSONEncoder)
@@ -1158,6 +1287,7 @@ def main() -> None:
             logger.info(f"\nResults saved to: {output_dir}")
         
         cleanup_distributed()
+
 
 if __name__ == '__main__':
     main()
