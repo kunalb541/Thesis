@@ -111,7 +111,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__ = "2.4.0"
+__version__ = "2.6.0"
 
 # =============================================================================
 # CONSTANTS
@@ -1970,9 +1970,16 @@ class RomanEvaluator:
         )
         
         for class_idx, class_name in enumerate(CLASS_NAMES):
-            # Get correctly classified examples
+            # Get correctly classified examples, fallback to any example of this class
             correct_mask = (self.y == class_idx) & (self.preds == class_idx)
             indices = np.where(correct_mask)[0][:n_per_class]
+            
+            # Fallback: if insufficient correct examples, show any examples from this class
+            if len(indices) < n_per_class:
+                class_mask = (self.y == class_idx)
+                all_indices = np.where(class_mask)[0][:n_per_class]
+                if len(all_indices) > 0:
+                    indices = all_indices
             
             for col_idx, idx in enumerate(indices):
                 ax = axes[class_idx, col_idx]
@@ -2281,9 +2288,10 @@ class RomanEvaluator:
         # Denormalize for plotting
         flux_denorm = flux_norm * (self.flux_iqr + EPS) + self.flux_median
         
-        # Filter valid observations for plotting
-        times_valid = times[valid_mask]
-        flux_valid = flux_denorm[valid_mask]
+        # Filter valid observations (exclude padding: flux=0, invalid timestamps)
+        valid_obs_mask = valid_mask & (flux_denorm != 0) & (flux_denorm != SimConfig.PAD_VALUE if 'SimConfig' in dir() else True)
+        times_valid = times[valid_obs_mask]
+        flux_valid = flux_denorm[valid_obs_mask]
         
         # Plot
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
