@@ -1022,7 +1022,3 @@ def load_checkpoint(
     model.load_state_dict(state_dict, strict=strict)
     
     return model
-
-
-# Backward compatibility alias
-RomanMicrolensingGRU = RomanMicrolensingClassifier
