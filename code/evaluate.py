@@ -1485,7 +1485,7 @@ class RomanEvaluator:
         self.device = torch.device(device)
         
         # Find experiment directory
-        results_dir = Path('results')
+        results_dir = Path('../results')
         if not results_dir.exists():
             raise FileNotFoundError("Results directory not found. Run training first.")
         
