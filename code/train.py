@@ -16,17 +16,18 @@ CORE CAPABILITIES:
     * Cosine-warmup learning rate schedule with proper warmup
     * Checkpoint resumption for fault tolerance
 
-FIXES APPLIED (v2.1):
+FIXES APPLIED (v2.2):
     * Delta_t now normalized with its own median/IQR (not flux stats)
     * Checkpoint resume functionality implemented
     * Proper statistics saved for evaluation
     * Deterministic seeding for reproducibility
     * GradScaler constructor format fixed for PyTorch 2.x
     * Proper warmup scheduler implementation
+    * FIXED: Scheduler total_steps now accounts for accumulation_steps
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.0
+Version: 2.2
 """
 
 from __future__ import annotations
@@ -1162,8 +1163,15 @@ def main():
     )
     
     # Scheduler with proper warmup
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * args.warmup_epochs
+    # CRITICAL FIX: Account for gradient accumulation in step count
+    # Scheduler steps per optimizer step, not per batch
+    steps_per_epoch = (len(train_loader) + args.accumulation_steps - 1) // args.accumulation_steps
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = steps_per_epoch * args.warmup_epochs
+    
+    if is_main_process(rank):
+        logger.info(f"Scheduler: {total_steps} total steps, {warmup_steps} warmup steps")
+        logger.info(f"Steps per epoch: {steps_per_epoch} (accumulation={args.accumulation_steps})")
     
     scheduler = WarmupCosineScheduler(
         optimizer,
