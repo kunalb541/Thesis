@@ -1086,7 +1086,7 @@ def main():
     parser.add_argument('--d-model', type=int, default=64)
     parser.add_argument('--n-layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--window-size', type=int, default=16)
+    parser.add_argument('--window-size', type=int, default=7)
     parser.add_argument('--hierarchical', action='store_true')
     parser.add_argument('--attention-pooling', action='store_true', default=True)
     
