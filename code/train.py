@@ -1079,7 +1079,7 @@ def main():
     
     # Data
     parser.add_argument('--data', type=str, required=True, help='Path to HDF5 data file')
-    parser.add_argument('--output', type=str, default='checkpoints', help='Output directory')
+    parser.add_argument('--output', type=str, default='../results', help='Output directory')
     parser.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION)
     
     # Model
