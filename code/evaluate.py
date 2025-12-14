@@ -687,47 +687,6 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     
     return stats
     
-    stats = checkpoint['stats']
-    
-    # Validate required keys
-    required_keys = ['flux_median', 'flux_iqr', 'delta_t_median', 'delta_t_iqr']
-    missing_keys = [k for k in required_keys if k not in stats]
-    
-    if missing_keys:
-        raise ValueError(
-            f"CRITICAL: Stats dictionary missing required keys: {missing_keys}. "
-            f"Available keys: {list(stats.keys())}"
-        )
-    
-    # Extract and validate values
-    flux_median = float(stats['flux_median'])
-    flux_iqr = float(stats['flux_iqr'])
-    delta_t_median = float(stats['delta_t_median'])
-    delta_t_iqr = float(stats['delta_t_iqr'])
-    
-    # Validate no NaN/inf
-    values = [flux_median, flux_iqr, delta_t_median, delta_t_iqr]
-    if any(not np.isfinite(v) for v in values):
-        raise ValueError(
-            f"CRITICAL: Stats contain NaN or inf values. "
-            f"flux_median={flux_median}, flux_iqr={flux_iqr}, "
-            f"delta_t_median={delta_t_median}, delta_t_iqr={delta_t_iqr}"
-        )
-    
-    # Validate IQR > 0 (required for normalization)
-    if flux_iqr <= 0:
-        raise ValueError(f"CRITICAL: flux_iqr must be > 0, got {flux_iqr}")
-    
-    if delta_t_iqr <= 0:
-        raise ValueError(f"CRITICAL: delta_t_iqr must be > 0, got {delta_t_iqr}")
-    
-    return {
-        'flux_median': flux_median,
-        'flux_iqr': flux_iqr,
-        'delta_t_median': delta_t_median,
-        'delta_t_iqr': delta_t_iqr
-    }
-
 
 # =============================================================================
 # DATA LOADING
