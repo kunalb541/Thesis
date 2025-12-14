@@ -491,7 +491,7 @@ class DepthwiseSeparableConv1d(nn.Module):
         )
         
         # Batch norm after depthwise
-        self.bn1 = nn.BatchNorm1d(in_channels, momentum=BN_MOMENTUM)
+        self.bn1 = nn.BatchNorm1d(in_channels, momentum=BN_MOMENTUM, eps=1e-3) 
         
         # Pointwise: 1x1 conv for channel mixing
         self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
