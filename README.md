@@ -310,9 +310,8 @@ for preset in distinct stellar planetary baseline; do
     --output ../data/raw/${preset}.h5 \
     --num_workers 32 --seed $RANDOM > log_${preset}.txt 2>&1 &
 done
-
-# Wait for completion
 wait
+rm *txt
 echo "All datasets generated."
 ```
 
