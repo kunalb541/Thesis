@@ -7,7 +7,8 @@ Production-grade evaluation framework for gravitational microlensing event
 classification models. Computes comprehensive metrics, generates publication-
 quality visualizations, and performs physics-based performance analysis.
 
-CORE CAPABILITIES:
+Core Capabilities
+-----------------
     * Robust model loading with checkpoint state unwrapping (DDP, compile)
     * Hybrid data loading supporting both HDF5 and NPZ formats
     * Batch inference with gradient-free computation and memory optimization
@@ -18,7 +19,8 @@ CORE CAPABILITIES:
     * Probability evolution tracking for individual events
     * Publication-ready visualizations with vectorized output support
 
-SCIENTIFIC VISUALIZATION:
+Scientific Visualization
+------------------------
     * Confusion matrices with normalization options
     * ROC curves with confidence bands (bootstrap)
     * Calibration curves with reliability diagrams
@@ -27,17 +29,6 @@ SCIENTIFIC VISUALIZATION:
     * Temporal evolution plots with 3-panel layout
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options
-
-FIXES APPLIED (v2.1):
-    * CRITICAL: Delta_t now normalized using checkpoint statistics
-    * Robust ROC-AUC computation handling <3 classes and edge cases
-    * Fixed parameter loading to handle structured arrays from simulate.py
-    * Evolution dimension checks with proper bounds validation
-    * Comprehensive docstrings to all methods
-    * Bootstrap confidence intervals for uncertainty quantification
-    * PDF/SVG output support for publication submission
-    * Proper normalization statistics loading from training checkpoints
-    * Vectorized inference for maximum throughput
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
@@ -53,7 +44,7 @@ import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import h5py
 import matplotlib
@@ -104,6 +95,7 @@ COLORS_COLORBLIND: List[str] = ['#0173b2', '#de8f05', '#029e73']  # IBM colorbli
 DPI: int = 300
 EPS: float = 1e-8
 
+
 # =============================================================================
 # UTILITIES
 # =============================================================================
@@ -112,12 +104,21 @@ def setup_logging(output_dir: Path, verbose: bool = False) -> logging.Logger:
     """
     Configure logging with file and console handlers.
     
-    Args:
-        output_dir: Directory for log file.
-        verbose: Enable debug-level logging.
+    Creates a logger that writes to both a file in the output directory
+    and to the console. The file receives all messages (DEBUG+), while
+    the console shows INFO+ by default.
+    
+    Parameters
+    ----------
+    output_dir : Path
+        Directory where the log file will be created.
+    verbose : bool, optional
+        If True, set console logging level to DEBUG (default: False).
         
-    Returns:
-        Configured logger instance.
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance with both file and console handlers.
     """
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
@@ -128,15 +129,15 @@ def setup_logging(output_dir: Path, verbose: bool = False) -> logging.Logger:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # File handler
+    # File handler - captures all log levels
     fh = logging.FileHandler(output_dir / 'evaluation.log', mode='w')
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     
-    # Console handler
+    # Console handler - INFO level by default
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(logging.DEBUG if verbose else logging.INFO)
     ch.setFormatter(formatter)
     logger.addHandler(ch)
     
@@ -147,15 +148,34 @@ def load_data_hybrid(path: str) -> Dict[str, Any]:
     """
     Load data from HDF5 or NPZ format with comprehensive error handling.
     
-    Args:
-        path: Path to data file (.h5, .hdf5, or .npz).
+    Supports both HDF5 files (.h5, .hdf5) created by simulate.py and
+    NPZ files (.npz) for alternative data formats. All datasets are
+    loaded into memory as NumPy arrays.
+    
+    Parameters
+    ----------
+    path : str
+        Path to the data file. Must have extension .h5, .hdf5, or .npz.
         
-    Returns:
-        Dictionary containing all datasets.
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary mapping dataset names to NumPy arrays. For HDF5 files,
+        this includes 'flux', 'delta_t', 'labels', 'timestamps', and
+        parameter arrays like 'params_flat', 'params_pspl', 'params_binary'.
         
-    Raises:
-        FileNotFoundError: If path does not exist.
-        ValueError: If file format is unsupported.
+    Raises
+    ------
+    FileNotFoundError
+        If the specified path does not exist.
+    ValueError
+        If the file format is not supported.
+        
+    Examples
+    --------
+    >>> data = load_data_hybrid('test_data.h5')
+    >>> print(data.keys())
+    dict_keys(['flux', 'delta_t', 'labels', 'timestamps', 'params_pspl', ...])
     """
     path = Path(path)
     if not path.exists():
@@ -185,22 +205,53 @@ def extract_parameters_from_structured(
     labels: np.ndarray
 ) -> Dict[str, np.ndarray]:
     """
-    Extract parameters from structured arrays saved by simulate.py.
+    Extract physical parameters from structured arrays saved by simulate.py.
     
-    Args:
-        data: Raw data dictionary containing params_flat, params_pspl, params_binary.
-        labels: Label array to align parameters with samples.
+    The simulation script saves parameters as separate structured arrays
+    for each class type (params_flat, params_pspl, params_binary). This
+    function merges them into full-length arrays aligned with the labels,
+    enabling physics-based analysis across the entire dataset.
+    
+    Parameters
+    ----------
+    data : Dict[str, Any]
+        Raw data dictionary from load_data_hybrid(), expected to contain
+        keys like 'params_flat', 'params_pspl', 'params_binary'.
+    labels : np.ndarray
+        Label array of shape (n_samples,) with values in {0, 1, 2}.
+        Used to align parameters with their corresponding samples.
         
-    Returns:
-        Dictionary with aligned parameter arrays for all samples.
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary with parameter arrays, each of shape (n_samples,):
+        - 't0': Peak time in days
+        - 'tE': Einstein crossing time in days  
+        - 'u0': Impact parameter in Einstein radii
+        - 'm_base': Baseline magnitude
+        - 's': Binary separation (binary only)
+        - 'q': Mass ratio (binary only)
+        - 'alpha': Source trajectory angle (binary only)
+        - 'rho': Source radius (binary only)
         
-    Notes:
-        simulate.py saves parameters as structured arrays per class type.
-        This function merges them into full-length arrays aligned with labels.
+        Values are NaN for samples where the parameter is not applicable.
+        
+    Notes
+    -----
+    The structured arrays from simulate.py have dtype with named fields.
+    This function handles the mapping from class-specific arrays to the
+    full dataset indices based on the label array.
+    
+    Examples
+    --------
+    >>> data = load_data_hybrid('simulation.h5')
+    >>> labels = data['labels']
+    >>> params = extract_parameters_from_structured(data, labels)
+    >>> u0_binary = params['u0'][labels == 2]  # u0 for binary events only
     """
     n_total = len(labels)
     
-    # Initialize output arrays
+    # Initialize output arrays with NaN (not applicable by default)
     params = {
         't0': np.full(n_total, np.nan, dtype=np.float32),
         'tE': np.full(n_total, np.nan, dtype=np.float32),
@@ -212,7 +263,7 @@ def extract_parameters_from_structured(
         'rho': np.full(n_total, np.nan, dtype=np.float32),
     }
     
-    # Extract from structured arrays
+    # Extract from structured arrays for each class
     for class_idx, class_name in enumerate(['flat', 'pspl', 'binary']):
         key = f'params_{class_name}'
         if key not in data:
@@ -222,18 +273,18 @@ def extract_parameters_from_structured(
         if not isinstance(struct_arr, np.ndarray):
             continue
         
-        # Find indices for this class
+        # Find indices for this class in the full dataset
         class_mask = (labels == class_idx)
         n_class = class_mask.sum()
         
         if n_class == 0 or len(struct_arr) == 0:
             continue
         
-        # Handle length mismatch
+        # Handle potential length mismatch (shouldn't happen but be safe)
         n_available = min(len(struct_arr), n_class)
         class_indices = np.where(class_mask)[0][:n_available]
         
-        # Extract fields
+        # Extract fields from structured array
         if hasattr(struct_arr, 'dtype') and struct_arr.dtype.names is not None:
             for field_name in params.keys():
                 if field_name in struct_arr.dtype.names:
@@ -245,24 +296,54 @@ def extract_parameters_from_structured(
 def bootstrap_metric(
     y_true: np.ndarray, 
     y_pred: np.ndarray, 
-    metric_fn: callable,
+    metric_fn: Callable,
     n_bootstrap: int = 1000,
     confidence: float = 0.95,
     random_state: int = 42
 ) -> Tuple[float, float, float]:
     """
-    Compute bootstrap confidence intervals for a metric.
+    Compute bootstrap confidence intervals for a classification metric.
     
-    Args:
-        y_true: True labels.
-        y_pred: Predicted labels or probabilities.
-        metric_fn: Metric function accepting (y_true, y_pred).
-        n_bootstrap: Number of bootstrap samples.
-        confidence: Confidence level (e.g., 0.95 for 95% CI).
-        random_state: Random seed for reproducibility.
+    Uses the percentile bootstrap method to estimate uncertainty in
+    metric estimates. This is essential for reporting results with
+    proper statistical rigor in publications.
+    
+    Parameters
+    ----------
+    y_true : np.ndarray
+        Ground truth labels of shape (n_samples,).
+    y_pred : np.ndarray
+        Predicted labels or probabilities of shape (n_samples,) or
+        (n_samples, n_classes).
+    metric_fn : Callable
+        Metric function with signature metric_fn(y_true, y_pred) -> float.
+        Examples: accuracy_score, f1_score, roc_auc_score.
+    n_bootstrap : int, optional
+        Number of bootstrap resamples (default: 1000).
+    confidence : float, optional
+        Confidence level for the interval, e.g., 0.95 for 95% CI (default: 0.95).
+    random_state : int, optional
+        Random seed for reproducibility (default: 42).
         
-    Returns:
-        Tuple of (point_estimate, lower_bound, upper_bound).
+    Returns
+    -------
+    Tuple[float, float, float]
+        - point_estimate: Mean of bootstrap distribution
+        - lower_bound: Lower confidence bound
+        - upper_bound: Upper confidence bound
+        
+    Notes
+    -----
+    Invalid bootstrap samples (e.g., single class present) are skipped.
+    If all samples are invalid, returns (0.0, 0.0, 0.0).
+    
+    Examples
+    --------
+    >>> from sklearn.metrics import accuracy_score
+    >>> y_true = np.array([0, 1, 2, 0, 1, 2])
+    >>> y_pred = np.array([0, 1, 2, 0, 2, 2])
+    >>> point, lower, upper = bootstrap_metric(y_true, y_pred, accuracy_score)
+    >>> print(f"Accuracy: {point:.3f} [{lower:.3f}, {upper:.3f}]")
     """
     rng = np.random.RandomState(random_state)
     n = len(y_true)
@@ -275,6 +356,7 @@ def bootstrap_metric(
             if np.isfinite(score):
                 bootstrap_scores.append(score)
         except (ValueError, ZeroDivisionError):
+            # Skip invalid samples (e.g., only one class present)
             continue
     
     if len(bootstrap_scores) == 0:
@@ -298,25 +380,49 @@ def load_model_checkpoint(
     device: torch.device
 ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
     """
-    Load trained model from checkpoint with robust state unwrapping.
+    Load trained model from checkpoint with robust state dictionary unwrapping.
     
-    Args:
-        checkpoint_path: Path to .pt checkpoint file.
-        device: Target device for model.
+    Handles checkpoints saved from various training configurations:
+    - Standard single-GPU training
+    - DistributedDataParallel (DDP) with 'module.' prefix
+    - torch.compile() with '_orig_mod.' prefix
+    - Combinations of the above
+    
+    Parameters
+    ----------
+    checkpoint_path : Path
+        Path to the .pt checkpoint file containing 'model_state_dict'
+        and 'config' keys.
+    device : torch.device
+        Target device for model (cuda or cpu).
         
-    Returns:
-        Tuple of (model, config_dict, full_checkpoint).
+    Returns
+    -------
+    Tuple[Any, Dict[str, Any], Dict[str, Any]]
+        - model: Loaded RomanMicrolensingClassifier in eval mode
+        - config_dict: Model configuration dictionary
+        - checkpoint: Full checkpoint dictionary for accessing stats
         
-    Raises:
-        FileNotFoundError: If checkpoint does not exist.
-        KeyError: If checkpoint missing required keys.
+    Raises
+    ------
+    FileNotFoundError
+        If checkpoint file does not exist.
+    KeyError
+        If checkpoint is missing required keys ('config', 'model_state_dict').
+    ImportError
+        If model.py cannot be imported.
+        
+    Notes
+    -----
+    The checkpoint 'stats' key contains normalization statistics that
+    MUST be used during evaluation to match training normalization.
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Extract config
+    # Extract configuration
     if 'config' not in checkpoint:
         raise KeyError("Checkpoint missing 'config' key")
     
@@ -324,10 +430,10 @@ def load_model_checkpoint(
     if isinstance(config_data, dict):
         config_dict = config_data
     else:
-        # Assume it's a ModelConfig object with to_dict() method
+        # Handle ModelConfig objects saved directly
         config_dict = config_data.to_dict() if hasattr(config_data, 'to_dict') else {}
     
-    # Import model
+    # Import model architecture
     try:
         current_dir = Path(__file__).resolve().parent
         if str(current_dir) not in sys.path:
@@ -335,7 +441,7 @@ def load_model_checkpoint(
         
         from model import ModelConfig, RomanMicrolensingClassifier
         
-        # Filter config to valid keys
+        # Filter to valid ModelConfig keys only
         valid_keys = set(ModelConfig.__annotations__.keys())
         clean_config = {k: v for k, v in config_dict.items() if k in valid_keys}
         config = ModelConfig(**clean_config)
@@ -343,21 +449,21 @@ def load_model_checkpoint(
     except ImportError as e:
         raise ImportError(f"Failed to import model: {e}")
     
-    # Create model
+    # Create model instance
     model = RomanMicrolensingClassifier(config).to(device)
     
-    # Load state dict
+    # Load state dictionary
     state_dict_key = 'model_state_dict' if 'model_state_dict' in checkpoint else 'state_dict'
     if state_dict_key not in checkpoint:
         raise KeyError(f"Checkpoint missing '{state_dict_key}' key")
     
     state_dict = checkpoint[state_dict_key]
     
-    # Remove DDP wrapper prefix
+    # Remove DDP wrapper prefix ('module.')
     if any(k.startswith('module.') for k in state_dict.keys()):
         state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
     
-    # Remove torch.compile wrapper prefix
+    # Remove torch.compile wrapper prefix ('_orig_mod.')
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     
@@ -375,24 +481,81 @@ class RomanEvaluator:
     """
     Comprehensive evaluation suite for Roman microlensing classifier.
     
-    This class handles model loading, data preparation with proper normalization,
-    batch inference, metric computation, and publication-quality visualization
-    generation for gravitational microlensing event classification.
+    This class orchestrates the complete evaluation workflow:
+    1. Model loading with proper checkpoint handling
+    2. Data loading with normalization matching training
+    3. Batch inference with GPU acceleration
+    4. Comprehensive metric computation
+    5. Publication-quality visualization generation
+    6. Physics-based performance analysis
     
-    Attributes:
-        model: Loaded PyTorch model in eval mode.
-        config: Model configuration dictionary.
-        device: Computation device (CPU/GPU).
-        output_dir: Directory for saving results.
-        batch_size: Inference batch size.
-        logger: Logging instance.
-        norm_flux: Normalized flux data for inference.
-        norm_delta_t: Normalized delta_t data for inference (CRITICAL).
-        raw_flux: Raw flux data for visualization.
-        y: Ground truth labels.
-        probs: Model output probabilities.
-        preds: Model predictions.
-        metrics: Computed evaluation metrics.
+    Parameters
+    ----------
+    experiment_name : str
+        Name or path of experiment to evaluate. Used to locate best_model.pt
+        in the results directory structure.
+    data_path : str
+        Path to test dataset in HDF5 (.h5) or NPZ (.npz) format.
+    output_dir : str, optional
+        Custom output directory. If None, creates timestamped directory
+        under the experiment folder (default: None).
+    device : str, optional
+        Computation device, 'cuda' or 'cpu' (default: 'cuda').
+    batch_size : int, optional
+        Batch size for inference (default: 128).
+    n_samples : int, optional
+        Subsample dataset to this many samples for faster evaluation.
+        If None, uses entire dataset (default: None).
+    early_detection : bool, optional
+        Run early detection analysis at multiple completeness levels
+        (default: False).
+    n_evolution_per_type : int, optional
+        Number of probability evolution plots per class (default: 0).
+    n_example_grid_per_type : int, optional
+        Number of example light curves per class in grid (default: 4).
+    colorblind_safe : bool, optional
+        Use IBM colorblind-safe palette (default: False).
+    save_formats : List[str], optional
+        Output formats for plots, e.g., ['png', 'pdf', 'svg'] (default: ['png']).
+    verbose : bool, optional
+        Enable debug-level logging (default: False).
+    
+    Attributes
+    ----------
+    model : torch.nn.Module
+        Loaded classifier model in eval mode.
+    config_dict : Dict[str, Any]
+        Model configuration from checkpoint.
+    checkpoint : Dict[str, Any]
+        Full checkpoint including normalization statistics.
+    norm_flux : np.ndarray
+        Normalized flux data of shape (n_samples, seq_len).
+    norm_delta_t : np.ndarray
+        Normalized delta_t data of shape (n_samples, seq_len).
+    raw_flux : np.ndarray
+        Raw flux data for visualization.
+    y : np.ndarray
+        Ground truth labels of shape (n_samples,).
+    probs : np.ndarray
+        Model output probabilities of shape (n_samples, 3).
+    preds : np.ndarray
+        Model predictions of shape (n_samples,).
+    confs : np.ndarray
+        Prediction confidences (max probability) of shape (n_samples,).
+    metrics : Dict[str, float]
+        Computed evaluation metrics.
+    params : Dict[str, np.ndarray]
+        Physical parameters for each sample.
+    
+    Examples
+    --------
+    >>> evaluator = RomanEvaluator(
+    ...     experiment_name='baseline_20241201',
+    ...     data_path='test_data.h5',
+    ...     early_detection=True,
+    ...     save_formats=['png', 'pdf']
+    ... )
+    >>> evaluator.run_all_analysis()
     """
     
     def __init__(
@@ -410,23 +573,7 @@ class RomanEvaluator:
         save_formats: Optional[List[str]] = None,
         verbose: bool = False
     ):
-        """
-        Initialize evaluator with model and data.
-        
-        Args:
-            experiment_name: Name of experiment to locate best_model.pt.
-            data_path: Path to test dataset (.h5 or .npz).
-            output_dir: Custom output directory (auto-generated if None).
-            device: Computation device ('cuda' or 'cpu').
-            batch_size: Batch size for inference.
-            n_samples: Subsample data for speed (None = use all).
-            early_detection: Run early detection analysis.
-            n_evolution_per_type: Number of evolution plots per class.
-            n_example_grid_per_type: Number of examples in light curve grid.
-            colorblind_safe: Use colorblind-safe palette.
-            save_formats: List of formats to save ['png', 'pdf', 'svg'].
-            verbose: Enable debug logging.
-        """
+        """Initialize evaluator with model and data."""
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.batch_size = batch_size
         self.n_samples = n_samples
@@ -453,7 +600,7 @@ class RomanEvaluator:
         self.logger = setup_logging(self.output_dir, verbose)
         
         self.logger.info("=" * 80)
-        self.logger.info("ROMAN SPACE TELESCOPE - COMPREHENSIVE EVALUATION")
+        self.logger.info("ROMAN SPACE TELESCOPE - MICROLENSING CLASSIFIER EVALUATION")
         self.logger.info("=" * 80)
         self.logger.info(f"Experiment:  {experiment_name}")
         self.logger.info(f"Model Path:  {self.model_path}")
@@ -467,7 +614,7 @@ class RomanEvaluator:
             self.model_path, self.device
         )
         
-        # Load data with proper normalization
+        # Load and prepare data with proper normalization
         self._load_and_prepare_data(data_path)
         
         # Run inference
@@ -479,16 +626,27 @@ class RomanEvaluator:
     
     def _find_best_model(self, exp_name: str) -> Tuple[Path, Path]:
         """
-        Locate best_model.pt for given experiment name.
+        Locate best_model.pt for the given experiment name.
         
-        Args:
-            exp_name: Experiment name or path.
+        Searches common result directory locations for experiment folders
+        matching the provided name. Returns the most recently modified
+        matching directory.
+        
+        Parameters
+        ----------
+        exp_name : str
+            Experiment name, partial name, or direct path to experiment directory.
             
-        Returns:
-            Tuple of (model_path, experiment_directory).
+        Returns
+        -------
+        Tuple[Path, Path]
+            - model_path: Path to best_model.pt (or first .pt file found)
+            - exp_dir: Path to experiment directory
             
-        Raises:
-            FileNotFoundError: If no matching experiment found.
+        Raises
+        ------
+        FileNotFoundError
+            If no matching experiment or checkpoint file is found.
         """
         search_roots = [Path('../results'), Path('results'), Path('.')]
         candidates = []
@@ -498,6 +656,7 @@ class RomanEvaluator:
                 candidates.extend(list(root.glob(f"*{exp_name}*")))
         
         if not candidates:
+            # Try direct path
             if Path(exp_name).exists() and Path(exp_name).is_dir():
                 exp_dir = Path(exp_name)
             else:
@@ -505,15 +664,16 @@ class RomanEvaluator:
                     f"No experiment matching '{exp_name}' found in {search_roots}"
                 )
         else:
+            # Use most recently modified match
             exp_dir = sorted(candidates, key=lambda x: x.stat().st_mtime)[-1]
         
         model_file = exp_dir / "best_model.pt"
         
         if not model_file.exists():
+            # Fall back to any .pt file
             pt_files = list(exp_dir.glob("*.pt"))
             if pt_files:
                 model_file = pt_files[0]
-                self.logger.warning(f"best_model.pt not found, using {model_file.name}")
             else:
                 raise FileNotFoundError(f"No .pt file found in {exp_dir}")
         
@@ -523,33 +683,40 @@ class RomanEvaluator:
         """
         Load and prepare data with proper normalization for both flux and delta_t.
         
-        This method implements the CRITICAL FIX for delta_t normalization.
-        Training uses separate statistics for flux and delta_t, so evaluation
-        must apply the same normalization to ensure consistent model behavior.
+        This method implements the CRITICAL normalization matching between
+        training and evaluation. The checkpoint contains statistics computed
+        during training, and these MUST be used to normalize evaluation data
+        identically.
         
-        Args:
-            data_path: Path to data file.
+        Parameters
+        ----------
+        data_path : str
+            Path to data file (.h5 or .npz).
             
-        Raises:
-            KeyError: If required datasets are missing.
-            ValueError: If normalization statistics cannot be obtained.
+        Raises
+        ------
+        KeyError
+            If required datasets ('flux', 'delta_t', 'labels') are missing.
+            
+        Notes
+        -----
+        If checkpoint statistics are missing, the method falls back to
+        computing statistics from the evaluation data. This is logged as
+        a warning since it may cause distribution mismatch.
         """
         self.logger.info("\nLoading data...")
         data_dict = load_data_hybrid(data_path)
         
-        # Extract core arrays
-        if 'flux' not in data_dict:
-            raise KeyError("Data missing 'flux' key")
-        if 'delta_t' not in data_dict:
-            raise KeyError("Data missing 'delta_t' key")
-        if 'labels' not in data_dict:
-            raise KeyError("Data missing 'labels' key")
+        # Validate required datasets
+        for key in ['flux', 'delta_t', 'labels']:
+            if key not in data_dict:
+                raise KeyError(f"Data missing '{key}' key")
         
         raw_flux = data_dict['flux']
         raw_delta_t = data_dict['delta_t']
         labels = data_dict['labels']
         
-        # Subsample if requested
+        # Optional subsampling for faster evaluation
         if self.n_samples is not None and self.n_samples < len(labels):
             rng = np.random.RandomState(42)
             indices = rng.choice(len(labels), self.n_samples, replace=False)
@@ -558,37 +725,37 @@ class RomanEvaluator:
             labels = labels[indices]
             self.logger.info(f"Subsampled to {self.n_samples} events")
         
-        # Compute lengths (number of non-zero observations)
+        # Compute sequence lengths (non-zero observations)
         mask = (raw_flux != 0)
         lengths = mask.sum(axis=1).astype(np.int64)
         
         # =====================================================================
-        # CRITICAL FIX: Load normalization statistics from checkpoint
+        # CRITICAL: Load normalization statistics from checkpoint
         # Training normalizes flux and delta_t with SEPARATE statistics.
-        # Evaluation must use the SAME statistics for consistent inference.
+        # Evaluation MUST use the SAME statistics for consistent inference.
         # =====================================================================
         
         stats = self.checkpoint.get('stats', {})
         
-        # Flux normalization statistics
+        # Flux normalization
         if 'norm_median' in stats and 'norm_iqr' in stats:
             flux_median = float(stats['norm_median'])
             flux_iqr = float(stats['norm_iqr'])
-            self.logger.info("Using flux normalization statistics from checkpoint")
+            self.logger.info("Using flux normalization from checkpoint")
         else:
-            # Fallback: compute from data (not recommended, may differ from training)
+            # Fallback: compute from data (may cause mismatch)
             flux_valid = raw_flux[raw_flux != 0]
             flux_median = float(np.median(flux_valid))
             flux_iqr = float(np.percentile(flux_valid, 75) - np.percentile(flux_valid, 25))
-            self.logger.warning("Checkpoint missing flux stats, recomputing from data")
+            self.logger.warning("Checkpoint missing flux stats, computing from data")
         
-        # Delta_t normalization statistics (CRITICAL FIX)
+        # Delta_t normalization (CRITICAL FIX in v2.1)
         if 'delta_t_median' in stats and 'delta_t_iqr' in stats:
             delta_t_median = float(stats['delta_t_median'])
             delta_t_iqr = float(stats['delta_t_iqr'])
-            self.logger.info("Using delta_t normalization statistics from checkpoint")
+            self.logger.info("Using delta_t normalization from checkpoint")
         else:
-            # Fallback: compute from data (not recommended)
+            # Fallback: compute from data
             delta_t_valid = raw_delta_t[raw_delta_t > 0]
             if len(delta_t_valid) > 0:
                 delta_t_median = float(np.median(delta_t_valid))
@@ -597,36 +764,39 @@ class RomanEvaluator:
             else:
                 delta_t_median = 0.0
                 delta_t_iqr = 1.0
-            self.logger.warning("Checkpoint missing delta_t stats, recomputing from data")
+            self.logger.warning("Checkpoint missing delta_t stats, computing from data")
         
-        # Normalize flux
-        norm_flux = (raw_flux - flux_median) / (flux_iqr + EPS)
+        # Ensure IQR is not zero
+        flux_iqr = max(flux_iqr, EPS)
+        delta_t_iqr = max(delta_t_iqr, EPS)
+        
+        # Apply normalization
+        norm_flux = (raw_flux - flux_median) / flux_iqr
         norm_flux[~mask] = 0.0  # Preserve padding
         
-        # Normalize delta_t (CRITICAL FIX - was missing before)
-        norm_delta_t = (raw_delta_t - delta_t_median) / (delta_t_iqr + EPS)
+        norm_delta_t = (raw_delta_t - delta_t_median) / delta_t_iqr
         norm_delta_t[~mask] = 0.0  # Preserve padding
         
-        # Get timestamps
+        # Load timestamps
         if 'timestamps' in data_dict:
             timestamps = data_dict['timestamps']
         else:
-            # Generate default timestamps if missing
+            # Generate default timestamps
             max_len = raw_flux.shape[1]
             timestamps = np.tile(np.linspace(0, 200, max_len), (len(labels), 1))
             self.logger.warning("Timestamps missing, using default 0-200 days")
         
-        # Extract parameters
+        # Extract physical parameters
         try:
             params = extract_parameters_from_structured(data_dict, labels)
             self.logger.info("Extracted parameters from structured arrays")
         except Exception as e:
-            self.logger.warning(f"Failed to extract parameters: {e}")
+            self.logger.warning(f"Parameter extraction failed: {e}")
             params = {}
         
-        # Store everything
+        # Store processed data
         self.norm_flux = norm_flux.astype(np.float32)
-        self.norm_delta_t = norm_delta_t.astype(np.float32)  # FIXED: normalized delta_t
+        self.norm_delta_t = norm_delta_t.astype(np.float32)
         self.raw_flux = raw_flux.astype(np.float32)
         self.raw_delta_t = raw_delta_t.astype(np.float32)
         self.y = labels.astype(np.int64)
@@ -647,17 +817,23 @@ class RomanEvaluator:
     
     def _run_inference(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Run batch inference on test set with optimized memory handling.
+        Run batch inference on the test set with optimized memory handling.
         
-        Returns:
-            Tuple of (probabilities, predictions, confidences).
+        Uses torch.inference_mode() for maximum performance and non_blocking
+        transfers for GPU pipelining.
+        
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray]
+            - probs: Class probabilities of shape (n_samples, 3)
+            - preds: Predictions of shape (n_samples,)
+            - confs: Confidences of shape (n_samples,)
         """
         n = len(self.norm_flux)
         all_probs = []
         
         self.model.eval()
         
-        # Use inference mode for maximum performance
         with torch.inference_mode():
             for i in tqdm(range(0, n, self.batch_size), desc="Inference"):
                 batch_end = min(i + self.batch_size, n)
@@ -666,7 +842,6 @@ class RomanEvaluator:
                     self.norm_flux[i:batch_end]
                 ).to(self.device, non_blocking=True)
                 
-                # CRITICAL FIX: Use normalized delta_t
                 dt_batch = torch.from_numpy(
                     self.norm_delta_t[i:batch_end]
                 ).to(self.device, non_blocking=True)
@@ -689,9 +864,18 @@ class RomanEvaluator:
         """
         Compute comprehensive evaluation metrics with robust edge-case handling.
         
-        Returns:
-            Dictionary containing all metrics including per-class scores,
-            ROC-AUC values, and bootstrap confidence intervals.
+        Computes accuracy, precision, recall, F1 scores (per-class and macro),
+        ROC-AUC scores, and bootstrap confidence intervals for accuracy.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing:
+            - accuracy: Overall accuracy
+            - precision_macro, recall_macro, f1_macro: Macro-averaged metrics
+            - {Class}_precision, {Class}_recall, {Class}_f1: Per-class metrics
+            - roc_auc_macro, roc_auc_weighted: Multi-class ROC-AUC
+            - accuracy_ci_lower, accuracy_ci_upper: Bootstrap 95% CI
         """
         self.logger.info("\nComputing metrics...")
         
@@ -730,22 +914,19 @@ class RomanEvaluator:
                 metrics[f'{class_name}_recall'] = 0.0
                 metrics[f'{class_name}_f1'] = 0.0
         
-        # ROC-AUC with robust handling for edge cases
+        # ROC-AUC with edge case handling
         try:
             unique_classes = np.unique(self.y)
             n_unique = len(unique_classes)
             
             if n_unique >= 2:
-                # Full 3-class binarization
                 y_bin = label_binarize(self.y, classes=[0, 1, 2])
                 
                 if n_unique == 2:
-                    # Only 2 classes present: compute ROC-AUC for those classes only
+                    # Only 2 classes: compute for available classes
                     valid_cols = [i for i in range(3) if i in unique_classes]
                     y_bin_valid = y_bin[:, valid_cols]
                     probs_valid = self.probs[:, valid_cols]
-                    
-                    # Renormalize probabilities
                     probs_valid = probs_valid / (probs_valid.sum(axis=1, keepdims=True) + EPS)
                     
                     metrics['roc_auc_macro'] = float(
@@ -772,7 +953,7 @@ class RomanEvaluator:
             metrics['roc_auc_macro'] = 0.0
             metrics['roc_auc_weighted'] = 0.0
         
-        # Bootstrap confidence intervals for accuracy
+        # Bootstrap confidence intervals
         acc_point, acc_lower, acc_upper = bootstrap_metric(
             self.y, self.preds, accuracy_score, n_bootstrap=1000
         )
@@ -790,46 +971,55 @@ class RomanEvaluator:
         """
         Convert raw flux to relative magnitude for visualization.
         
-        This method implements the Roman F146 photometric system conversion,
-        matching the physics in simulate.py. Padded zeros are converted to NaN
-        to prevent plotting artifacts.
+        The simulation outputs flux in magnitude space. This method
+        computes relative magnitude (deviation from baseline) with
+        proper sign convention for astronomical plots.
         
-        Args:
-            raw_flux: Raw flux array in AB magnitudes (with padding zeros).
+        Parameters
+        ----------
+        raw_flux : np.ndarray
+            Raw flux array from simulation (in magnitude units).
+            Padding zeros are converted to NaN.
             
-        Returns:
-            Relative magnitude array (negative for plotting convention).
+        Returns
+        -------
+        np.ndarray
+            Relative magnitude array where:
+            - Negative values = brighter than baseline
+            - Positive values = fainter than baseline
+            - NaN = padded/masked observations
             
-        Notes:
-            - Input flux from simulate.py is already in magnitude space.
-            - We subtract the median to show relative variations.
-            - Padded zeros (missing observations) become NaN (not plotted).
-            - Sign flip: higher flux = lower magnitude = more negative.
+        Notes
+        -----
+        Sign convention: -Δm so that magnification events appear as
+        positive peaks (brighter = more negative mag = positive on plot).
         """
-        # Filter out padding zeros
         valid_mask = (raw_flux != 0)
         
         if not valid_mask.any():
             return np.full_like(raw_flux, np.nan)
         
-        # Compute median magnitude from valid observations
+        # Baseline magnitude from valid observations
         median_mag = np.median(raw_flux[valid_mask])
         
-        # Relative magnitude (negative for convention: brighter = more negative)
+        # Relative magnitude with sign flip (brighter = more negative)
         relative_mag = -(raw_flux - median_mag)
         
-        # Set padded zeros to NaN (won't be plotted)
+        # Mark padding as NaN
         relative_mag[~valid_mask] = np.nan
         
         return relative_mag
     
     def _save_figure(self, fig: plt.Figure, filename: str) -> None:
         """
-        Save figure in multiple formats with proper DPI.
+        Save figure in multiple formats with appropriate settings.
         
-        Args:
-            fig: Matplotlib figure instance.
-            filename: Base filename without extension.
+        Parameters
+        ----------
+        fig : plt.Figure
+            Matplotlib figure to save.
+        filename : str
+            Base filename without extension.
         """
         for fmt in self.save_formats:
             filepath = self.output_dir / f'{filename}.{fmt}'
@@ -839,14 +1029,19 @@ class RomanEvaluator:
                 fig.savefig(filepath, format=fmt, bbox_inches='tight')
     
     def plot_confusion_matrix(self) -> None:
-        """Generate normalized confusion matrix heatmap."""
+        """
+        Generate row-normalized confusion matrix heatmap.
+        
+        Saves a heatmap showing classification performance with both
+        normalized fractions and raw counts annotated.
+        """
         self.logger.info("Generating confusion matrix...")
         
         cm = confusion_matrix(self.y, self.preds, labels=[0, 1, 2])
         
-        # Handle division by zero for classes with no samples
+        # Row normalization with zero handling
         row_sums = cm.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1  # Prevent division by zero
+        row_sums[row_sums == 0] = 1
         cm_normalized = cm.astype('float') / row_sums
         
         fig, ax = plt.subplots(figsize=(8, 7))
@@ -857,7 +1052,7 @@ class RomanEvaluator:
             cmap='Blues',
             xticklabels=CLASS_NAMES,
             yticklabels=CLASS_NAMES,
-            cbar_kws={'label': 'Normalized Fraction'},
+            cbar_kws={'label': 'Fraction'},
             ax=ax,
             vmin=0,
             vmax=1
@@ -877,7 +1072,12 @@ class RomanEvaluator:
         plt.close()
     
     def plot_roc_curves(self) -> None:
-        """Generate ROC curves with AUC scores for each class."""
+        """
+        Generate one-vs-rest ROC curves with AUC scores.
+        
+        Creates ROC curves for each class showing true positive rate
+        vs false positive rate, with AUC values in the legend.
+        """
         self.logger.info("Generating ROC curves...")
         
         unique_classes = np.unique(self.y)
@@ -885,7 +1085,6 @@ class RomanEvaluator:
             self.logger.warning("Skipping ROC curves (only 1 class present)")
             return
         
-        # Binarize labels
         y_bin = label_binarize(self.y, classes=[0, 1, 2])
         
         fig, ax = plt.subplots(figsize=(8, 7))
@@ -894,7 +1093,6 @@ class RomanEvaluator:
             if i not in unique_classes:
                 continue
             
-            # Check if this class has both positive and negative samples
             if y_bin[:, i].sum() == 0 or y_bin[:, i].sum() == len(y_bin):
                 continue
             
@@ -908,7 +1106,7 @@ class RomanEvaluator:
                 linewidth=2
             )
         
-        ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random Classifier')
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random')
         ax.set_xlabel('False Positive Rate', fontsize=12)
         ax.set_ylabel('True Positive Rate', fontsize=12)
         ax.set_title('ROC Curves (One-vs-Rest)', fontsize=14)
@@ -922,7 +1120,12 @@ class RomanEvaluator:
         plt.close()
     
     def plot_calibration_curve(self) -> None:
-        """Generate calibration curve with reliability diagram."""
+        """
+        Generate calibration curve and confidence distribution.
+        
+        Left panel shows reliability diagram (calibration curve).
+        Right panel shows histogram of prediction confidences.
+        """
         self.logger.info("Generating calibration curve...")
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -935,7 +1138,6 @@ class RomanEvaluator:
             y_binary = (self.y == i).astype(int)
             prob_class = self.probs[:, i]
             
-            # Skip if no positive samples
             if y_binary.sum() == 0:
                 continue
             
@@ -957,10 +1159,10 @@ class RomanEvaluator:
                 self.logger.warning(f"Calibration for {class_name} failed: {e}")
                 continue
         
-        ax1.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Perfect Calibration')
+        ax1.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Perfect')
         ax1.set_xlabel('Mean Predicted Probability', fontsize=12)
         ax1.set_ylabel('Fraction of Positives', fontsize=12)
-        ax1.set_title('Calibration Curve (Reliability Diagram)', fontsize=14)
+        ax1.set_title('Calibration Curve', fontsize=14)
         ax1.legend(loc='upper left', fontsize=10)
         ax1.grid(True, alpha=0.3)
         ax1.set_xlim(-0.02, 1.02)
@@ -972,9 +1174,9 @@ class RomanEvaluator:
                    linewidth=2, label=f'Mean: {self.confs.mean():.3f}')
         ax2.axvline(np.median(self.confs), color='orange', linestyle=':', 
                    linewidth=2, label=f'Median: {np.median(self.confs):.3f}')
-        ax2.set_xlabel('Confidence (Max Probability)', fontsize=12)
+        ax2.set_xlabel('Confidence', fontsize=12)
         ax2.set_ylabel('Frequency', fontsize=12)
-        ax2.set_title('Prediction Confidence Distribution', fontsize=14)
+        ax2.set_title('Confidence Distribution', fontsize=14)
         ax2.legend(fontsize=10)
         ax2.grid(True, alpha=0.3, axis='y')
         
@@ -983,7 +1185,12 @@ class RomanEvaluator:
         plt.close()
     
     def plot_class_distributions(self) -> None:
-        """Generate per-class probability distributions."""
+        """
+        Generate per-class probability distributions.
+        
+        Shows how probability for each class is distributed across
+        samples from each true class, revealing confusion patterns.
+        """
         self.logger.info("Generating class probability distributions...")
         
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -1006,7 +1213,7 @@ class RomanEvaluator:
             
             ax.set_xlabel(f'P({class_name})', fontsize=11)
             ax.set_ylabel('Frequency', fontsize=11)
-            ax.set_title(f'Probability Distribution: {class_name}', fontsize=12)
+            ax.set_title(f'{class_name} Probability', fontsize=12)
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.3, axis='y')
             ax.set_xlim(-0.02, 1.02)
@@ -1016,7 +1223,11 @@ class RomanEvaluator:
         plt.close()
     
     def plot_per_class_metrics(self) -> None:
-        """Generate per-class precision, recall, F1 bar chart."""
+        """
+        Generate per-class precision, recall, F1 bar chart.
+        
+        Grouped bar chart comparing metrics across classes.
+        """
         self.logger.info("Generating per-class metrics...")
         
         precision = [self.metrics[f'{name}_precision'] for name in CLASS_NAMES]
@@ -1035,7 +1246,6 @@ class RomanEvaluator:
         bars3 = ax.bar(x + width, f1, width, label='F1-Score', 
                        color=self.colors[2], alpha=0.8, edgecolor='black')
         
-        # Add value labels on bars
         for bars in [bars1, bars2, bars3]:
             for bar in bars:
                 height = bar.get_height()
@@ -1047,7 +1257,7 @@ class RomanEvaluator:
         
         ax.set_xlabel('Class', fontsize=12)
         ax.set_ylabel('Score', fontsize=12)
-        ax.set_title('Per-Class Performance Metrics', fontsize=14)
+        ax.set_title('Per-Class Metrics', fontsize=14)
         ax.set_xticks(x)
         ax.set_xticklabels(CLASS_NAMES)
         ax.set_ylim(0, 1.15)
@@ -1059,7 +1269,11 @@ class RomanEvaluator:
         plt.close()
     
     def plot_example_light_curves(self) -> None:
-        """Generate grid of example light curves for each class."""
+        """
+        Generate grid of example light curves for each class.
+        
+        Shows representative light curves with true and predicted labels.
+        """
         self.logger.info("Generating example light curve grid...")
         
         n_examples = self.n_example_grid_per_type
@@ -1078,11 +1292,8 @@ class RomanEvaluator:
                 length = self.lengths[idx]
                 times = self.timestamps[idx, :length]
                 raw_flux = self.raw_flux[idx, :length]
-                
-                # Convert to relative magnitude
                 mag_data = self._raw_flux_to_relative_mag(raw_flux)
                 
-                # Plot
                 ax.scatter(times, mag_data, c='gray', s=10, alpha=0.7, linewidths=0)
                 ax.axhline(0, color='k', linestyle=':', alpha=0.5)
                 
@@ -1096,7 +1307,7 @@ class RomanEvaluator:
                     color=title_color
                 )
                 ax.set_xlabel('Time (days)', fontsize=9)
-                ax.set_ylabel('$-\Delta m$ (mag)', fontsize=9)
+                ax.set_ylabel(r'$-\Delta m$ (mag)', fontsize=9)
                 ax.grid(True, alpha=0.3)
         
         plt.suptitle('Example Light Curves', fontsize=16, y=0.995)
@@ -1106,10 +1317,10 @@ class RomanEvaluator:
     
     def plot_u0_dependency(self) -> None:
         """
-        Generate binary classification accuracy vs. impact parameter u0.
+        Generate binary classification accuracy vs impact parameter u0.
         
-        Physics: Events with large u0 (distant lens passage) have weak
-        magnification and are harder to distinguish from PSPL events.
+        Physics: Events with large u0 have weak magnification and are
+        harder to distinguish from PSPL events.
         """
         if 'u0' not in self.params or np.all(np.isnan(self.params['u0'])):
             self.logger.warning("Skipping u0 analysis (parameters unavailable)")
@@ -1117,7 +1328,6 @@ class RomanEvaluator:
         
         self.logger.info("Generating u0 dependency analysis...")
         
-        # Focus on binary class
         binary_mask = (self.y == 2)
         if binary_mask.sum() == 0:
             self.logger.warning("No binary events in dataset")
@@ -1126,7 +1336,6 @@ class RomanEvaluator:
         u0_vals = self.params['u0'][binary_mask]
         correct = (self.preds[binary_mask] == 2).astype(int)
         
-        # Remove NaN u0 values
         valid = ~np.isnan(u0_vals)
         u0_vals = u0_vals[valid]
         correct = correct[valid]
@@ -1157,7 +1366,6 @@ class RomanEvaluator:
                 accuracy_per_bin.append(np.nan)
                 stderr_per_bin.append(0)
         
-        # Plot
         fig, ax = plt.subplots(figsize=(10, 6))
         
         ax.errorbar(
@@ -1166,15 +1374,14 @@ class RomanEvaluator:
             capsize=5, label='Binary Classification Accuracy'
         )
         
-        ax.axhline(0.5, color='k', linestyle='--', label='Random Baseline')
-        ax.set_xlabel('Impact Parameter $u_0$', fontsize=12)
+        ax.axhline(0.5, color='k', linestyle='--', label='Random')
+        ax.set_xlabel(r'Impact Parameter $u_0$', fontsize=12)
         ax.set_ylabel('Binary Classification Accuracy', fontsize=12)
-        ax.set_title('Binary Detection Performance vs. Impact Parameter', fontsize=14)
+        ax.set_title(r'Binary Detection vs Impact Parameter', fontsize=14)
         ax.set_ylim(0, 1.05)
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
         
-        # Add sample count annotation
         for i, (x, y, n) in enumerate(zip(bin_centers, accuracy_per_bin, counts_per_bin)):
             if not np.isnan(y) and n > 0:
                 ax.annotate(f'n={n}', (x, y), textcoords="offset points",
@@ -1186,10 +1393,10 @@ class RomanEvaluator:
     
     def plot_temporal_bias_check(self) -> None:
         """
-        Check for temporal bias in predictions via t0 distribution comparison.
+        Check for temporal bias via t0 distribution comparison.
         
-        Uses Kolmogorov-Smirnov test to verify model doesn't learn temporal
-        shortcuts (e.g., preferring events near dataset center).
+        Uses Kolmogorov-Smirnov test to verify model doesn't learn
+        temporal shortcuts.
         """
         if 't0' not in self.params or np.all(np.isnan(self.params['t0'])):
             self.logger.warning("Skipping temporal bias check (t0 unavailable)")
@@ -1197,12 +1404,10 @@ class RomanEvaluator:
         
         self.logger.info("Generating temporal bias check...")
         
-        # Get t0 for correctly vs incorrectly classified events
         correct_mask = (self.preds == self.y)
         t0_correct = self.params['t0'][correct_mask]
         t0_incorrect = self.params['t0'][~correct_mask]
         
-        # Remove NaN
         t0_correct = t0_correct[~np.isnan(t0_correct)]
         t0_incorrect = t0_incorrect[~np.isnan(t0_incorrect)]
         
@@ -1210,32 +1415,29 @@ class RomanEvaluator:
             self.logger.warning("Insufficient data for temporal bias check")
             return
         
-        # KS test
         ks_stat, p_value = ks_2samp(t0_correct, t0_incorrect)
         
-        # Plot
         fig, ax = plt.subplots(figsize=(10, 6))
         
-        ax.hist(t0_correct, bins=30, alpha=0.6, label='Correct Predictions',
+        ax.hist(t0_correct, bins=30, alpha=0.6, label='Correct',
                 color='green', edgecolor='black', density=True)
-        ax.hist(t0_incorrect, bins=30, alpha=0.6, label='Incorrect Predictions',
+        ax.hist(t0_incorrect, bins=30, alpha=0.6, label='Incorrect',
                 color='red', edgecolor='black', density=True)
         
-        ax.set_xlabel('Peak Time $t_0$ (days)', fontsize=12)
+        ax.set_xlabel(r'Peak Time $t_0$ (days)', fontsize=12)
         ax.set_ylabel('Density', fontsize=12)
         ax.set_title(
-            f'Temporal Bias Check: KS-statistic = {ks_stat:.4f}, p = {p_value:.4f}',
+            f'Temporal Bias: KS={ks_stat:.4f}, p={p_value:.4f}',
             fontsize=14
         )
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3, axis='y')
         
-        # Add text annotation
         if p_value > 0.05:
-            bias_text = "No significant temporal bias detected (p > 0.05)"
+            bias_text = "No significant temporal bias (p > 0.05)"
             text_color = 'green'
         else:
-            bias_text = "WARNING: Temporal bias detected (p < 0.05)"
+            bias_text = "Temporal bias detected (p < 0.05)"
             text_color = 'red'
         
         ax.text(
@@ -1256,37 +1458,39 @@ class RomanEvaluator:
         """
         Generate 3-panel probability evolution plot for a single event.
         
-        Args:
-            class_idx: True class index.
-            event_idx: Index in dataset.
+        Parameters
+        ----------
+        class_idx : int
+            True class index (0, 1, or 2).
+        event_idx : int
+            Index of event in dataset.
         """
         cls_name = CLASS_NAMES[class_idx]
         length = int(self.lengths[event_idx])
         
         if length < 10:
-            return  # Skip very short sequences
+            return
         
-        # Generate probability trajectory
-        step = max(1, length // 50)  # Sample ~50 points
+        # Sample ~50 points along the sequence
+        step = max(1, length // 50)
         time_steps = list(range(10, length + 1, step))
-        
-        # Ensure we include the final point
         if time_steps[-1] != length:
             time_steps.append(length)
         
+        # Pre-allocate and batch inference
         probs_seq = []
         
         with torch.inference_mode():
-            f = torch.from_numpy(
+            f_full = torch.from_numpy(
                 self.norm_flux[event_idx:event_idx+1]
             ).to(self.device)
-            d = torch.from_numpy(
-                self.norm_delta_t[event_idx:event_idx+1]  # FIXED: use normalized delta_t
+            d_full = torch.from_numpy(
+                self.norm_delta_t[event_idx:event_idx+1]
             ).to(self.device)
             
             for t in time_steps:
-                f_trunc = f[:, :t]
-                d_trunc = d[:, :t]
+                f_trunc = f_full[:, :t]
+                d_trunc = d_full[:, :t]
                 l_trunc = torch.tensor([t], dtype=torch.long, device=self.device)
                 
                 logits = self.model(f_trunc, d_trunc, lengths=l_trunc)
@@ -1297,15 +1501,12 @@ class RomanEvaluator:
             return
         
         probs_full = np.array(probs_seq)
-        
-        # Build time axis from timestamps
         time_axis = np.array([self.timestamps[event_idx, t-1] for t in time_steps])
         
-        # Create 3-panel plot
+        # 3-panel plot
         fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         fig.suptitle(
-            f'Probability Evolution (True: {cls_name}, '
-            f'Predicted: {CLASS_NAMES[self.preds[event_idx]]})',
+            f'Evolution (True: {cls_name}, Pred: {CLASS_NAMES[self.preds[event_idx]]})',
             fontsize=14
         )
         
@@ -1316,25 +1517,20 @@ class RomanEvaluator:
         
         ax1.scatter(
             self.timestamps[event_idx, :length], mag_data, 
-            color='gray', s=5, linewidths=0, label='Light Curve'
+            color='gray', s=5, linewidths=0
         )
-        ax1.set_ylabel('$-\Delta m$ (mag)', fontsize=11)
+        ax1.set_ylabel(r'$-\Delta m$', fontsize=11)
         ax1.grid(True, linestyle='--', alpha=0.5)
-        ax1.legend(loc='upper right', fontsize=9)
         ax1.axhline(0, color='k', linestyle=':', alpha=0.5)
         
-        # Panel 2: Class Probabilities
+        # Panel 2: Probabilities
         ax2 = axes[1]
         for i, name in enumerate(CLASS_NAMES):
-            ax2.plot(
-                time_axis, probs_full[:, i], 
-                label=f'P({name})', 
-                color=self.colors[i], 
-                linewidth=2
-            )
+            ax2.plot(time_axis, probs_full[:, i], label=f'P({name})', 
+                    color=self.colors[i], linewidth=2)
         
         ax2.axhline(0.5, color='k', linestyle=':', alpha=0.7)
-        ax2.set_ylabel('Class Probability', fontsize=11)
+        ax2.set_ylabel('Probability', fontsize=11)
         ax2.set_ylim(-0.05, 1.05)
         ax2.grid(True, linestyle='--', alpha=0.5)
         ax2.legend(loc='upper left', ncol=3, fontsize=9)
@@ -1343,7 +1539,7 @@ class RomanEvaluator:
         ax3 = axes[2]
         confidence = probs_full.max(axis=1)
         
-        ax3.plot(time_axis, confidence, color='black', linewidth=2, label='Max Confidence')
+        ax3.plot(time_axis, confidence, color='black', linewidth=2)
         ax3.fill_between(
             time_axis, 0, confidence, 
             color=self.colors[self.preds[event_idx]], 
@@ -1362,18 +1558,20 @@ class RomanEvaluator:
     
     def run_early_detection_analysis(self) -> None:
         """
-        Evaluate classification performance at multiple observation completeness
-        levels to assess early detection capability.
+        Evaluate classification at multiple observation completeness levels.
+        
+        Tests model performance with truncated sequences to assess
+        early detection capability.
         """
         self.logger.info("\nRunning early detection analysis...")
         
-        time_fractions = np.linspace(0.2, 1.0, 5)
+        time_fractions = np.array([0.1, 0.2, 0.4, 0.6, 0.8, 1.0])
         results = []
         
         max_len = self.norm_flux.shape[1]
         
         for frac in time_fractions:
-            self.logger.info(f"  Inference at {frac*100:.0f}% completeness...")
+            self.logger.info(f"  Evaluating at {frac*100:.0f}% completeness...")
             
             new_lengths = np.clip(
                 (self.lengths * frac).astype(np.int64), 
@@ -1393,7 +1591,6 @@ class RomanEvaluator:
                         self.norm_flux[i:batch_end, :current_max_len]
                     ).to(self.device)
                     
-                    # FIXED: Use normalized delta_t
                     dt_batch = torch.from_numpy(
                         self.norm_delta_t[i:batch_end, :current_max_len]
                     ).to(self.device)
@@ -1419,7 +1616,7 @@ class RomanEvaluator:
                 'f1_macro': float(f1)
             })
         
-        # Plot early detection curve
+        # Plot
         fractions = [r['fraction'] for r in results]
         accuracies = [r['accuracy'] for r in results]
         f1_scores = [r['f1_macro'] for r in results]
@@ -1431,9 +1628,9 @@ class RomanEvaluator:
         ax.plot(fractions, f1_scores, 's--', label='F1 (macro)', 
                 color=self.colors[2], linewidth=2, markersize=8)
         
-        ax.set_title('Early Detection Performance vs. Observation Completeness', fontsize=14)
-        ax.set_xlabel('Fraction of Full Sequence Length', fontsize=12)
-        ax.set_ylabel('Metric Score', fontsize=12)
+        ax.set_title('Early Detection Performance', fontsize=14)
+        ax.set_xlabel('Sequence Completeness', fontsize=12)
+        ax.set_ylabel('Metric', fontsize=12)
         ax.set_ylim(0.0, 1.05)
         ax.set_xticks(fractions)
         ax.set_xticklabels([f'{f:.0%}' for f in fractions])
@@ -1444,7 +1641,6 @@ class RomanEvaluator:
         self._save_figure(fig, 'early_detection_curve')
         plt.close()
         
-        # Save results
         with open(self.output_dir / 'early_detection_results.json', 'w') as f:
             json.dump(results, f, indent=2)
         
@@ -1456,17 +1652,17 @@ class RomanEvaluator:
         self.logger.info("GENERATING VISUALIZATIONS")
         self.logger.info("=" * 80)
         
-        # Core metrics plots
+        # Core metrics
         self.plot_confusion_matrix()
         self.plot_roc_curves()
         self.plot_calibration_curve()
         self.plot_class_distributions()
         self.plot_per_class_metrics()
         
-        # Example data
+        # Examples
         self.plot_example_light_curves()
         
-        # Physics-based analysis
+        # Physics-based
         self.plot_u0_dependency()
         self.plot_temporal_bias_check()
         
@@ -1507,7 +1703,6 @@ class RomanEvaluator:
         with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
             json.dump(summary, f, indent=2)
         
-        # Save classification report
         report = classification_report(
             self.y, self.preds, 
             target_names=list(CLASS_NAMES), 
@@ -1528,52 +1723,47 @@ class RomanEvaluator:
 
 
 # =============================================================================
-# MAIN EXECUTION
+# MAIN
 # =============================================================================
 
 def main():
     """Parse arguments and run evaluation."""
     parser = argparse.ArgumentParser(
-        description="Roman Microlensing Classifier Comprehensive Evaluation",
+        description="Roman Microlensing Classifier Evaluation",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    # Required arguments
     parser.add_argument('--experiment_name', required=True,
                        help="Name of experiment to evaluate")
     parser.add_argument('--data', required=True,
                        help="Path to test dataset (.h5 or .npz)")
     
-    # Optional arguments
     parser.add_argument('--output_dir', default=None,
-                       help="Custom output directory (auto-generated if None)")
+                       help="Custom output directory")
     parser.add_argument('--batch_size', type=int, default=128,
                        help="Batch size for inference")
     parser.add_argument('--n_samples', type=int, default=None,
-                       help="Subsample test set (None = use all)")
+                       help="Subsample test set")
     parser.add_argument('--device', default='cuda',
-                       help="Computation device: cuda or cpu")
+                       help="Device: cuda or cpu")
     
-    # Analysis options
     parser.add_argument('--early_detection', action='store_true',
                        help="Run early detection analysis")
     parser.add_argument('--n_evolution_per_type', type=int, default=10,
-                       help="Number of evolution plots per class")
+                       help="Evolution plots per class")
     parser.add_argument('--n_example_grid_per_type', type=int, default=4,
-                       help="Number of light curves per class in example grid")
+                       help="Examples per class in grid")
     
-    # Visualization options
     parser.add_argument('--colorblind_safe', action='store_true',
                        help="Use colorblind-safe palette")
     parser.add_argument('--save_formats', nargs='+', default=['png'],
                        choices=['png', 'pdf', 'svg'],
-                       help="Output formats for plots")
+                       help="Output formats")
     parser.add_argument('--verbose', action='store_true',
-                       help="Enable debug logging")
+                       help="Debug logging")
     
     args = parser.parse_args()
     
-    # Create evaluator and run analysis
     evaluator = RomanEvaluator(
         experiment_name=args.experiment_name,
         data_path=args.data,
