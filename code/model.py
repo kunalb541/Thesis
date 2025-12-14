@@ -1,39 +1,40 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Event Classifier - Neural Network Architecture 
+Roman Microlensing Event Classifier - Neural Network Architecture
 =================================================================
 
 High-performance strictly causal CNN-GRU architecture for Nancy Grace Roman
 Space Telescope gravitational microlensing event classification.
 
 ARCHITECTURE DESIGN:
-    • Strictly causal convolutions with left-padding only
-    • Depthwise separable convolutions for efficiency
-    • Multi-layer GRU with gradient checkpointing
-    • Flash attention pooling for sequence aggregation (2-3x faster)
-    • Hierarchical classification (Flat vs Deviation → PSPL vs Binary)
-    • Residual connections and layer normalization
+    - Strictly causal convolutions with left-padding only
+    - Depthwise separable convolutions for efficiency
+    - Multi-layer GRU with gradient checkpointing
+    - Flash attention pooling for sequence aggregation (2-3x faster)
+    - Hierarchical classification (Flat vs Deviation -> PSPL vs Binary)
+    - Residual connections and layer normalization
 
-PERFORMANCE OPTIMIZATIONS (v2.3):
-    ✓ Flash attention via F.scaled_dot_product_attention (PyTorch 2.0+)
-    ✓ Zero graph breaks - No .item() calls in forward pass
-    ✓ No GPU→CPU synchronization in hot path
-    ✓ torch.compile fully compatible (no dynamic control flow)
-    ✓ Fused operations throughout
-    ✓ Optimal memory layout with explicit contiguity
-    ✓ Device-safe F.pad operations for DDP
-    ✓ Validation moved outside training loop
+PERFORMANCE OPTIMIZATIONS (v2.4):
+    - Flash attention via F.scaled_dot_product_attention (PyTorch 2.0+)
+    - Zero graph breaks - No .item() calls in forward pass
+    - No GPU->CPU synchronization in hot path
+    - torch.compile fully compatible (no dynamic control flow)
+    - Fused operations throughout
+    - Optimal memory layout with explicit contiguity
+    - Device-safe F.pad operations for DDP
+    - Validation moved outside training loop
+    - Fixed weight initialization for SiLU activation
 
 PERFORMANCE CHARACTERISTICS:
-    • 30-50% faster training from eliminating graph breaks
-    • 15-20% speedup from flash attention
-    • Sub-millisecond inference (1000× faster than χ² fitting)
-    • Efficient parameter count (~50-200K depending on config)
-    • Excellent GPU utilization with DDP (>85%)
+    - 30-50% faster training from eliminating graph breaks
+    - 15-20% speedup from flash attention
+    - Sub-millisecond inference (1000x faster than chi-squared fitting)
+    - Efficient parameter count (~50-200K depending on config)
+    - Excellent GPU utilization with DDP (>85%)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.3
+Version: 2.4
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 # =============================================================================
 # CONSTANTS
@@ -77,26 +78,46 @@ class ModelConfig:
     """
     Model architecture configuration with validation.
     
-    Attributes:
-        d_model: Hidden dimension size (must be even, >= 8)
-        n_layers: Number of GRU layers
-        dropout: Dropout probability
-        window_size: Convolution kernel size
-        max_seq_len: Maximum sequence length
-        n_classes: Number of output classes
-        hierarchical: Use hierarchical classification
-        use_residual: Add residual connections
-        use_layer_norm: Use layer normalization
-        feature_extraction: Feature extraction method ('conv' or 'mlp')
-        use_attention_pooling: Use attention pooling vs mean pooling
-        use_amp: Enable automatic mixed precision
-        use_gradient_checkpointing: Enable gradient checkpointing
-        use_flash_attention: Use flash attention (if available)
-        use_packed_sequences: Use packed sequences (experimental)
-        num_attention_heads: Number of attention heads for pooling
-        gru_dropout: Dropout between GRU layers
-        bn_momentum: Batch normalization momentum
-        init_scale: Weight initialization scale
+    Attributes
+    ----------
+    d_model : int
+        Hidden dimension size (must be even, >= 8).
+    n_layers : int
+        Number of GRU layers.
+    dropout : float
+        Dropout probability.
+    window_size : int
+        Convolution kernel size.
+    max_seq_len : int
+        Maximum sequence length.
+    n_classes : int
+        Number of output classes.
+    hierarchical : bool
+        Use hierarchical classification.
+    use_residual : bool
+        Add residual connections.
+    use_layer_norm : bool
+        Use layer normalization.
+    feature_extraction : str
+        Feature extraction method ('conv' or 'mlp').
+    use_attention_pooling : bool
+        Use attention pooling vs mean pooling.
+    use_amp : bool
+        Enable automatic mixed precision.
+    use_gradient_checkpointing : bool
+        Enable gradient checkpointing.
+    use_flash_attention : bool
+        Use flash attention (if available).
+    use_packed_sequences : bool
+        Use packed sequences (experimental).
+    num_attention_heads : int
+        Number of attention heads for pooling.
+    gru_dropout : float
+        Dropout between GRU layers.
+    bn_momentum : float
+        Batch normalization momentum.
+    init_scale : float
+        Weight initialization scale.
     """
     
     # Core architecture
@@ -178,11 +199,15 @@ def get_mask_value(dtype: torch.dtype) -> float:
     """
     Get appropriate mask value for dtype to prevent numerical issues.
     
-    Args:
-        dtype: Tensor data type
+    Parameters
+    ----------
+    dtype : torch.dtype
+        Tensor data type.
         
-    Returns:
-        Mask value appropriate for the dtype
+    Returns
+    -------
+    float
+        Mask value appropriate for the dtype.
     """
     if dtype == torch.float16:
         return MASK_VALUE_FP16
@@ -207,14 +232,22 @@ class CausalConv1d(nn.Module):
     - No future information leaks into the computation
     - First (receptive_field - 1) outputs use zero-padded history
     
-    Args:
-        in_channels: Number of input channels
-        out_channels: Number of output channels
-        kernel_size: Size of convolving kernel
-        stride: Stride of convolution
-        dilation: Spacing between kernel elements
-        groups: Number of groups for grouped convolution
-        bias: Add learnable bias
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels.
+    out_channels : int
+        Number of output channels.
+    kernel_size : int
+        Size of convolving kernel.
+    stride : int, optional
+        Stride of convolution. Default is 1.
+    dilation : int, optional
+        Spacing between kernel elements. Default is 1.
+    groups : int, optional
+        Number of groups for grouped convolution. Default is 1.
+    bias : bool, optional
+        Add learnable bias. Default is False.
     """
     
     __constants__ = ['kernel_size', 'stride', 'dilation', '_padding']
@@ -258,13 +291,17 @@ class CausalConv1d(nn.Module):
         Forward pass with causal padding.
         
         OPTIMIZATION (v2.3): Padding inherits device from input tensor,
-        preventing CPU→GPU transfers in DDP with pinned memory.
+        preventing CPU->GPU transfers in DDP with pinned memory.
         
-        Args:
-            x: Input tensor (B, C, T)
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor (B, C, T).
             
-        Returns:
-            Output tensor (B, C, T')
+        Returns
+        -------
+        Tensor
+            Output tensor (B, C, T').
         """
         if self._padding > 0:
             # F.pad automatically uses the same device as input tensor
@@ -281,20 +318,27 @@ class CausalDepthwiseSeparableConv1d(nn.Module):
     """
     Causal depthwise separable convolution.
     
-    Achieves ~4× speedup and ~8× parameter reduction compared to
+    Achieves ~4x speedup and ~8x parameter reduction compared to
     standard convolution while maintaining representational power.
     
     Architecture:
         1. Depthwise: Each input channel convolved separately
         2. Pointwise: 1x1 conv to mix channels
     
-    Args:
-        in_channels: Number of input channels
-        out_channels: Number of output channels
-        kernel_size: Size of convolving kernel
-        stride: Stride of convolution
-        dilation: Spacing between kernel elements
-        bias: Add learnable bias
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels.
+    out_channels : int
+        Number of output channels.
+    kernel_size : int
+        Size of convolving kernel.
+    stride : int, optional
+        Stride of convolution. Default is 1.
+    dilation : int, optional
+        Spacing between kernel elements. Default is 1.
+    bias : bool, optional
+        Add learnable bias. Default is False.
     """
     
     def __init__(
@@ -329,11 +373,15 @@ class CausalDepthwiseSeparableConv1d(nn.Module):
         """
         Forward through depthwise then pointwise convolution.
         
-        Args:
-            x: Input tensor (B, C, T)
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor (B, C, T).
             
-        Returns:
-            Output tensor (B, C', T')
+        Returns
+        -------
+        Tensor
+            Output tensor (B, C', T').
         """
         x = self.depthwise(x)
         x = self.pointwise(x)
@@ -348,17 +396,26 @@ class CausalConvBlock(nn.Module):
     """
     Causal convolution block with normalization and activation.
     
-    Standard sequence: Conv → BatchNorm → Activation → Dropout
+    Standard sequence: Conv -> BatchNorm -> Activation -> Dropout
     
-    Args:
-        in_channels: Number of input channels
-        out_channels: Number of output channels
-        kernel_size: Size of convolving kernel
-        stride: Stride of convolution
-        dilation: Dilation rate
-        dropout: Dropout probability
-        bn_momentum: Batch normalization momentum (0.2 for faster adaptation)
-        use_depthwise_separable: Use depthwise separable convolution
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels.
+    out_channels : int
+        Number of output channels.
+    kernel_size : int, optional
+        Size of convolving kernel. Default is 3.
+    stride : int, optional
+        Stride of convolution. Default is 1.
+    dilation : int, optional
+        Dilation rate. Default is 1.
+    dropout : float, optional
+        Dropout probability. Default is 0.1.
+    bn_momentum : float, optional
+        Batch normalization momentum (0.2 for faster adaptation). Default is BN_MOMENTUM.
+    use_depthwise_separable : bool, optional
+        Use depthwise separable convolution. Default is True.
     """
     
     def __init__(
@@ -391,13 +448,17 @@ class CausalConvBlock(nn.Module):
     
     def forward(self, x: Tensor) -> Tensor:
         """
-        Forward pass through conv → norm → activation → dropout.
+        Forward pass through conv -> norm -> activation -> dropout.
         
-        Args:
-            x: Input tensor (B, C, T)
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor (B, C, T).
             
-        Returns:
-            Output tensor (B, C', T')
+        Returns
+        -------
+        Tensor
+            Output tensor (B, C', T').
         """
         x = self.conv(x)
         x = self.norm(x)
@@ -419,17 +480,22 @@ class AttentionPooling(nn.Module):
     
     Performance:
         - Flash attention: 2-3x faster than manual implementation
-        - Memory efficient: O(N) instead of O(N²) for long sequences
+        - Memory efficient: O(N) instead of O(N^2) for long sequences
         - Automatic kernel selection based on hardware
     
-    Args:
-        d_model: Hidden dimension
-        num_heads: Number of attention heads
-        dropout: Dropout probability
+    Parameters
+    ----------
+    d_model : int
+        Hidden dimension.
+    num_heads : int, optional
+        Number of attention heads. Default is 4.
+    dropout : float, optional
+        Dropout probability. Default is 0.1.
     
-    References:
-        Vaswani et al. (2017). "Attention Is All You Need"
-        Dao et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention"
+    References
+    ----------
+    Vaswani et al. (2017). "Attention Is All You Need"
+    Dao et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention"
     """
     
     def __init__(
@@ -468,12 +534,17 @@ class AttentionPooling(nn.Module):
         OPTIMIZATION (v2.3): Uses F.scaled_dot_product_attention when available
         for 2-3x speedup. Falls back to manual implementation for PyTorch < 2.0.
         
-        Args:
-            x: Input tensor (B, T, D)
-            mask: Optional boolean mask (B, T) - True for valid positions
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor (B, T, D).
+        mask : Tensor, optional
+            Boolean mask (B, T) - True for valid positions.
             
-        Returns:
-            Pooled tensor (B, D)
+        Returns
+        -------
+        Tensor
+            Pooled tensor (B, D).
         """
         B, T, D = x.shape
         
@@ -521,7 +592,7 @@ class AttentionPooling(nn.Module):
             attn = self.dropout(attn)
             out = torch.matmul(attn, value)  # (B, H, 1, D_h)
         
-        # Reshape back: (B, H, 1, D_h) → (B, 1, D) → (B, D)
+        # Reshape back: (B, H, 1, D_h) -> (B, 1, D) -> (B, D)
         out = out.transpose(1, 2).contiguous().view(B, 1, D)
         out = self.out_proj(out).squeeze(1)  # (B, D)
         
@@ -542,12 +613,18 @@ class ConvFeatureExtractor(nn.Module):
         - Layer 1: kernel_size, dilation=1 (local patterns)
         - Layer 2: kernel_size, dilation=2 (broader patterns)
     
-    Args:
-        d_model: Hidden dimension
-        window_size: Convolution kernel size
-        dropout: Dropout probability
-        bn_momentum: Batch normalization momentum
-        hierarchical: Use multi-scale hierarchy
+    Parameters
+    ----------
+    d_model : int
+        Hidden dimension.
+    window_size : int, optional
+        Convolution kernel size. Default is 5.
+    dropout : float, optional
+        Dropout probability. Default is 0.1.
+    bn_momentum : float, optional
+        Batch normalization momentum. Default is BN_MOMENTUM.
+    hierarchical : bool, optional
+        Use multi-scale hierarchy. Default is True.
     """
     
     def __init__(
@@ -563,7 +640,7 @@ class ConvFeatureExtractor(nn.Module):
         self.hierarchical = hierarchical
         self.d_model = d_model
         
-        # Input projection: [flux, delta_t] → d_model
+        # Input projection: [flux, delta_t] -> d_model
         self.input_proj = nn.Linear(2, d_model)
         
         # First conv block (local patterns)
@@ -615,11 +692,15 @@ class ConvFeatureExtractor(nn.Module):
         """
         Extract features from input.
         
-        Args:
-            x: Input tensor (B, 2, T) with [flux, delta_t]
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor (B, 2, T) with [flux, delta_t].
             
-        Returns:
-            Features (B, D, T)
+        Returns
+        -------
+        Tensor
+            Features (B, D, T).
         """
         # Project to d_model
         x = x.transpose(1, 2)  # (B, T, 2)
@@ -641,9 +722,12 @@ class MLPFeatureExtractor(nn.Module):
     Two-layer MLP with layer normalization and SiLU activation.
     Suitable for tasks where temporal locality is less important.
     
-    Args:
-        d_model: Hidden dimension
-        dropout: Dropout probability
+    Parameters
+    ----------
+    d_model : int
+        Hidden dimension.
+    dropout : float, optional
+        Dropout probability. Default is 0.1.
     """
     
     def __init__(
@@ -675,11 +759,15 @@ class MLPFeatureExtractor(nn.Module):
         """
         Extract features using MLP.
         
-        Args:
-            x: Input tensor (B, 2, T)
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor (B, 2, T).
             
-        Returns:
-            Features (B, D, T)
+        Returns
+        -------
+        Tensor
+            Features (B, D, T).
         """
         x = x.transpose(1, 2)  # (B, T, 2)
         x = self.net(x)        # (B, T, D)
@@ -701,21 +789,23 @@ class RomanMicrolensingClassifier(nn.Module):
     
     Architecture:
         Input: [flux, delta_t] (B, 2, T)
-            ↓
+            |
         Feature Extraction: Causal Conv (multi-scale)
-            ↓
+            |
         Temporal Modeling: GRU (unidirectional, causal)
-            ↓
+            |
         Residual + LayerNorm
-            ↓
+            |
         Temporal Pooling: Flash Attention or Mean
-            ↓
+            |
         Classification: Hierarchical or Flat
-            ↓
+            |
         Output: Logits (B, 3)
     
-    Args:
-        config: Model configuration
+    Parameters
+    ----------
+    config : ModelConfig
+        Model configuration.
     """
     
     def __init__(self, config: ModelConfig) -> None:
@@ -806,19 +896,31 @@ class RomanMicrolensingClassifier(nn.Module):
         Conv/Linear: Kaiming initialization (He et al., 2015)
         GRU: Orthogonal initialization (Saxe et al., 2013)
         
-        Args:
-            init_scale: Scaling factor for initialization
+        Parameters
+        ----------
+        init_scale : float, optional
+            Scaling factor for initialization. Default is 1.0.
+            
+        Notes
+        -----
+        FIX (v2.4): Changed nonlinearity from 'relu' to 'leaky_relu' which
+        better approximates SiLU for Kaiming initialization purposes.
         """
         for name, param in self.named_parameters():
             if 'weight' in name:
-                if 'conv' in name or 'linear' in name.lower():
+                if 'conv' in name or 'linear' in name.lower() or 'proj' in name:
                     # Kaiming initialization for conv and linear layers
-                    nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='relu')
-                    param.data.mul_(init_scale)
+                    # Using leaky_relu as approximation for SiLU (both have negative slope)
+                    if len(param.shape) >= 2:
+                        nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='leaky_relu')
+                        param.data.mul_(init_scale)
                 elif 'gru' in name:
                     # Orthogonal initialization for GRU
                     if len(param.shape) >= 2:
                         nn.init.orthogonal_(param, gain=init_scale)
+                elif 'norm' in name.lower():
+                    # LayerNorm/BatchNorm weights initialized to 1
+                    nn.init.ones_(param)
             elif 'bias' in name:
                 if 'gru' in name:
                     # Initialize GRU biases
@@ -843,16 +945,22 @@ class RomanMicrolensingClassifier(nn.Module):
         """
         Forward pass - optimized for torch.compile.
         
-        CRITICAL: No .item() calls, no GPU→CPU syncs, no dynamic control flow.
+        CRITICAL: No .item() calls, no GPU->CPU syncs, no dynamic control flow.
         This allows torch.compile to optimize the entire graph without breaks.
         
-        Args:
-            flux: Normalized flux (B, T)
-            delta_t: Time differences (B, T)
-            lengths: Sequence lengths (B,) for masking
+        Parameters
+        ----------
+        flux : Tensor
+            Normalized flux (B, T).
+        delta_t : Tensor
+            Time differences (B, T).
+        lengths : Tensor, optional
+            Sequence lengths (B,) for masking.
             
-        Returns:
-            Logits (B, n_classes)
+        Returns
+        -------
+        Tensor
+            Logits (B, n_classes).
         """
         B, T = flux.shape
         device = flux.device
@@ -933,13 +1041,21 @@ class RomanMicrolensingClassifier(nn.Module):
         """
         Run inference and return predictions with probabilities.
         
-        Args:
-            flux: Normalized flux (B, T)
-            delta_t: Time differences (B, T)
-            lengths: Sequence lengths (B,)
+        Parameters
+        ----------
+        flux : Tensor
+            Normalized flux (B, T).
+        delta_t : Tensor
+            Time differences (B, T).
+        lengths : Tensor, optional
+            Sequence lengths (B,).
             
-        Returns:
-            Tuple of (predictions, probabilities)
+        Returns
+        -------
+        predictions : Tensor
+            Predicted class indices (B,).
+        probabilities : Tensor
+            Class probabilities (B, n_classes).
         """
         was_training = self.training
         self.eval()
@@ -957,11 +1073,15 @@ class RomanMicrolensingClassifier(nn.Module):
         """
         Count model parameters.
         
-        Args:
-            trainable_only: Count only trainable parameters
+        Parameters
+        ----------
+        trainable_only : bool, optional
+            Count only trainable parameters. Default is True.
             
-        Returns:
-            Number of parameters
+        Returns
+        -------
+        int
+            Number of parameters.
         """
         if trainable_only:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -971,8 +1091,10 @@ class RomanMicrolensingClassifier(nn.Module):
         """
         Get model complexity information.
         
-        Returns:
-            Dictionary containing complexity metrics
+        Returns
+        -------
+        dict
+            Dictionary containing complexity metrics.
         """
         total_params = self.count_parameters(trainable_only=False)
         trainable_params = self.count_parameters(trainable_only=True)
@@ -1012,14 +1134,21 @@ def validate_inputs(
     Call this ONCE when creating the dataset, NOT in the training loop.
     This prevents .item() calls from breaking the compiled graph.
     
-    Args:
-        flux: Flux tensor (B, T)
-        delta_t: Delta_t tensor (B, T)
-        lengths: Length tensor (B,)
-        receptive_field: Model receptive field
+    Parameters
+    ----------
+    flux : Tensor
+        Flux tensor (B, T).
+    delta_t : Tensor
+        Delta_t tensor (B, T).
+    lengths : Tensor, optional
+        Length tensor (B,).
+    receptive_field : int
+        Model receptive field.
         
-    Raises:
-        ValueError: If inputs are invalid
+    Raises
+    ------
+    ValueError
+        If inputs are invalid.
     """
     B, T = flux.shape
     
@@ -1051,12 +1180,17 @@ def create_model(
     """
     Factory function to create model instance.
     
-    Args:
-        config: Model configuration
-        **kwargs: Additional config parameters (override config)
+    Parameters
+    ----------
+    config : ModelConfig, optional
+        Model configuration.
+    **kwargs : Any
+        Additional config parameters (override config).
         
-    Returns:
-        Model instance
+    Returns
+    -------
+    RomanMicrolensingClassifier
+        Model instance.
     """
     if config is None:
         config = ModelConfig(**kwargs)
@@ -1081,19 +1215,30 @@ def load_checkpoint(
         - DDP wrapper prefix removal (module.)
         - torch.compile prefix removal (_orig_mod.)
         - Config extraction from checkpoint
+        - Both 'config' and 'model_config' keys for compatibility
     
-    Args:
-        checkpoint_path: Path to checkpoint file
-        config: Optional config (extracted from checkpoint if None)
-        map_location: Device to map tensors to
-        strict: Strict state dict loading
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to checkpoint file.
+    config : ModelConfig, optional
+        Optional config (extracted from checkpoint if None).
+    map_location : str or torch.device, optional
+        Device to map tensors to. Default is 'cpu'.
+    strict : bool, optional
+        Strict state dict loading. Default is True.
         
-    Returns:
-        Loaded model
+    Returns
+    -------
+    RomanMicrolensingClassifier
+        Loaded model.
         
-    Raises:
-        FileNotFoundError: If checkpoint doesn't exist
-        KeyError: If checkpoint missing required keys
+    Raises
+    ------
+    FileNotFoundError
+        If checkpoint doesn't exist.
+    KeyError
+        If checkpoint missing required keys.
     """
     import os
     
@@ -1107,10 +1252,17 @@ def load_checkpoint(
     )
     
     if config is None:
-        if 'config' not in checkpoint:
-            raise KeyError("Checkpoint missing 'config' key")
+        # Support both 'model_config' (evaluate.py) and 'config' (legacy) keys
+        if 'model_config' in checkpoint:
+            config_data = checkpoint['model_config']
+        elif 'config' in checkpoint:
+            config_data = checkpoint['config']
+        else:
+            raise KeyError(
+                f"Checkpoint missing config key. "
+                f"Available keys: {list(checkpoint.keys())}"
+            )
         
-        config_data = checkpoint['config']
         if isinstance(config_data, dict):
             config = ModelConfig.from_dict(config_data)
         elif isinstance(config_data, ModelConfig):
