@@ -1100,7 +1100,7 @@ def main():
     parser.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM)
     
     # Optimization
-    parser.add_argument('--use-amp', action='store_true', default=True)
+    parser.add_argument('--use-amp', action='store_true', default=False)
     parser.add_argument('--compile', action='store_true', help='Use torch.compile')
     parser.add_argument('--compile-mode', type=str, default='max-autotune',
                         choices=['default', 'reduce-overhead', 'max-autotune'])
