@@ -895,7 +895,7 @@ def main():
             
             # Create structured array with sorted field names
             sorted_fields = sorted(all_fields)
-            dtype_list = [(field, 'f4') for field in sorted_fields]
+            dtype_list = [(field, 'f8') for field in sorted_fields]
             struct_arr = np.zeros(len(class_params), dtype=dtype_list)
             
             for i, p in enumerate(class_params):
