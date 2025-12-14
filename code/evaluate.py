@@ -2022,7 +2022,7 @@ class RomanEvaluator:
                 flux_valid = flux[valid_mask]
                 
                 # Plot
-                ax.scatter(times_valid, flux_valid, s=10)
+                ax.scatter(times_valid, flux_valid, s=5)
                 
                 # Formatting
                 ax.invert_yaxis()
@@ -2308,7 +2308,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.scatter(times_valid, flux_valid, s=10)
+        ax1.scatter(times_valid, flux_valid, s=5)
         ax1.invert_yaxis()
         ax1.set_ylabel('Magnitude (AB)', fontsize=11)
         ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
