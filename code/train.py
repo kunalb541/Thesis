@@ -81,7 +81,7 @@ def _configure_environment() -> None:
     os.environ.setdefault('NCCL_MIN_NCHANNELS', '16')
     os.environ.setdefault('CUDA_DEVICE_MAX_CONNECTIONS', '1')
     os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF',
-                         'expandable_segments:True,garbage_collection_threshold:0.9')
+                         'expandable_segments:True')
     os.environ.setdefault('TORCH_DISTRIBUTED_DEBUG', 'OFF')
     os.environ.setdefault('CUDA_LAUNCH_BLOCKING', '0')
     os.environ.setdefault('KINETO_LOG_LEVEL', '5')
@@ -644,6 +644,7 @@ def train_epoch(
     model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    scheduler: Any,
     scaler: Optional[torch.amp.GradScaler],
     class_weights: Tensor,
     device: torch.device,
@@ -662,6 +663,7 @@ def train_epoch(
         model: Model to train.
         loader: Training dataloader.
         optimizer: Optimizer.
+        scheduler: Learning rate scheduler (stepped per batch).
         scaler: Gradient scaler for AMP.
         class_weights: Class weights for loss.
         device: Device.
@@ -716,6 +718,9 @@ def train_epoch(
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 optimizer.step()
+            
+            # Step scheduler after each optimizer step
+            scheduler.step()
             
             optimizer.zero_grad(set_to_none=True)
         
@@ -1234,17 +1239,15 @@ def main():
                 train_loader.sampler.set_epoch(epoch)
             
             train_loss, train_acc = train_epoch(
-                model, train_loader, optimizer, scaler, class_weights,
+                model, train_loader, optimizer, scheduler, scaler, class_weights,
                 device, rank, world_size, epoch, config,
                 accumulation_steps=args.accumulation_steps,
                 clip_norm=args.clip_norm,
                 use_prefetcher=args.use_prefetcher
             )
             
-            # Step scheduler once per batch (already handled in train_epoch)
-            # Update scheduler at epoch level for step count
-            for _ in range(len(train_loader)):
-                scheduler.step()
+            # Scheduler is stepped per-batch inside train_epoch
+            # No additional stepping needed here
             
             should_eval = (epoch % args.eval_every == 0 or
                           epoch == 1 or epoch == args.epochs)
