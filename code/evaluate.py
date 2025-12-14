@@ -50,8 +50,7 @@ Fixes Applied (v2.5 - Production Release)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Advisor: Prof. Dr. Joachim Wambsganß
-Version: 2.5 (Production)
+Version: 2.4 
 """
 from __future__ import annotations
 
