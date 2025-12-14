@@ -511,13 +511,12 @@ def simulate_event(params: Dict[str, Any]) -> Dict[str, Any]:
                 A = binary_magnification_vbb(t_grid, tE, u0, t0, s, q, alpha, rho)
                 if np.max(A) > 1.1:
                     break
-            except (RuntimeError, ValueError, TypeError, MemoryError) as e:
-                # Log but continue to next attempt
+            except (RuntimeError, ValueError, TypeError, MemoryError):
+                # Continue to next attempt; if final attempt, fall through to else clause
                 if attempt == 2:
-                    # Final attempt failed, use PSPL fallback
-                    pass
+                    meta['vbb_failed'] = True
         else:
-            # Fallback to PSPL if all binary attempts fail
+            # Fallback to PSPL if all binary attempts fail (no break occurred)
             u0 = np.random.uniform(0.001, 0.5)
             A = pspl_magnification(t_grid, tE, u0, t0)
             meta['used_fallback'] = True
