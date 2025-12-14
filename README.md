@@ -32,14 +32,58 @@ cd Thesis
 conda env create -f environment.yml
 conda activate microlens
 
+# Install Flash Attention (optional but recommended for 2-3x speedup)
+pip install flash-attn --no-build-isolation
+
 # Verify installation
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
 python -c "import VBBinaryLensing; print('VBBinaryLensing: OK')"
+python -c "from flash_attn import flash_attn_func; print('Flash Attention: OK')"
 ```
+
+### Flash Attention Installation
+
+Flash Attention provides 2-3x speedup for attention pooling. Installation requires:
+- NVIDIA GPU with compute capability >= 7.0 (V100, A100, H100, RTX 3090/4090)
+- CUDA 11.6+ 
+- PyTorch 2.0+
+
+**Standard Installation:**
+```bash
+pip install flash-attn --no-build-isolation
+```
+
+**If standard installation fails, try building from source:**
+```bash
+# Install build dependencies
+pip install packaging ninja
+
+# Clone and build
+git clone https://github.com/Dao-AILab/flash-attention.git
+cd flash-attention
+python setup.py install
+```
+
+**On HPC clusters (e.g., bwForCluster):**
+```bash
+# Load required modules first
+module load devel/cuda/12.1
+module load compiler/gnu/12.1
+
+# Then install
+pip install flash-attn --no-build-isolation
+```
+
+**Verification:**
+```bash
+python -c "from flash_attn import flash_attn_func; print('Flash Attention: OK')"
+```
+
+> **Note:** Flash Attention is optional. The model automatically falls back to PyTorch's `F.scaled_dot_product_attention` if Flash Attention is not available.
 
 ### GPU Configuration
 
-**The environment.yml now includes PyTorch CUDA 12.1 by default.**
+**The environment.yml includes PyTorch CUDA 12.1 by default.**
 
 For different hardware, edit `environment.yml` before creating the environment:
 
@@ -556,11 +600,15 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## Development Status
 
-**Version 2.4 (Current)**
+**Version 2.6 (Current)**
 - Status: Production-ready
-- All critical bugs fixed
+- All critical bugs fixed (see CHANGELOG.md)
 - Comprehensive testing complete
 - Ready for thesis submission
+
+**Critical Fix in v2.6**
+- Hierarchical classification now uses correct loss function (F.nll_loss)
+- Previous hierarchical training runs should be retrained for optimal results
 
 **Known Limitations:**
 - Trained on simulated data only (no real OGLE/MOA validation yet)
