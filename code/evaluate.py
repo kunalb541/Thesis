@@ -2009,7 +2009,7 @@ class RomanEvaluator:
                 flux_valid = flux[valid_mask]
                 
                 # Plot
-                ax.plot(times_valid, flux_valid, 
+                ax.scatter(times_valid, flux_valid, 
                        'o-', color=self.colors[class_idx], 
                        markersize=2, linewidth=0.8, alpha=0.7)
                 
