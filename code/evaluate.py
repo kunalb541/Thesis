@@ -2297,7 +2297,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.plot(times_valid, flux_valid, 
+        ax1.scatter(times_valid, flux_valid, 
                 'o-', color=self.colors[true_label], markersize=3, linewidth=1, alpha=0.7)
         ax1.invert_yaxis()
         ax1.set_ylabel('Magnitude (AB)', fontsize=11)
