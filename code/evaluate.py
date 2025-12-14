@@ -64,7 +64,7 @@ Fixes Applied (v2.5 - Complete Documentation & Robustness)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.5
+Version: 2.6
 """
 from __future__ import annotations
 
