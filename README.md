@@ -19,18 +19,6 @@ The model uses depthwise separable convolutions, flash attention pooling, hierar
 
 ---
 
-## Recent Improvements (v2.0)
-
-**Critical fixes applied:**
-- ✓ Delta_t normalized with its own statistics (not flux statistics)
-- ✓ Checkpoint resumption fully implemented
-- ✓ Parameter extraction handles structured arrays correctly
-- ✓ ROC-AUC computation robust to <3 classes
-- ✓ Magnitude conversion method implemented
-- ✓ Comprehensive docstrings and type hints throughout
-
----
-
 ## Installation
 
 ### Quick Start
@@ -131,6 +119,46 @@ python simulate.py \
 - Parameters: `params_flat`, `params_pspl`, `params_binary` (structured arrays)
 - Metadata: Mission duration, cadence, seed, etc.
 
+```bash
+cd ~/Thesis/code
+conda activate microlens_amd
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMBA_NUM_THREADS=1
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
+  --binary_preset distinct --output ../data/raw/distinct.h5 \
+  --num_workers 32 --seed 42 > log_distinct.txt 2>&1 &
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
+  --binary_preset stellar --output ../data/raw/stellar.h5 \
+  --num_workers 32 --seed 43 > log_stellar.txt 2>&1 &
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
+  --binary_preset planetary --output ../data/raw/planetary.h5 \
+  --num_workers 32 --seed 44 > log_planetary.txt 2>&1 &
+
+srun --partition=gpu_a100_short --nodes=1 --ntasks=1 --cpus-per-task=32 \
+  --gres=gpu:4 --exclusive --time=00:30:00 \
+  python -u simulate.py --n_flat 100000 --n_pspl 100000 --n_binary 100000 \
+  --binary_preset baseline --output ../data/raw/baseline.h5 \
+  --num_workers 32 --seed 45 > log_baseline.txt 2>&1 &
+
+rm *txt
+
+echo "Jobs submitted. Waiting for completion..."
+wait
+echo "All jobs finished."
+```
+
 ---
 
 ## Training
@@ -156,34 +184,40 @@ python train.py \
 # Allocate resources
 salloc --partition=gpu_a100_short --nodes=12 --gres=gpu:4 --exclusive --time=00:30:00
 
-# Setup environment
 cd ~/Thesis/code
 conda activate microlens
 
+
 export PYTHONWARNINGS="ignore"
+export TORCH_SHOW_CPP_STACKTRACES=0
 export TORCH_DISTRIBUTED_DEBUG=OFF
-export NCCL_DEBUG=WARN
+export TORCH_CPP_LOG_LEVEL=ERROR
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG=NONE
+export RCCL_DEBUG=NONE
+export TORCH_DISTRIBUTED_ACK_TIMEOUT=1800
+export TORCH_DISTRIBUTED_SEND_TIMEOUT=1200
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=3
 export NCCL_P2P_LEVEL=5
+export NCCL_MIN_NCHANNELS=16
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=29500
+export NCCL_ALGO=TREE
 
-# Distributed training
 srun torchrun \
   --nnodes=12 \
   --nproc-per-node=4 \
   --rdzv-backend=c10d \
   --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+  --rdzv-id="train-$(date +%s)" \
   train.py \
   --data ../data/raw/baseline.h5 \
-  --experiment-name baseline \
-  --epochs 50 \
-  --batch-size 64 \
-  --prefetch-factor 12
+  --prefetch-factor 12 \
+  --experiment-name baseline
 ```
 
-### Checkpoint Resumption (NEW in v2.0)
+### Checkpoint Resumption 
 
 Training can now be resumed from any checkpoint:
 
@@ -235,7 +269,7 @@ python evaluate.py \
     --n-evolution-per-type 10
 ```
 
-### Advanced Options (NEW in v2.0)
+### Advanced Options 
 
 ```bash
 # Publication-quality outputs (PDF + SVG)
@@ -250,6 +284,12 @@ python evaluate.py \
     --experiment-name baseline \
     --data test.h5 \
     --verbose
+
+python evaluate.py --data ../data/raw/baseline.h5   --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/stellar.h5    --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/planetary.h5  --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
+python evaluate.py --data ../data/raw/distinct.h5   --experiment_name distinct --batch_size 512 --n_samples 100000 --early_detection --n_evolution_per_type 10
+
 ```
 
 **Evaluation Outputs** (saved in `results/<experiment>_*/eval_<dataset>_<timestamp>/`):
