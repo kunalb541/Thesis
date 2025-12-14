@@ -39,7 +39,7 @@ This module powers downstream ML pipelines such as CNN-GRU classifiers.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.3
+Version: 2.4
 """
 import argparse
 import h5py
