@@ -47,7 +47,7 @@ MASK_VALUE_BF16: Final[float] = -1e9
 
 MIN_VALID_SEQ_LEN: Final[int] = 1
 
-DEFAULT_D_MODEL: Final[int] = 64
+DEFAULT_D_MODEL: Final[int] = 16
 DEFAULT_N_LAYERS: Final[int] = 2
 DEFAULT_DROPOUT: Final[float] = 0.3
 DEFAULT_N_CLASSES: Final[int] = 3
@@ -83,9 +83,9 @@ class ModelConfig:
     use_packed_sequences: bool = False
     
     # Advanced options
-    num_attention_heads: int = 1
-    gru_dropout: float = 0.0
-    bn_momentum: float = 0.1
+    num_attention_heads: int = 3
+    gru_dropout: float = 0.1
+    bn_momentum: float = 0.2
     init_scale: float = 1.0
     
     def __post_init__(self) -> None:
