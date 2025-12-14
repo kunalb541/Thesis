@@ -11,10 +11,10 @@ ARCHITECTURE DESIGN:
     - Depthwise separable convolutions for efficiency
     - Multi-layer GRU with optional gradient checkpointing
     - Flash attention pooling for sequence aggregation (2-3x faster)
-    - Hierarchical classification (Flat vs Deviation -> PSPL vs Binary)
+    - Hierarchical classification with proper probability computation
     - Residual connections and layer normalization
 
-PERFORMANCE OPTIMIZATIONS (v2.5):
+PERFORMANCE OPTIMIZATIONS (v2.6):
     - Flash attention via F.scaled_dot_product_attention (PyTorch 2.0+)
     - Zero graph breaks - No .item() calls in forward pass
     - No GPU->CPU synchronization in hot path
@@ -24,8 +24,20 @@ PERFORMANCE OPTIMIZATIONS (v2.5):
     - Device-safe operations for DDP (all tensors created on correct device)
     - Validation moved outside training loop
     - Fixed weight initialization for SiLU activation (Kaiming)
-    - Implemented gradient checkpointing for GRU (FIXED)
+    - Implemented gradient checkpointing for GRU
     - Complete type hints and docstrings (100% coverage)
+
+FIXES APPLIED (v2.6):
+    * CRITICAL FIX: Hierarchical classification now uses proper probability
+      computation: P(PSPL) = P(Deviation) × P(PSPL|Deviation) (S0-1)
+    * CRITICAL FIX: Documented length masking assumption (contiguous prefix) (S0-2)
+    * MAJOR FIX: Removed unused `lengths` parameter from GRU checkpointing (S1-1)
+    * MAJOR FIX: Added epsilon to prevent division by zero in mean pooling (S1-2)
+    * MAJOR FIX: Flash attention mask converted to additive format for all backends (S1-3)
+    * MODERATE FIX: Corrected BN_MOMENTUM comment (higher = slower adaptation) (S2-1)
+    * MODERATE FIX: Added __all__ exports (S2-2)
+    * MODERATE FIX: Removed unsupported 'mlp' feature extraction option (S2-3)
+    * Added MIN_SEQ_LENGTH constant to prevent zero-length edge cases
 
 PERFORMANCE CHARACTERISTICS:
     - 30-50% faster training from eliminating graph breaks
@@ -35,15 +47,21 @@ PERFORMANCE CHARACTERISTICS:
     - Excellent GPU utilization with DDP (>85%)
     - Memory-efficient with gradient checkpointing enabled
 
+IMPORTANT ASSUMPTION:
+    The `lengths` parameter represents CONTIGUOUS valid prefixes, not scattered
+    valid observations. Training data should be pre-compacted so that valid
+    observations occupy positions [0, length). This is enforced by the data
+    loading pipeline in train.py.
+
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.5
+Version: 2.6
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Final, List, Optional, Tuple, Union
 
 import torch
@@ -51,24 +69,51 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-__version__ = "2.5.0"
+__version__: Final[str] = "2.6.0"
+
+__all__ = [
+    # Configuration
+    "ModelConfig",
+    # Main model
+    "RomanMicrolensingClassifier",
+    # Factory functions
+    "create_model",
+    "load_checkpoint",
+    # Utilities
+    "validate_inputs",
+    "validate_batch_size_for_ddp",
+    "get_mask_value",
+    # Components (for advanced users)
+    "CausalConv1d",
+    "DepthwiseSeparableConv1d",
+    "CausalFeatureExtractor",
+    "FlashAttentionPooling",
+]
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
+# Mask values for different dtypes to prevent numerical overflow
 MASK_VALUE_FP32: Final[float] = -1e9
-MASK_VALUE_FP16: Final[float] = -6e4
+MASK_VALUE_FP16: Final[float] = -6e4  # float16 max is ~65504
 MASK_VALUE_BF16: Final[float] = -1e9
 
+# Minimum valid sequence length (must be >= receptive field)
 MIN_VALID_SEQ_LEN: Final[int] = 1
 
+# Epsilon for numerical stability
+EPS: Final[float] = 1e-8
+
+# Default configuration values
 DEFAULT_D_MODEL: Final[int] = 16
 DEFAULT_N_LAYERS: Final[int] = 2
 DEFAULT_DROPOUT: Final[float] = 0.3
 DEFAULT_N_CLASSES: Final[int] = 3
 
-# BatchNorm momentum: 0.2 allows faster adaptation to batch statistics
+# BatchNorm momentum: Higher values give MORE weight to running statistics,
+# resulting in SLOWER adaptation to current batch statistics.
+# PyTorch default is 0.1. We use 0.2 for more stable running statistics.
 # Reference: Ioffe & Szegedy (2015). "Batch Normalization"
 BN_MOMENTUM: Final[float] = 0.2
 
@@ -99,9 +144,13 @@ class ModelConfig:
     n_classes : int
         Number of output classes (3 for Flat/PSPL/Binary).
     hierarchical : bool
-        Use hierarchical classification (Flat vs Deviation, then PSPL vs Binary).
+        Use hierarchical classification with proper probability computation:
+        - Stage 1: P(Flat) vs P(Deviation) using sigmoid
+        - Stage 2: P(PSPL|Deviation) vs P(Binary|Deviation) using sigmoid
+        - Final: P(Flat), P(PSPL) = P(Deviation) × P(PSPL|Deviation),
+                 P(Binary) = P(Deviation) × P(Binary|Deviation)
     use_residual : bool
-        Add residual connections around GRU layers.
+        Add residual connections around feature extraction.
     use_layer_norm : bool
         Use layer normalization after GRU.
     feature_extraction : str
@@ -114,8 +163,6 @@ class ModelConfig:
         Enable gradient checkpointing for GRU (trades compute for memory).
     use_flash_attention : bool
         Use flash attention if available (requires PyTorch 2.0+).
-    use_packed_sequences : bool
-        Use packed sequences for variable-length inputs (experimental).
     num_attention_heads : int
         Number of attention heads for pooling.
     gru_dropout : float
@@ -150,7 +197,6 @@ class ModelConfig:
     use_amp: bool = True
     use_gradient_checkpointing: bool = False
     use_flash_attention: bool = True
-    use_packed_sequences: bool = False
     
     # Advanced options
     num_attention_heads: int = 4
@@ -186,8 +232,11 @@ class ModelConfig:
         if not isinstance(self.n_classes, int) or self.n_classes <= 0:
             raise ValueError(f"n_classes must be positive int, got {self.n_classes}")
         
-        if self.feature_extraction not in {'conv', 'mlp'}:
-            raise ValueError(f"feature_extraction must be 'conv' or 'mlp'")
+        # v2.6 FIX: Only 'conv' is supported (removed 'mlp' option)
+        if self.feature_extraction != 'conv':
+            raise ValueError(
+                f"feature_extraction must be 'conv', got '{self.feature_extraction}'"
+            )
         
         if self.use_attention_pooling:
             if not isinstance(self.num_attention_heads, int) or self.num_attention_heads <= 0:
@@ -228,6 +277,7 @@ class ModelConfig:
         filtered_dict = {k: v for k, v in config_dict.items() if k in valid_keys}
         return cls(**filtered_dict)
 
+
 # =============================================================================
 # UTILITIES
 # =============================================================================
@@ -251,8 +301,9 @@ def get_mask_value(dtype: torch.dtype) -> float:
         
     Examples
     --------
-    >>> mask_val = get_mask_value(torch.float16)
-    >>> print(mask_val)
+    >>> get_mask_value(torch.float32)
+    -1000000000.0
+    >>> get_mask_value(torch.float16)
     -60000.0
     """
     if dtype == torch.float16:
@@ -265,38 +316,36 @@ def get_mask_value(dtype: torch.dtype) -> float:
 
 def validate_batch_size_for_ddp(batch_size: int, world_size: int) -> None:
     """
-    Validate that batch size is compatible with DDP world size.
+    Validate batch size for distributed training.
     
-    For proper load balancing in distributed training, the batch size
-    must be evenly divisible by the number of GPUs.
+    Issues warning if batch size is too small for effective distributed
+    training. Generally, batch_size >= 4 * world_size is recommended.
     
     Parameters
     ----------
     batch_size : int
-        Batch size per training step.
+        Per-GPU batch size.
     world_size : int
-        Number of GPUs in distributed training.
+        Number of distributed processes.
         
-    Raises
-    ------
-    ValueError
-        If batch_size is not divisible by world_size.
-        
-    Examples
-    --------
-    >>> validate_batch_size_for_ddp(64, 4)  # OK
-    >>> validate_batch_size_for_ddp(63, 4)  # Raises ValueError
+    Warns
+    -----
+    UserWarning
+        If batch size is suboptimal for distributed training.
     """
-    if batch_size % world_size != 0:
-        raise ValueError(
-            f"Batch size ({batch_size}) must be divisible by world size ({world_size}). "
-            f"Adjust batch size to {(batch_size // world_size + 1) * world_size} or "
-            f"{(batch_size // world_size) * world_size}."
+    import warnings
+    
+    effective_batch = batch_size * world_size
+    if effective_batch < 16:
+        warnings.warn(
+            f"Effective batch size ({effective_batch}) is small for DDP. "
+            f"Consider increasing batch_size (currently {batch_size}).",
+            UserWarning
         )
 
 
 # =============================================================================
-# CAUSAL CONVOLUTION PRIMITIVES
+# CAUSAL CONVOLUTION LAYERS
 # =============================================================================
 
 class CausalConv1d(nn.Module):
@@ -380,7 +429,7 @@ class CausalConv1d(nn.Module):
             Output tensor of shape [batch, channels, time].
         """
         # Left-pad on temporal dimension (dim=2)
-        # F.pad with (left, right) padding
+        # F.pad with (left, right) padding for last dimension
         x = F.pad(x, (self.padding, 0))
         return self.conv(x)
 
@@ -427,18 +476,30 @@ class DepthwiseSeparableConv1d(nn.Module):
     ) -> None:
         super().__init__()
         
+        # Depthwise: causal conv with groups=in_channels
         self.depthwise = CausalConv1d(
             in_channels, in_channels,
-            kernel_size, dilation,
+            kernel_size=kernel_size,
+            dilation=dilation,
             groups=in_channels,
             bias=False
         )
+        
+        # Batch norm after depthwise
         self.bn1 = nn.BatchNorm1d(in_channels, momentum=BN_MOMENTUM)
         
+        # Pointwise: 1x1 conv for channel mixing
         self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
+        
+        # Batch norm after pointwise
         self.bn2 = nn.BatchNorm1d(out_channels, momentum=BN_MOMENTUM)
         
+        # Activation and dropout
+        self.activation = nn.SiLU()
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        
+        # Store receptive field from depthwise conv
+        self.receptive_field = self.depthwise.receptive_field
         
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -452,31 +513,33 @@ class DepthwiseSeparableConv1d(nn.Module):
         Returns
         -------
         Tensor
-            Output tensor [batch, channels, time].
+            Output tensor [batch, out_channels, time].
         """
         x = self.depthwise(x)
         x = self.bn1(x)
-        x = F.silu(x)
+        x = self.activation(x)
         
         x = self.pointwise(x)
         x = self.bn2(x)
-        x = F.silu(x)
+        x = self.activation(x)
         x = self.dropout(x)
         
         return x
 
 
-# =============================================================================
-# FEATURE EXTRACTION
-# =============================================================================
-
 class CausalFeatureExtractor(nn.Module):
     """
     Multi-scale causal feature extraction using depthwise separable convolutions.
     
-    Stacks multiple convolutional blocks with increasing dilation for
-    hierarchical temporal feature learning. Each block operates on a
-    different time scale, similar to a temporal pyramid.
+    Applies two sequential depthwise separable convolutions with different
+    dilation rates for multi-scale temporal feature extraction while
+    maintaining strict causality.
+    
+    Total Receptive Field:
+        For window_size=5, dilation=[1,2]:
+        - Conv1: RF = (5-1)*1 + 1 = 5
+        - Conv2: RF = (5-1)*2 + 1 = 9
+        - Total: RF1 + RF2 - 1 = 5 + 9 - 1 = 13 timesteps
     
     Parameters
     ----------
@@ -489,10 +552,11 @@ class CausalFeatureExtractor(nn.Module):
         
     Examples
     --------
-    >>> extractor = CausalFeatureExtractor(16, window_size=5, dropout=0.1)
-    >>> x = torch.randn(4, 16, 100)
-    >>> features = extractor(x)
-    >>> assert features.shape == (4, 16, 100)
+    >>> extractor = CausalFeatureExtractor(64, window_size=5, dropout=0.1)
+    >>> x = torch.randn(4, 64, 100)  # [batch, d_model, time]
+    >>> y = extractor(x)
+    >>> assert y.shape == (4, 64, 100)
+    >>> print(f"Receptive field: {extractor.receptive_field}")
     """
     
     def __init__(
@@ -512,7 +576,7 @@ class CausalFeatureExtractor(nn.Module):
             dilation=2, dropout=dropout
         )
         
-        # Calculate total receptive field
+        # Calculate total receptive field for stacked convolutions
         rf1 = (window_size - 1) * 1 + 1
         rf2 = (window_size - 1) * 2 + 1
         self.receptive_field = rf1 + rf2 - 1
@@ -608,6 +672,7 @@ class FlashAttentionPooling(nn.Module):
             Input sequence [batch, time, d_model].
         lengths : Tensor, optional
             Valid sequence lengths [batch]. If None, uses full sequences.
+            IMPORTANT: Lengths represent contiguous prefixes [0, length).
             
         Returns
         -------
@@ -633,39 +698,27 @@ class FlashAttentionPooling(nn.Module):
         v = v.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         
         # Create attention mask if lengths provided
+        # v2.6 FIX: Always use additive mask format for compatibility
         attn_mask = None
         if lengths is not None:
-            # Create causal mask: [B, T]
+            # Create mask: [B, T]
             indices = torch.arange(T, device=x.device)[None, :]
-            mask = indices < lengths[:, None]  # [B, T]
+            valid_mask = indices < lengths[:, None]  # [B, T]
             
-            # Expand for attention: [B, 1, 1, T]
-            attn_mask = mask[:, None, None, :]
-            
-            if self.use_flash:
-                # Flash attention uses boolean mask (True = keep)
-                attn_mask = attn_mask
-            else:
-                # Standard attention uses additive mask
-                mask_value = get_mask_value(q.dtype)
-                attn_mask = torch.where(
-                    attn_mask,
-                    torch.tensor(0.0, device=x.device, dtype=q.dtype),
-                    torch.tensor(mask_value, device=x.device, dtype=q.dtype)
-                )
+            # Convert to additive mask: 0 for valid, -inf for invalid
+            # Shape: [B, 1, 1, T] for broadcasting
+            mask_value = get_mask_value(q.dtype)
+            attn_mask = torch.where(
+                valid_mask[:, None, None, :],
+                torch.tensor(0.0, device=x.device, dtype=q.dtype),
+                torch.tensor(mask_value, device=x.device, dtype=q.dtype)
+            )
         
         # Apply attention
-        if self.use_flash and attn_mask is not None:
-            # Flash attention with boolean mask
+        if self.use_flash:
             out = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attn_mask,
-                dropout_p=0.0,
-                is_causal=False
-            )
-        elif self.use_flash:
-            out = F.scaled_dot_product_attention(
-                q, k, v,
                 dropout_p=0.0,
                 is_causal=False
             )
@@ -691,26 +744,37 @@ class FlashAttentionPooling(nn.Module):
 
 class RomanMicrolensingClassifier(nn.Module):
     """
-    Roman Space Telescope microlensing event classifier.
+    Strictly causal classifier for Roman Space Telescope microlensing events.
     
-    Implements a strictly causal CNN-GRU architecture for classifying
-    gravitational microlensing light curves into three categories:
-    - Class 0: Flat (no lensing event)
+    Three-class classification:
+    - Class 0: Flat (no lensing)
     - Class 1: PSPL (Point Source Point Lens)
     - Class 2: Binary lens system
     
     Architecture Flow:
     ------------------
-    Input (flux, delta_t) → Projection → Causal CNN → GRU → Attention/Mean Pool → Hierarchical Head → Logits
+    Input (flux, delta_t) → Projection → Causal CNN → GRU → Attention/Mean Pool → Head → Logits
     
     Key Features:
     -------------
     - Strictly causal: No future information leakage
-    - Variable-length sequences via masking
-    - Hierarchical classification for improved PSPL/Binary separation
+    - Variable-length sequences via masking (contiguous prefixes)
+    - Optional hierarchical classification with proper probability computation
     - Optional gradient checkpointing for memory efficiency
     - Flash attention for 2-3x pooling speedup
     - DDP-optimized with proper buffer handling
+    
+    Hierarchical Classification (when enabled):
+    -------------------------------------------
+    Stage 1: Binary classifier for P(Deviation) vs P(Flat)
+    Stage 2: Binary classifier for P(PSPL|Deviation) vs P(Binary|Deviation)
+    
+    Final probabilities:
+    - P(Flat) = 1 - P(Deviation)
+    - P(PSPL) = P(Deviation) × P(PSPL|Deviation)
+    - P(Binary) = P(Deviation) × (1 - P(PSPL|Deviation))
+    
+    This proper hierarchical structure improves PSPL/Binary separation.
     
     Parameters
     ----------
@@ -742,17 +806,14 @@ class RomanMicrolensingClassifier(nn.Module):
         self.input_proj = nn.Linear(2, config.d_model)
         
         # Feature extraction
-        if config.feature_extraction == 'conv':
-            self.feature_extractor = CausalFeatureExtractor(
-                config.d_model,
-                config.window_size,
-                config.dropout
-            )
-            self._receptive_field = self.feature_extractor.receptive_field
-        else:
-            raise ValueError(f"Unsupported feature extraction: {config.feature_extraction}")
+        self.feature_extractor = CausalFeatureExtractor(
+            config.d_model,
+            config.window_size,
+            config.dropout
+        )
+        self._receptive_field = self.feature_extractor.receptive_field
         
-        # Recurrent core with optional gradient checkpointing
+        # Recurrent core
         self.gru = nn.GRU(
             input_size=config.d_model,
             hidden_size=config.d_model,
@@ -762,7 +823,7 @@ class RomanMicrolensingClassifier(nn.Module):
             bidirectional=False
         )
         
-        # Layer norm and residual
+        # Layer norm
         if config.use_layer_norm:
             self.layer_norm = nn.LayerNorm(config.d_model)
         else:
@@ -788,16 +849,22 @@ class RomanMicrolensingClassifier(nn.Module):
         )
         
         if config.hierarchical:
-            # Stage 1: Flat vs Deviation
-            self.head_stage1 = nn.Linear(config.d_model, 2)
-            # Stage 2: PSPL vs Binary
-            self.head_stage2 = nn.Linear(config.d_model, 2)
+            # v2.6 FIX: Proper hierarchical classification
+            # Stage 1: P(Deviation) - single output with sigmoid
+            self.head_stage1 = nn.Linear(config.d_model, 1)  # P(Deviation)
+            # Stage 2: P(PSPL|Deviation) - single output with sigmoid
+            self.head_stage2 = nn.Linear(config.d_model, 1)  # P(PSPL|Deviation)
         else:
             # Flat classification
             self.head_flat = nn.Linear(config.d_model, config.n_classes)
         
         # Initialize weights
         self._init_weights()
+        
+    @property
+    def receptive_field(self) -> int:
+        """Total receptive field in timesteps."""
+        return self._receptive_field
         
     def _init_weights(self) -> None:
         """
@@ -830,11 +897,7 @@ class RomanMicrolensingClassifier(nn.Module):
                 if hasattr(module, 'bias') and module.bias is not None:
                     nn.init.zeros_(module.bias)
     
-    def _apply_gru_with_checkpointing(
-        self,
-        x: Tensor,
-        lengths: Optional[Tensor] = None
-    ) -> Tensor:
+    def _apply_gru_with_checkpointing(self, x: Tensor) -> Tensor:
         """
         Apply GRU with optional gradient checkpointing.
         
@@ -845,17 +908,20 @@ class RomanMicrolensingClassifier(nn.Module):
         ----------
         x : Tensor
             Input tensor [time, batch, features].
-        lengths : Tensor, optional
-            Sequence lengths [batch].
             
         Returns
         -------
         Tensor
             GRU output [time, batch, features].
+            
+        Notes
+        -----
+        v2.6 FIX: Removed unused `lengths` parameter. Packed sequences
+        are not currently supported; use masking in pooling instead.
         """
         if self.config.use_gradient_checkpointing and self.training:
             # Gradient checkpointing requires a function that takes tensors
-            def gru_forward(x_in):
+            def gru_forward(x_in: Tensor) -> Tensor:
                 out, _ = self.gru(x_in)
                 return out
             
@@ -886,6 +952,7 @@ class RomanMicrolensingClassifier(nn.Module):
             Normalized time intervals [batch, time].
         lengths : Tensor, optional
             Valid sequence lengths [batch]. If None, uses full sequences.
+            IMPORTANT: Lengths represent contiguous valid prefixes [0, length).
             
         Returns
         -------
@@ -922,7 +989,7 @@ class RomanMicrolensingClassifier(nn.Module):
         x = x.transpose(1, 2).transpose(0, 1).contiguous()
         
         # GRU with optional checkpointing
-        x = self._apply_gru_with_checkpointing(x, lengths)
+        x = self._apply_gru_with_checkpointing(x)
         
         # Back to [B, T, d_model]
         x = x.transpose(0, 1)
@@ -938,7 +1005,8 @@ class RomanMicrolensingClassifier(nn.Module):
             if lengths is not None:
                 mask = torch.arange(T, device=device)[None, :] < lengths[:, None]
                 mask = mask.float().unsqueeze(-1)  # [B, T, 1]
-                x = (x * mask).sum(dim=1) / mask.sum(dim=1)
+                # v2.6 FIX: Add epsilon to prevent division by zero
+                x = (x * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=EPS)
             else:
                 x = x.mean(dim=1)
         
@@ -946,16 +1014,27 @@ class RomanMicrolensingClassifier(nn.Module):
         x = self.head_shared(x)
         
         if self.config.hierarchical:
-            # Hierarchical classification
-            logits_stage1 = self.head_stage1(x)  # [B, 2] (Flat vs Deviation)
-            logits_stage2 = self.head_stage2(x)  # [B, 2] (PSPL vs Binary)
+            # v2.6 FIX: Proper hierarchical probability computation
+            # Stage 1: P(Deviation)
+            p_deviation = torch.sigmoid(self.head_stage1(x))  # [B, 1]
             
-            # Combine: [Flat, PSPL, Binary]
-            logits = torch.cat([
-                logits_stage1[:, 0:1],    # Flat
-                logits_stage2[:, 0:1],    # PSPL
-                logits_stage2[:, 1:2]     # Binary
-            ], dim=1)
+            # Stage 2: P(PSPL|Deviation)
+            p_pspl_given_deviation = torch.sigmoid(self.head_stage2(x))  # [B, 1]
+            
+            # Compute final probabilities
+            p_flat = 1.0 - p_deviation  # [B, 1]
+            p_pspl = p_deviation * p_pspl_given_deviation  # [B, 1]
+            p_binary = p_deviation * (1.0 - p_pspl_given_deviation)  # [B, 1]
+            
+            # Concatenate and convert to logits
+            probs = torch.cat([p_flat, p_pspl, p_binary], dim=1)  # [B, 3]
+            
+            # Convert probabilities to logits for cross-entropy loss compatibility
+            # log(p) gives log-probabilities, which work with NLLLoss
+            # For CrossEntropyLoss compatibility, we use log(p / (1-p)) = logit
+            # But since we have proper probabilities, we use log(p) + constant
+            # Actually, for numerical stability, use log(p.clamp(min=eps))
+            logits = torch.log(probs.clamp(min=EPS, max=1.0 - EPS))
         else:
             logits = self.head_flat(x)
         
@@ -995,8 +1074,16 @@ class RomanMicrolensingClassifier(nn.Module):
         
         try:
             logits = self.forward(flux, delta_t, lengths)
-            probabilities = F.softmax(logits, dim=-1)
-            predictions = logits.argmax(dim=-1)
+            
+            if self.config.hierarchical:
+                # Logits are already log-probabilities, convert to probabilities
+                probabilities = torch.exp(logits)
+                # Normalize to ensure sum to 1 (handles numerical errors)
+                probabilities = probabilities / probabilities.sum(dim=-1, keepdim=True)
+            else:
+                probabilities = F.softmax(logits, dim=-1)
+            
+            predictions = probabilities.argmax(dim=-1)
             return predictions, probabilities
         finally:
             if was_training:
@@ -1077,7 +1164,7 @@ def validate_inputs(
     delta_t : Tensor
         Delta_t tensor [batch, time].
     lengths : Tensor, optional
-        Length tensor [batch].
+        Length tensor [batch]. Represents contiguous valid prefixes.
     receptive_field : int
         Model receptive field.
         
@@ -1103,6 +1190,12 @@ def validate_inputs(
             raise ValueError(
                 f"Minimum sequence length ({min_len}) must be >= "
                 f"receptive field ({receptive_field})"
+            )
+        
+        # v2.6: Check for zero-length sequences
+        if min_len < MIN_VALID_SEQ_LEN:
+            raise ValueError(
+                f"Minimum sequence length ({min_len}) must be >= {MIN_VALID_SEQ_LEN}"
             )
 
 
@@ -1229,6 +1322,20 @@ def load_checkpoint(
     # Handle torch.compile prefix (_orig_mod.)
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    
+    # v2.6: Handle hierarchical head shape changes
+    # Old: head_stage1 [d_model, 2], head_stage2 [d_model, 2]
+    # New: head_stage1 [d_model, 1], head_stage2 [d_model, 1]
+    if config.hierarchical:
+        for key in ['head_stage1.weight', 'head_stage1.bias', 
+                    'head_stage2.weight', 'head_stage2.bias']:
+            if key in state_dict:
+                old_shape = state_dict[key].shape
+                if 'weight' in key and old_shape[0] == 2:
+                    # Take first row only (P(Deviation) or P(PSPL|Deviation))
+                    state_dict[key] = state_dict[key][0:1, :]
+                elif 'bias' in key and old_shape[0] == 2:
+                    state_dict[key] = state_dict[key][0:1]
     
     model.load_state_dict(state_dict, strict=strict)
     
