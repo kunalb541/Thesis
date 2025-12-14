@@ -30,6 +30,12 @@ Scientific Visualization
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options (IBM/Wong standard)
 
+Fixes Applied (v2.6 - Hierarchical Mode Compatibility)
+------------------------------------------------------
+    * CRITICAL FIX: Probability computation in run_inference() now correctly handles
+      hierarchical mode by using torch.exp() instead of F.softmax() (S0-2)
+    * Hierarchical mode outputs log-probabilities, not logits; softmax was incorrect
+
 Fixes Applied (v2.5 - Complete Documentation & Robustness)
 -----------------------------------------------------------
     * CRITICAL: Complete docstring coverage (100%) for all methods
@@ -111,7 +117,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 # =============================================================================
 # CONSTANTS
@@ -989,7 +995,17 @@ def run_inference(
             
             # Forward pass
             logits = model(flux_batch, delta_t_batch, lengths=None)
-            probs = F.softmax(logits, dim=-1)
+            
+            # v2.6 FIX (S0-2): Correct probability computation for hierarchical mode
+            # Check if model is in hierarchical mode
+            is_hierarchical = (hasattr(model, 'config') and model.config.hierarchical)
+            if is_hierarchical:
+                # logits are log-probabilities, convert to probabilities
+                probs = torch.exp(logits)
+                # Renormalize to handle numerical errors
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(logits, dim=-1)
             
             # Store results
             all_logits[i:end_idx] = logits.cpu().numpy()
