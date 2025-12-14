@@ -191,7 +191,6 @@ salloc --partition=gpu_a100_short --nodes=12 --gres=gpu:4 --exclusive --time=00:
 cd ~/Thesis/code
 conda activate microlens
 
-
 export PYTHONWARNINGS="ignore"
 export TORCH_SHOW_CPP_STACKTRACES=0
 export TORCH_DISTRIBUTED_DEBUG=OFF
@@ -210,15 +209,32 @@ export MASTER_PORT=29500
 export NCCL_ALGO=TREE
 
 srun torchrun \
-  --nnodes=12 \
+  --nnodes=10 \
   --nproc-per-node=4 \
   --rdzv-backend=c10d \
   --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
   --rdzv-id="train-$(date +%s)" \
   train.py \
   --data ../data/raw/distinct.h5 \
+  --output ../results/distinct \
+  --experiment-name distinct \
+  --epochs 50 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --weight-decay 1e-3 \
+  --warmup-epochs 3 \
+  --clip-norm 1.0 \
+  --d-model 8 \
+  --n-layers 2 \
+  --window-size 5 \
+  --dropout 0.1 \
+  --num-workers 8 \
   --prefetch-factor 12 \
-  --experiment-name distinct
+  --hierarchical \
+  --attention-pooling \
+  --use-prefetcher \
+  --save-every 5 \
+  --save-best
 ```
 
 ### Checkpoint Resumption 
