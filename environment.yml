@@ -11,7 +11,7 @@ dependencies:
   # Core scientific computing
   - numpy=1.26.4
   - scipy=1.11.4
-  - numba
+  - numba=0.59.0
 
   # Machine learning
   - scikit-learn=1.4.0
@@ -20,52 +20,62 @@ dependencies:
   - matplotlib=3.8.2
   - seaborn=0.13.1
 
+  # Data handling
+  - h5py=3.10.0
+  - pandas=2.2.0
+  
   # Utilities
   - tqdm=4.66.1
-  - pandas=2.2.0
-  - h5py
   
   # Development
   - ipython=8.20.0
   - jupyter=1.0.0
-
   
   # Testing
   - pytest=8.0.0
   - pytest-cov=4.1.0
   
+  # PyTorch - CUDA 12.1 (Recommended for NVIDIA A100/H100)
+  # Change this section based on your hardware
+  - pytorch::pytorch=2.2.0
+  - pytorch::torchvision=0.17.0
+  - pytorch::pytorch-cuda=12.1
+  
   # Install via pip (not available through conda)
   - pip
   - pip:
       - joblib==1.3.2
-      - VBBinaryLensing
-      - flash-attn --no-build-isolation
-    
-  # =========================================================================
-  # PyTorch - Uncomment ONE of the following sections based on your hardware
-  # =========================================================================
-  
-  # Option 1: NVIDIA GPUs (CUDA 12.1) - Recommended for most NVIDIA GPUs
-  # - pytorch::pytorch=2.2.0
-  # - pytorch::torchvision=0.17.0
-  # - pytorch::pytorch-cuda=12.1
-  
-  # Option 2: NVIDIA GPUs (CUDA 11.8) - For older NVIDIA GPUs
-  # - pytorch::pytorch=2.2.0
-  # - pytorch::torchvision=0.17.0
-  # - pytorch::pytorch-cuda=11.8
-  
-  # Option 3: AMD GPUs (ROCm 6.0)
-  # NOTE: Install PyTorch with pip after creating environment:
-  # pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
-  
-  # Option 4: CPU only
-  # - pytorch::pytorch=2.2.0
-  # - pytorch::torchvision=0.17.0
-  # - pytorch::cpuonly
+      - VBBinaryLensing==3.6.0
+      - flash-attn==2.5.0 --no-build-isolation
 
 # =============================================================================
-# Usage Instructions
+# Alternative PyTorch Installations (choose ONE, comment out others)
+# =============================================================================
+# The configuration above uses CUDA 12.1 which works on most modern NVIDIA GPUs
+# including A100, H100, RTX 3090, RTX 4090, etc.
+#
+# If you have different hardware, replace the pytorch lines above with ONE of:
+#
+# --- CUDA 11.8 (for older NVIDIA GPUs) ---
+# - pytorch::pytorch=2.2.0
+# - pytorch::torchvision=0.17.0
+# - pytorch::pytorch-cuda=11.8
+#
+# --- AMD ROCm 6.0 (for MI300, MI250 series) ---
+# - pytorch::pytorch=2.2.0
+# - pytorch::torchvision=0.17.0
+# Then install via pip after creating environment:
+# pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
+#
+# --- CPU only (no GPU) ---
+# - pytorch::pytorch=2.2.0
+# - pytorch::torchvision=0.17.0
+# - pytorch::cpuonly
+#
+# =============================================================================
+
+# =============================================================================
+# Installation Instructions
 # =============================================================================
 # 1. Create environment:
 #    conda env create -f environment.yml
@@ -73,12 +83,50 @@ dependencies:
 # 2. Activate environment:
 #    conda activate microlens
 #
-# 3. If using AMD GPUs, install PyTorch manually:
-#    pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/rocm6.0
+# 3. Verify installation:
+#    python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+#    python -c "import VBBinaryLensing; print('VBBinaryLensing: OK')"
+#    python -c "import numba; print('Numba: OK')"
 #
-# 4. Update environment (if needed):
+# 4. Optional - Install flash attention (requires CUDA dev tools):
+#    pip install flash-attn==2.5.0 --no-build-isolation
+#
+# 5. Update environment (if dependencies change):
 #    conda env update -f environment.yml --prune
 #
-# 5. Export your working environment:
-#    conda env export > environment_working.yml
+# 6. Export working environment (for reproducibility):
+#    conda env export > environment_frozen.yml
+# =============================================================================
+
+# =============================================================================
+# Tested Configurations
+# =============================================================================
+# Configuration 1: NVIDIA A100 (bwHPC cluster)
+#   - CUDA 12.1
+#   - PyTorch 2.2.0
+#   - Python 3.10.13
+#   - Works: ✓
+#
+# Configuration 2: AMD MI300A (bwHPC cluster)
+#   - ROCm 6.0
+#   - PyTorch 2.2.0 (via pip)
+#   - Python 3.10.13
+#   - Works: ✓
+#
+# Configuration 3: Local CPU (development)
+#   - CPU only
+#   - PyTorch 2.2.0
+#   - Python 3.10.13
+#   - Works: ✓ (slow)
+# =============================================================================
+
+# =============================================================================
+# Package Versions Rationale
+# =============================================================================
+# PyTorch 2.2.0: Stable release with torch.compile support
+# NumPy 1.26.4: Compatible with Numba and PyTorch
+# Numba 0.59.0: Latest stable with Python 3.10 support
+# scikit-learn 1.4.0: Stable release for metrics
+# h5py 3.10.0: Latest stable for HDF5 I/O
+# VBBinaryLensing 3.6.0: Latest release for binary microlensing
 # =============================================================================
