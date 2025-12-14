@@ -30,7 +30,7 @@ Scientific Visualization
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options (IBM/Wong standard)
 
-Fixes Applied (v2.6 - Complete Documentation & Robustness)
+Fixes Applied (v2.5 - Complete Documentation & Robustness)
 -----------------------------------------------------------
     * CRITICAL: Complete docstring coverage (100%) for all methods
     * CRITICAL: Enhanced error handling in parameter extraction with detailed messages
@@ -41,13 +41,13 @@ Fixes Applied (v2.6 - Complete Documentation & Robustness)
     * MINOR: Better handling of edge cases (empty data, malformed HDF5)
     * MINOR: Validation of all numerical values (NaN, inf checking)
     
-    Previous fixes (v2.5):
+    Previous fixes (v2.4):
     * CRITICAL: Fixed evolution plot x-axis to use time (days)
     * CRITICAL: All three panels share consistent x-axis (time in days)
     * MAJOR: Improved spacing and formatting to prevent label overlap
     * MAJOR: Explicit filtering of padded observations in evolution plots
     
-    Previous fixes (v2.4):
+    Previous fixes (v2.3):
     * CRITICAL: Fixed DDP/compile wrapper handling in checkpoint loading
     * CRITICAL: Hard failure on missing normalization statistics
     * CRITICAL: Reproducible seeding for subsampling
@@ -58,7 +58,7 @@ Fixes Applied (v2.6 - Complete Documentation & Robustness)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.6
+Version: 2.5
 """
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__ = "2.6.0"
+__version__ = "2.5.0"
 
 # =============================================================================
 # CONSTANTS
