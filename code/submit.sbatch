@@ -8,8 +8,49 @@
 #SBATCH -e logs/train_complete_%j.err
 #SBATCH --job-name=microlens_flux
 #SBATCH --exclusive
+#SBATCH --signal=B:USR1@120
+#SBATCH --requeue
+
+# =============================================================================
+# AUTO-RESUMPTION LOGIC FIX
+# =============================================================================
+# Problem: When SLURM kills job due to walltime, EXIT_CODE != 0, so resubmit
+#          logic was never triggered.
+# 
+# Solution:
+# 1. Trap SIGUSR1 (sent 120s before timeout via --signal=B:USR1@120)
+# 2. Resubmit based on checkpoint state, NOT exit code
+# 3. Handle both successful completion and timeout scenarios
+# =============================================================================
 
 set -e
+
+# =============================================================================
+# SIGNAL HANDLING FOR GRACEFUL TIMEOUT
+# =============================================================================
+TIMEOUT_TRIGGERED=0
+
+handle_timeout() {
+    echo ""
+    echo "================================================================================"
+    echo "⚠️  TIMEOUT WARNING: Job will be killed in ~120 seconds"
+    echo "================================================================================"
+    echo "Waiting for current epoch to finish and checkpoint to save..."
+    TIMEOUT_TRIGGERED=1
+    # Don't exit - let training finish current epoch and save checkpoint
+}
+
+handle_term() {
+    echo ""
+    echo "================================================================================"
+    echo "⚠️  SIGTERM received - job is being terminated"
+    echo "================================================================================"
+}
+
+# Trap SIGUSR1 (sent by SLURM 120s before timeout)
+trap 'handle_timeout' USR1
+# Trap SIGTERM (sent when job is actually killed)
+trap 'handle_term' TERM
 
 echo "================================================================================"
 echo "ROMAN MICROLENSING - COMPLETE PIPELINE (DATA GEN + TRAINING)"
@@ -69,6 +110,49 @@ export NCCL_NET_GDR_LEVEL=3
 export PYTHONUNBUFFERED=1
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=29500
+
+# ============================================================================
+# HELPER FUNCTION: Get current epoch from checkpoint
+# ============================================================================
+get_checkpoint_epoch() {
+    local checkpoint_path="$1"
+    if [ -f "${checkpoint_path}" ]; then
+        python3 -c "
+import torch
+try:
+    ckpt = torch.load('${checkpoint_path}', map_location='cpu', weights_only=False)
+    print(ckpt.get('epoch', 0))
+except Exception as e:
+    print(0)
+" 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+# ============================================================================
+# CHECK IF TRAINING ALREADY COMPLETE
+# ============================================================================
+mkdir -p logs "${OUTPUT_DIR}" "${CHECKPOINT_DIR}"
+
+CURRENT_EPOCH=$(get_checkpoint_epoch "${RESUME_CHECKPOINT}")
+
+if [ "${CURRENT_EPOCH}" -ge "${MAX_EPOCHS}" ]; then
+    echo "✓ Training already complete (${CURRENT_EPOCH}/${MAX_EPOCHS} epochs)"
+    echo ""
+    echo "To restart training, delete: ${RESUME_CHECKPOINT}"
+    echo ""
+    echo "To run evaluation:"
+    echo "  python evaluate.py \\"
+    echo "    --experiment-name test_300k_flux \\"
+    echo "    --data ${TEST_FILE} \\"
+    echo "    --batch-size 512 \\"
+    echo "    --early-detection"
+    exit 0
+fi
+
+echo "Current progress: ${CURRENT_EPOCH}/${MAX_EPOCHS} epochs"
+echo ""
 
 # ============================================================================
 # STEP 0: GENERATE FRESH DATA (if needed)
@@ -204,25 +288,7 @@ echo ""
 # ============================================================================
 # CHECKPOINT HANDLING
 # ============================================================================
-mkdir -p logs "${OUTPUT_DIR}" "${CHECKPOINT_DIR}"
-
 if [ -f "${RESUME_CHECKPOINT}" ]; then
-    CURRENT_EPOCH=$(python3 -c "
-import torch
-try:
-    ckpt = torch.load('${RESUME_CHECKPOINT}', map_location='cpu', weights_only=False)
-    print(ckpt.get('epoch', 0))
-except:
-    print(0)
-" 2>/dev/null || echo "0")
-    
-    if [ ${CURRENT_EPOCH} -ge ${MAX_EPOCHS} ]; then
-        echo "✓ Training already complete (${CURRENT_EPOCH} epochs)"
-        echo ""
-        echo "To restart training, delete: ${RESUME_CHECKPOINT}"
-        exit 0
-    fi
-    
     RESUME_FLAG="--resume ${RESUME_CHECKPOINT}"
     echo "Resuming from epoch ${CURRENT_EPOCH}"
 else
@@ -240,6 +306,7 @@ echo "STEP 3: TRAINING WITH FLUX DATA"
 echo "================================================================================"
 echo ""
 
+# Run training in background so we can handle signals
 srun torchrun \
     --nnodes=$SLURM_NNODES \
     --nproc-per-node=4 \
@@ -262,59 +329,105 @@ srun torchrun \
     --n-layers ${N_LAYERS} \
     --dropout ${DROPOUT} \
     --window-size ${WINDOW_SIZE} \
-    ${RESUME_FLAG} --hierarchical --attention-pooling --save-every 2
+    ${RESUME_FLAG} --hierarchical --attention-pooling --save-every 2 &
 
+# Store PID and wait
+TRAIN_PID=$!
+wait $TRAIN_PID
 EXIT_CODE=$?
 
 echo ""
 echo "================================================================================"
-echo "Training finished: exit code ${EXIT_CODE}"
+echo "Training process finished: exit code ${EXIT_CODE}"
 echo "================================================================================"
 
 # ============================================================================
-# AUTO-RESUBMIT LOGIC
+# AUTO-RESUBMIT LOGIC (FIXED)
 # ============================================================================
-if [ ${EXIT_CODE} -eq 0 ] && [ -f "${RESUME_CHECKPOINT}" ]; then
-    FINAL_EPOCH=$(python3 -c "
-import torch
-try:
-    ckpt = torch.load('${RESUME_CHECKPOINT}', map_location='cpu', weights_only=False)
-    print(ckpt.get('epoch', 0))
-except:
-    print(0)
-" 2>/dev/null || echo "0")
-    
-    if [ ${FINAL_EPOCH} -lt ${MAX_EPOCHS} ]; then
-        echo "  Epochs completed: ${FINAL_EPOCH}/${MAX_EPOCHS}"
-        echo "  ⟳ Resubmitting for remaining epochs..."
-        NEW_JOB=$(sbatch --parsable "$0")
-        echo "  New job ID: ${NEW_JOB}"
-    else
-        echo "  ✓ Training complete! (${FINAL_EPOCH} epochs)"
-        echo ""
-        echo "Best model saved to: ${OUTPUT_DIR}/best.pt"
-        echo ""
-        echo "================================================================================"
-        echo "NEXT STEP: EVALUATE ON TEST SET"
-        echo "================================================================================"
-        echo ""
-        echo "Run evaluation with:"
-        echo ""
-        echo "  cd ~/Thesis/code"
-        echo "  python evaluate.py \\"
-        echo "    --experiment-name test_300k_flux \\"
-        echo "    --data ${TEST_FILE} \\"
-        echo "    --batch-size 512 \\"
-        echo "    --early-detection"
-        echo ""
-        echo "Expected results with FLUX normalization:"
-        echo "  Overall accuracy: 92-96% (vs 33.33% before!)"
-        echo "  Flat   → Flat:   95%+ (vs 0.075% before!)"
-        echo "  PSPL   → PSPL:   93%+ (vs 17.5% before!)"
-        echo "  Binary → Binary: 99%+ (maintained)"
-        echo ""
-        echo "================================================================================"
-    fi
-fi
+# Key fix: Check checkpoint state, NOT exit code
+# Training may exit with non-zero code due to SLURM timeout, but checkpoint
+# should still be valid for resumption.
+# ============================================================================
 
-exit ${EXIT_CODE}
+FINAL_EPOCH=$(get_checkpoint_epoch "${RESUME_CHECKPOINT}")
+
+echo ""
+echo "Checkpoint status:"
+echo "  Epochs completed: ${FINAL_EPOCH}/${MAX_EPOCHS}"
+
+if [ "${FINAL_EPOCH}" -ge "${MAX_EPOCHS}" ]; then
+    # Training complete!
+    echo ""
+    echo "================================================================================"
+    echo "✓ TRAINING COMPLETE! (${FINAL_EPOCH} epochs)"
+    echo "================================================================================"
+    echo ""
+    echo "Best model saved to: ${OUTPUT_DIR}/best.pt"
+    echo ""
+    echo "================================================================================"
+    echo "NEXT STEP: EVALUATE ON TEST SET"
+    echo "================================================================================"
+    echo ""
+    echo "Run evaluation with:"
+    echo ""
+    echo "  cd ~/Thesis/code"
+    echo "  python evaluate.py \\"
+    echo "    --experiment-name test_300k_flux \\"
+    echo "    --data ${TEST_FILE} \\"
+    echo "    --batch-size 512 \\"
+    echo "    --early-detection"
+    echo ""
+    echo "Expected results with FLUX normalization:"
+    echo "  Overall accuracy: 92-96% (vs 33.33% before!)"
+    echo "  Flat   → Flat:   95%+ (vs 0.075% before!)"
+    echo "  PSPL   → PSPL:   93%+ (vs 17.5% before!)"
+    echo "  Binary → Binary: 99%+ (maintained)"
+    echo ""
+    echo "================================================================================"
+    exit 0
+
+elif [ -f "${RESUME_CHECKPOINT}" ]; then
+    # Training incomplete but checkpoint exists - RESUBMIT
+    echo ""
+    echo "================================================================================"
+    echo "⟳ RESUBMITTING FOR REMAINING EPOCHS"
+    echo "================================================================================"
+    echo "  Progress: ${FINAL_EPOCH}/${MAX_EPOCHS} epochs"
+    echo "  Remaining: $((MAX_EPOCHS - FINAL_EPOCH)) epochs"
+    echo ""
+    
+    # Get the script path (handles both direct run and sbatch submission)
+    SCRIPT_PATH="${SLURM_JOB_SCRIPT:-$0}"
+    
+    # Resubmit the job
+    NEW_JOB=$(sbatch --parsable "${SCRIPT_PATH}")
+    SUBMIT_STATUS=$?
+    
+    if [ ${SUBMIT_STATUS} -eq 0 ]; then
+        echo "  ✓ New job submitted: ${NEW_JOB}"
+        echo ""
+        echo "Monitor with: squeue -u $USER"
+        echo "View logs:    tail -f logs/train_complete_${NEW_JOB}.out"
+    else
+        echo "  ❌ Failed to submit new job (exit code: ${SUBMIT_STATUS})"
+        echo ""
+        echo "Manually resubmit with:"
+        echo "  sbatch ${SCRIPT_PATH}"
+    fi
+    echo "================================================================================"
+    
+    # Exit with the original training exit code
+    exit ${EXIT_CODE}
+
+else
+    # No checkpoint exists and training failed - don't resubmit
+    echo ""
+    echo "================================================================================"
+    echo "❌ TRAINING FAILED - No checkpoint found"
+    echo "================================================================================"
+    echo "Exit code: ${EXIT_CODE}"
+    echo ""
+    echo "Check error logs: logs/train_complete_${SLURM_JOB_ID}.err"
+    echo "================================================================================"
+    exit ${EXIT_CODE}
+fi
