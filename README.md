@@ -232,7 +232,6 @@ srun torchrun \
   --prefetch-factor 12 \
   --hierarchical \
   --attention-pooling \
-  --use-prefetcher \
   --save-every 5 
 ```
 
