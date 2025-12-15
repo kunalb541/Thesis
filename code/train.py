@@ -549,6 +549,7 @@ def create_dataloaders(
     prefetch_factor: int,
     is_ddp: bool,
     rank: int
+    use_compile: bool = False
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders with optimized settings.
@@ -565,7 +566,7 @@ def create_dataloaders(
         stats['flux_iqr'],
         stats['delta_t_median'],
         stats['delta_t_iqr'],
-        precompute_lengths=False  # FIX: See above  # v2.7: Enable pre-computed lengths
+        precompute_lengths=use_compile,
     )
     
     val_dataset = MicrolensingDatasetFast(
@@ -613,7 +614,8 @@ def create_dataloaders(
         persistent_workers=False,  # PATCHED: Disabled to prevent OOM
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         worker_init_fn=worker_init_fn,
-        drop_last=True  # v2.7: Consistent batch sizes
+        drop_last=True,
+        use_compile=args.compile
     )
     
     val_loader = DataLoader(
