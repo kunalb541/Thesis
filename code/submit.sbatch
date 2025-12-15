@@ -183,8 +183,7 @@ srun torchrun \
     --window-size ${WINDOW_SIZE} \
     --hierarchical \
     --attention-pooling \
-    --use-prefetcher \
-    --save-every 5 \
+    --save-every 2 \
     ${RESUME_FLAG}
 
 EXIT_CODE=$?
@@ -216,4 +215,3 @@ except:
 fi
 
 exit ${EXIT_CODE}
-
