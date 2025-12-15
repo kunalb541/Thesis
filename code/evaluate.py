@@ -125,43 +125,43 @@ __version__ = "2.6.0"
 # ============================================================================
 # FLUX TO MAGNITUDE CONVERSION FOR PLOTTING
 # ============================================================================
-def flux_to_mag_for_plot(flux_jy):
+def magnification_to_delta_mag(A):
     """
-    Convert flux (Jansky) to AB magnitude for plotting.
+    Convert magnification to delta magnitude for plotting.
+    
+    NOTE: With simulate.py v2.7, data contains MAGNIFICATIONS (A), not Jansky flux.
     
     Parameters
     ----------
-    flux_jy : np.ndarray or float
-        Flux values in Jansky
+    A : np.ndarray or float
+        Magnification values (A = flux_lensed / flux_unlensed)
+        A = 1.0 means baseline (no magnification)
+        A = 2.0 means 2x brighter
         
     Returns
     -------
     np.ndarray or float
-        AB magnitude values
+        Delta magnitude (Δm = -2.5 log10(A))
+        Δm = 0 means baseline
+        Δm < 0 means brighter (magnified)
     """
     import numpy as np
-    ROMAN_ZP_FLUX_JY = 3631.0
     with np.errstate(divide='ignore', invalid='ignore'):
-        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
-    mag = np.where(np.isfinite(mag), mag, 25.0)
-    return mag
+        delta_mag = -2.5 * np.log10(A)
+    # Handle masked values (A=0) and keep valid values
+    delta_mag = np.where((np.isfinite(delta_mag)) & (A > 0), delta_mag, 0.0)
+    return delta_mag
 
 
-def flux_to_mag_for_plot(flux_jy):
-    """Convert flux (Jansky) to AB magnitude for plotting."""
-    import numpy as np
-    ROMAN_ZP_FLUX_JY = 3631.0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
-    # Replace inf/nan with a reasonable value for plotting
-    mag = np.where(np.isfinite(mag), mag, 25.0)
-    return mag
+# Duplicate function removed - see magnification_to_delta_mag() above
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
-ROMAN_ZP_FLUX_JY: float = 3631.0  # AB magnitude zero-point in Jansky
+# NOTE: Data format changed in simulate.py v2.7
+# Data now contains MAGNIFICATIONS (A), not Jansky flux
+# A = 1.0 = baseline, A = 2.0 = 2x brighter, A = 10.0 = 10x brighter
 CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
 INVALID_TIMESTAMP: float = -999.0  # Explicit padding value for invalid observations
 
@@ -2060,7 +2060,7 @@ class RomanEvaluator:
                 flux_valid = flux[valid_mask]
                 
                 # Plot
-                ax.scatter(times_valid, flux_to_mag_for_plot(flux_valid), s=5)
+                ax.scatter(times_valid, magnification_to_delta_mag(flux_valid), s=5)
                 
                 # Formatting
                 ax.invert_yaxis()
@@ -2352,7 +2352,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.scatter(times_valid, flux_to_mag_for_plot(flux_valid), s=5)
+        ax1.scatter(times_valid, magnification_to_delta_mag(flux_valid), s=5)
         ax1.invert_yaxis()
         ax1.set_ylabel('Magnitude (AB)', fontsize=11)
         ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
