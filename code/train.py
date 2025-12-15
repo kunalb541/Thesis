@@ -1348,10 +1348,15 @@ def main():
     best_acc = 0.0
     if args.resume:
         if is_main_process(rank):
-            logger.info(f"Resuming from checkpoint: {args.resume}")
+            logger.info("=" * 80)
+            logger.info(f"RESUMING FROM CHECKPOINT: {args.resume}")
+            logger.info("=" * 80)
         start_epoch, best_acc = load_checkpoint_for_resume(
             args.resume, model, optimizer, scheduler, scaler, device
         )
+        if is_main_process(rank):
+            logger.info(f"✓ Resume successful: starting from epoch {start_epoch}, best_acc={100*best_acc:.2f}%")
+            logger.info("=" * 80)
     
     # v2.7.2: Final barrier before training
     if is_ddp:
@@ -1402,6 +1407,14 @@ def main():
             best_acc = val_results['accuracy']
         
         if is_main_process(rank):
+            # CRITICAL: Always save checkpoint_latest.pt for resumption
+            checkpoint_dir = output_dir / 'checkpoints'
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            save_checkpoint(
+                model, optimizer, scheduler, scaler, config, stats,
+                epoch, best_acc, checkpoint_dir / 'checkpoint_latest.pt'
+            )
+            
             if is_best:
                 save_checkpoint(
                     model, optimizer, scheduler, scaler, config, stats,
@@ -1419,6 +1432,13 @@ def main():
         save_checkpoint(
             model, optimizer, scheduler, scaler, config, stats,
             args.epochs, best_acc, output_dir / 'final.pt'
+        )
+        # Also update checkpoint_latest to final state
+        checkpoint_dir = output_dir / 'checkpoints'
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        save_checkpoint(
+            model, optimizer, scheduler, scaler, config, stats,
+            args.epochs, best_acc, checkpoint_dir / 'checkpoint_latest.pt'
         )
         logger.info("=" * 80)
         logger.info(f"Training complete! Best validation accuracy: {100*best_acc:.2f}%")
