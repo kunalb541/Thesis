@@ -53,13 +53,19 @@ Fixes Applied (v2.6)
 
 This module powers downstream ML pipelines such as CNN-GRU classifiers.
 
-IMPORTANT NOTE ON NAMING CONVENTION:
-------------------------------------
-The output array stored as 'flux' in HDF5 files actually contains AB MAGNITUDES,
-not flux values. This naming is maintained for backward compatibility with 
-existing train.py and evaluate.py pipelines. The relationship is:
-    mag = -2.5 * log10(flux_jy / 3631)
-    flux_jy = 3631 * 10^(-0.4 * mag)
+IMPORTANT: OUTPUT FORMAT (v2.7 - CNN-OPTIMIZED)
+------------------------------------------------
+The 'flux' array in HDF5 files contains NORMALIZED MAGNIFICATION:
+    - Baseline (unmagnified source): A = 1.0
+    - Magnified 2x: A = 2.0  
+    - Magnified 10x: A = 10.0
+    - Masked/missing observations: A = 0.0
+
+This is CNN-ready! Photon noise is applied as relative noise in magnification space,
+preserving physical realism while maintaining numerical stability for neural networks.
+
+Previous versions stored absolute flux in Jansky (~1e-5), which caused CNN training
+instability due to tiny numerical values.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
@@ -82,7 +88,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "2.6.0"
+__version__: Final[str] = "2.7.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -885,20 +891,28 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         raise ValueError(f"Unknown event type: {etype}")
     
-    # Apply photon noise
-    flux_true = f_base * A
-    noise = RomanWFI_F146.compute_photon_noise(flux_true)
-    flux_obs = flux_true + np.random.normal(0, noise * params['noise_scale'])
+    # v2.7 CRITICAL FIX: Apply photon noise in MAGNIFICATION space
+    # Convert absolute Jansky noise to relative magnification noise
+    flux_true_jy = f_base * A
+    noise_jy = RomanWFI_F146.compute_photon_noise(flux_true_jy)
+    noise_relative = noise_jy / f_base  # Noise as fraction of baseline
+    
+    # Add noise to magnification (not absolute flux)
+    # This preserves physical realism while maintaining numerical stability
+    A_noisy = A + np.random.normal(0, noise_relative * params['noise_scale'])
+    
+    # Clip to physical values (magnification should be >= 1.0, but allow slightly less due to noise)
+    A_noisy = np.maximum(A_noisy, 0.1)
     
     # Apply cadence mask (random missing observations)
     mask = np.random.random(n) > params['mask_prob']
-    flux_obs[~mask] = 0.0  
+    A_noisy[~mask] = 0.0  
     
     # Compute time differences between valid observations
     delta_t = compute_delta_t(t_grid, mask)
     
     return {
-        'flux': flux_obs.astype(np.float32),  # Actual flux values in Jansky
+        'flux': A_noisy.astype(np.float32),  # v2.7: NORMALIZED magnification (baseline=1.0)
         'delta_t': delta_t.astype(np.float32),
         'label': label,
         'params': meta
@@ -1149,13 +1163,16 @@ def main() -> None:
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'flux dataset contains actual flux values in Jansky'
+            'note': 'v2.7: flux dataset contains NORMALIZED MAGNIFICATION (baseline=1.0)'
         }
         f.attrs.update(metadata)
     
     print(f"Successfully saved {n_res} events to {out_path}")
     print(f"Class distribution: Flat={final_counts['flat']}, "
           f"PSPL={final_counts['pspl']}, Binary={final_counts['binary']}")
+    print(f"
+✓ Output format: NORMALIZED MAGNIFICATION (baseline=1.0)")
+    print(f"✓ Ready for CNN training - no additional normalization needed!")
 
 
 if __name__ == '__main__':
