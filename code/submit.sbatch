@@ -156,7 +156,8 @@ echo "==========================================================================
 # STEP 1: CLEAN OLD DATA FROM /tmp
 # ============================================================================
 echo "STEP 1: Cleaning old data from /tmp on all nodes..."
-srun --ntasks-per-node=1 rm -f ${LOCAL_FILE}
+# Use --ntasks=$SLURM_NNODES to ensure exactly 1 task per node
+srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 rm -f ${LOCAL_FILE}
 echo "✓ Old data deleted"
 echo ""
 
@@ -168,9 +169,10 @@ echo "  Source: $SOURCE_FILE"
 echo "  Dest:   $LOCAL_FILE"
 echo ""
 
-srun --ntasks-per-node=1 sh -c "
+# Use --ntasks=$SLURM_NNODES to ensure exactly 1 task per node
+srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 sh -c "
   echo \"[\$(hostname)] Copying to /tmp...\"
-  cp $SOURCE_FILE ${LOCAL_FILE}
+  cp -f $SOURCE_FILE ${LOCAL_FILE}
   echo \"[\$(hostname)] ✓ Copy complete\"
 "
 
