@@ -430,7 +430,7 @@ class MicrolensingDatasetFast(Dataset):
         # Load raw data
         flux_raw = self._file['flux'][actual_idx].copy()
         delta_t_raw = self._file['delta_t'][actual_idx].copy()
-        label = int(self._file['label'][actual_idx])
+        label = int(self._file['labels'][actual_idx])
         
         # v2.7.1 CRITICAL FIX (S0-NEW-1): SEQUENCE COMPACTION
         # ====================================================
