@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 10
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
@@ -39,9 +39,9 @@ cd ~/Thesis/code
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-SOURCE_FILE="$HOME/Thesis/data/raw/train_1M_distinct.h5"
-TEST_FILE="$HOME/Thesis/data/test/test_300k_distinct.h5"
-LOCAL_FILE="/tmp/train_1M_distinct_${USER}.h5"
+SOURCE_FILE="$HOME/Thesis/data/raw/train.h5"
+TEST_FILE="$HOME/Thesis/data/test/test.h5"
+LOCAL_FILE="/tmp/train_${USER}.h5"
 OUTPUT_DIR="../results"
 CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
@@ -50,14 +50,14 @@ CONTINUATION_JOB_FILE="${CHECKPOINT_DIR}/.continuation_job_id"
 # Training hyperparameters
 BATCH_SIZE=64
 NUM_WORKERS=0
-ACCUMULATION_STEPS=2
-MAX_EPOCHS=30
+ACCUMULATION_STEPS=4
+MAX_EPOCHS=300
 
 # Model architecture
-D_MODEL=256
+D_MODEL=64
 N_LAYERS=4
 DROPOUT=0.3
-WINDOW_SIZE=7
+WINDOW_SIZE=5
 
 # Optimization
 LEARNING_RATE=0.0005
@@ -203,9 +203,9 @@ if [ ! -f "${SOURCE_FILE}" ]; then
         --n_flat 333334 \
         --n_pspl 333333 \
         --n_binary 333333 \
-        --binary_preset distinct \
+        --binary_preset baseline \
         --output ${SOURCE_FILE} \
-        --num_workers 32 \
+        --num_workers 100 \
         --seed 42
     
     echo "✓ Training data generated: ${SOURCE_FILE}"
@@ -227,7 +227,7 @@ if [ ! -f "${TEST_FILE}" ]; then
         --n_binary 100000 \
         --binary_preset distinct \
         --output ${TEST_FILE} \
-        --num_workers 32 \
+        --num_workers 100 \
         --seed 999
     
     echo "✓ Test data generated: ${TEST_FILE}"
