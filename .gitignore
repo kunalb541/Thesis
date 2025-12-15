@@ -19,51 +19,70 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual environments
 venv/
 ENV/
 env/
+.venv
 
-# PyTorch
-*.pth
-*.ckpt
-*.pt
-
-# Training artifacts
-runs/
-logs/
-lightning_logs/
-tensorboard/
-wandb/
-
-# Data
-data/
-*.fits
-*.hdf5
-*.h5
-
-# Cache
-index.pkl
-index.pkl.lock
-*.pyc
-
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
 
-# OS
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Data files
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# Model checkpoints (but allow best_model.pt in results)
+*.pth
+*.pt
+!results/**/best_model.pt
+
+# Logs
+*.log
+logs/
+*.out
+*.err
+
+# Results directory - FIXED TO ALLOW PNG AND JSON FILES
+results/*
+!results/.gitkeep
+!results/*/
+!results/**/
+!results/**/*.png
+!results/**/*.jpg
+!results/**/*.jpeg
+!results/**/*.json
+!results/**/*.txt
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# System files
 .DS_Store
 Thumbs.db
 
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
+# Large data directories
+data/raw/*.npz
+data/processed/*.npz
 
-# Output
-submissions/
-predictions/
-*.csv
+# But keep example data
+!data/raw/example.npz
+!data/processed/example.npz
