@@ -1,26 +1,50 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Classifier Training - ULTRA-FAST RAM Loading
-================================================================
+Roman Microlensing Classifier Training Engine - ULTRA-FAST Edition
+===================================================================
 
-MODIFICATIONS FROM ORIGINAL train.py:
-    - RAMLensingDataset: Loads entire HDF5/NPZ into RAM for 0.2-0.5 s/batch
-    - Supports both HDF5 and NPZ formats (auto-detection)
-    - Same CNN-GRU architecture from model.py (NOT Transformer!)
-    - All other functionality preserved exactly
+High-performance distributed training pipeline with RAM-based data loading for
+classifying Nancy Grace Roman Space Telescope gravitational microlensing light
+curves into Flat, PSPL (Point Source Point Lens), and Binary classes.
+    
+**v2.8.0 Fixes**:
+    - Checkpoint key 'model_config' (not 'config') for model.py compatibility
+    - Argument parsing: --no-class-weights and --no-prefetcher flags
+    - checkpoint_latest.pt saved after every epoch for resumption
+    - torch.compile error handling with graceful fallback
+    - DDP cleanup in try/finally block to prevent hanging
+    - Window size default changed to 7 (matches sbatch)
 
-ARCHITECTURE (from model.py):
-    - Causal CNN (depthwise separable convolutions)
-    - Multi-layer GRU
-    - Flash attention pooling
-    - Hierarchical classification
+**v2.7.2 Fixes**:
+    - Explicit DDP init_method with TCP store
+    - NCCL timeout configurations (600s, 300s socket timeout)
+    - MASTER_ADDR/MASTER_PORT validation
+    - Barrier synchronization before data loading
+    - Process group health checks
 
-PERFORMANCE:
-    - RAM loading: 0.2-0.5 s/batch (vs 2-12 s/batch on disk)
-    - Full 100 epochs: ~3-5 hours (vs 37-133 hours)
-    - Speedup: 10-50× faster!
+**v2.7.1 Fixes**:
+    - S0-NEW-1: Sequence compaction enforcing contiguous prefix assumption
+      * Valid observations moved to positions [0, length)
+      * Eliminates fake observations from scattered missing data
+      * Ensures mean pooling doesn't include invalid positions
 
-Version: 2.8.0-ultra-fast
+**v2.6 Fixes**:
+    - S0-1: Hierarchical mode uses F.nll_loss() (model outputs log-probs)
+    - S0-2: Probability computation uses torch.exp() for hierarchical mode
+    - S1-1: Validation sampler.set_epoch() called for proper DDP
+    - S1-3: Minimum sequence length of 1
+
+**v2.7 Optimizations**:
+    - GPU-side metric accumulation (no .item() in training loop)
+    - Pre-computed sequence lengths in dataset
+    - Fused normalization operations
+    - Optimized dataloader with drop_last=True
+    - torch.compile fullgraph support
+    
+Author: Kunal Bhatia
+Institution: University of Heidelberg
+Version: 2.8.0
+Date: December 2024
 """
 
 from __future__ import annotations
@@ -57,7 +81,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-__version__ = "2.8.0-ultra-fast"
+__version__ = "2.8.0"
 
 # =============================================================================
 # ENVIRONMENT CONFIGURATION
