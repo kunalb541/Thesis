@@ -837,6 +837,14 @@ def setup_ddp() -> Tuple[int, int, int, torch.device]:
             logger.info(f"  MASTER_PORT: {master_port}")
             logger.info("=" * 80)
         
+        # CRITICAL FIX: Set CUDA device BEFORE init_process_group
+        # This ensures each process binds to its own GPU (0,1,2,3 per node)
+        # Without this, all processes default to GPU 0 causing "Duplicate GPU" errors
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            if rank == 0:
+                logger.info(f"✓ Set CUDA device to: cuda:{local_rank}")
+        
         try:
             init_method = f'tcp://{master_addr}:{master_port}'
             
@@ -848,10 +856,12 @@ def setup_ddp() -> Tuple[int, int, int, torch.device]:
                 timeout=timedelta(minutes=DDP_INIT_TIMEOUT_MINUTES)
             )
             
-            dist.barrier(device_ids=[local_rank])
+            # CRITICAL FIX: Remove device_ids parameter (redundant after set_device)
+            dist.barrier()
             
             if rank == 0:
                 logger.info("✓ DDP initialization complete!")
+                logger.info(f"  CUDA device name: {torch.cuda.get_device_name(local_rank)}")
                 
         except Exception as e:
             logger.error(f"DDP initialization failed: {e}")
@@ -862,7 +872,6 @@ def setup_ddp() -> Tuple[int, int, int, torch.device]:
         world_size = 1
     
     if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
         device = torch.device(f'cuda:{local_rank}')
     else:
         device = torch.device('cpu')
