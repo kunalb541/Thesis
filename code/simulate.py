@@ -1170,8 +1170,6 @@ def main() -> None:
     print(f"Successfully saved {n_res} events to {out_path}")
     print(f"Class distribution: Flat={final_counts['flat']}, "
           f"PSPL={final_counts['pspl']}, Binary={final_counts['binary']}")
-    print(f"
-✓ Output format: NORMALIZED MAGNIFICATION (baseline=1.0)")
     print(f"✓ Ready for CNN training - no additional normalization needed!")
 
 
