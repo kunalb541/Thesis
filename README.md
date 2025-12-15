@@ -234,7 +234,6 @@ srun torchrun \
   --attention-pooling \
   --use-prefetcher \
   --save-every 5 \
-  --save-best
 ```
 
 ### Checkpoint Resumption 
