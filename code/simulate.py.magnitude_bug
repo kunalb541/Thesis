@@ -901,7 +901,7 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     delta_t = compute_delta_t(t_grid, mask)
     
     return {
-        'flux': flux_obs.astype(np.float32),  # Actual flux values in Jansky
+        'flux': mag_obs.astype(np.float32),  # Named 'flux' for compatibility, contains magnitudes
         'delta_t': delta_t.astype(np.float32),
         'label': label,
         'params': meta
@@ -1152,7 +1152,7 @@ def main() -> None:
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'flux dataset contains actual flux values in Jansky'
+            'note': 'flux dataset contains AB magnitudes (not flux) for backward compatibility'
         }
         f.attrs.update(metadata)
     
