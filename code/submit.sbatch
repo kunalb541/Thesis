@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 4
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
@@ -60,7 +60,7 @@ CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
 
 # Training hyperparameters
-BATCH_SIZE=256
+BATCH_SIZE=64
 NUM_WORKERS=0              # No workers needed with RAM loading!
 PREFETCH_FACTOR=4
 ACCUMULATION_STEPS=2
