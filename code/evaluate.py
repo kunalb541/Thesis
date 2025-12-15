@@ -119,6 +119,44 @@ warnings.filterwarnings("ignore")
 
 __version__ = "2.6.0"
 
+
+# Flux to magnitude conversion for plotting
+
+# ============================================================================
+# FLUX TO MAGNITUDE CONVERSION FOR PLOTTING
+# ============================================================================
+def flux_to_mag_for_plot(flux_jy):
+    """
+    Convert flux (Jansky) to AB magnitude for plotting.
+    
+    Parameters
+    ----------
+    flux_jy : np.ndarray or float
+        Flux values in Jansky
+        
+    Returns
+    -------
+    np.ndarray or float
+        AB magnitude values
+    """
+    import numpy as np
+    ROMAN_ZP_FLUX_JY = 3631.0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
+    mag = np.where(np.isfinite(mag), mag, 25.0)
+    return mag
+
+
+def flux_to_mag_for_plot(flux_jy):
+    """Convert flux (Jansky) to AB magnitude for plotting."""
+    import numpy as np
+    ROMAN_ZP_FLUX_JY = 3631.0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
+    # Replace inf/nan with a reasonable value for plotting
+    mag = np.where(np.isfinite(mag), mag, 25.0)
+    return mag
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -2022,7 +2060,7 @@ class RomanEvaluator:
                 flux_valid = flux[valid_mask]
                 
                 # Plot
-                ax.scatter(times_valid, flux_valid, s=5)
+                ax.scatter(times_valid, flux_to_mag_for_plot(flux_valid), s=5)
                 
                 # Formatting
                 ax.invert_yaxis()
@@ -2314,7 +2352,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
         # Panel 1: Light curve
-        ax1.scatter(times_valid, flux_valid, s=5)
+        ax1.scatter(times_valid, flux_to_mag_for_plot(flux_valid), s=5)
         ax1.invert_yaxis()
         ax1.set_ylabel('Magnitude (AB)', fontsize=11)
         ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 

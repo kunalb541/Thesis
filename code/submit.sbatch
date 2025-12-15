@@ -1,22 +1,18 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
 #SBATCH -N 12
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
-#SBATCH -o logs/train_ultrafast_%j.out
-#SBATCH -e logs/train_ultrafast_%j.err
-#SBATCH --job-name=microlens_ultra
+#SBATCH -o logs/train_complete_%j.out
+#SBATCH -e logs/train_complete_%j.err
+#SBATCH --job-name=microlens_flux
+#SBATCH --exclusive
 
 set -e
 
-# ============================================================================
-# ULTRA-FAST TRAINING: Copy to /tmp → Load into RAM
-# Expected: 0.2-0.5 s/batch (20× faster!)
-# ============================================================================
-
 echo "================================================================================"
-echo "ROMAN MICROLENSING CLASSIFIER - ULTRA-FAST (HDF5 → /tmp → RAM)"
+echo "ROMAN MICROLENSING - COMPLETE PIPELINE (DATA GEN + TRAINING)"
 echo "================================================================================"
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -24,47 +20,28 @@ conda activate microlens
 cd ~/Thesis/code
 
 # ============================================================================
-# STEP 1: Copy HDF5 to local /tmp on each node
+# CRITICAL: Set thread limits (fixes multiprocessing hang)
 # ============================================================================
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMBA_NUM_THREADS=1
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 SOURCE_FILE="$HOME/Thesis/data/raw/train_1M_distinct.h5"
+TEST_FILE="$HOME/Thesis/data/test/test_300k_distinct.h5"
 LOCAL_FILE="/tmp/train_1M_distinct_${USER}.h5"
-
-echo "STEP 1: Copying HDF5 to local /tmp on all nodes"
-echo "  Source: $SOURCE_FILE (on Lustre)"
-echo "  Dest:   $LOCAL_FILE (local storage)"
-echo ""
-
-# Copy to /tmp on ALL nodes in parallel
-srun --ntasks-per-node=1 sh -c "
-  if [ ! -f ${LOCAL_FILE} ]; then
-    echo \"[\$(hostname)] Copying to /tmp...\"
-    cp $SOURCE_FILE ${LOCAL_FILE}
-    echo \"[\$(hostname)] ✓ Copy complete\"
-  else
-    echo \"[\$(hostname)] ✓ File already in /tmp\"
-  fi
-"
-
-echo ""
-echo "✓ All nodes have HDF5 in /tmp"
-echo ""
-
-# ============================================================================
-# STEP 2: Load from /tmp into RAM and train
-# ============================================================================
-
-DATA_FILE="${LOCAL_FILE}"  # ← Use /tmp copy
 OUTPUT_DIR="../results"
 CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
 
 # Training hyperparameters
 BATCH_SIZE=64
-NUM_WORKERS=0              # No workers needed with RAM loading!
-PREFETCH_FACTOR=4
+NUM_WORKERS=0
 ACCUMULATION_STEPS=2
-MAX_EPOCHS=10
+MAX_EPOCHS=30
 
 # Model architecture
 D_MODEL=256
@@ -81,7 +58,6 @@ CLIP_NORM=1.0
 # ============================================================================
 # ENVIRONMENT
 # ============================================================================
-
 export PYTHONWARNINGS="ignore"
 export TORCH_SHOW_CPP_STACKTRACES=0
 export TORCH_CPP_LOG_LEVEL=ERROR
@@ -95,36 +71,137 @@ export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=29500
 
 # ============================================================================
+# STEP 0: GENERATE FRESH DATA (if needed)
+# ============================================================================
+echo "================================================================================"
+echo "STEP 0: DATA GENERATION"
+echo "================================================================================"
+
+if [ ! -f "${SOURCE_FILE}" ]; then
+    echo "Training data not found. Generating on one node (32 workers)..."
+    echo ""
+    
+    # Use first node for data generation
+    FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+    
+    srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
+        --n_flat 333334 \
+        --n_pspl 333333 \
+        --n_binary 333333 \
+        --binary_preset distinct \
+        --output ${SOURCE_FILE} \
+        --num_workers 32 \
+        --seed 42
+    
+    echo "✓ Training data generated: ${SOURCE_FILE}"
+else
+    echo "✓ Training data exists: ${SOURCE_FILE}"
+fi
+echo ""
+
+# Generate test data if needed
+if [ ! -f "${TEST_FILE}" ]; then
+    echo "Test data not found. Generating..."
+    mkdir -p $(dirname ${TEST_FILE})
+    
+    FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+    
+    srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
+        --n_flat 100000 \
+        --n_pspl 100000 \
+        --n_binary 100000 \
+        --binary_preset distinct \
+        --output ${TEST_FILE} \
+        --num_workers 32 \
+        --seed 999
+    
+    echo "✓ Test data generated: ${TEST_FILE}"
+else
+    echo "✓ Test data exists: ${TEST_FILE}"
+fi
+echo ""
+
+# Verify data contains flux (not magnitudes)
+echo "Verifying data contains FLUX (not magnitudes)..."
+python << 'PYEOF'
+import h5py
+import numpy as np
+import sys
+
+with h5py.File("../data/raw/train_1M_distinct.h5", 'r') as f:
+    flux = f['flux'][:]
+    
+flux_valid = flux[flux != 0]
+mean_val = np.mean(flux_valid)
+
+print(f"  Mean flux: {mean_val:.6f}")
+
+if 0 < mean_val < 10:
+    print("  ✓ Data contains FLUX (correct!)")
+else:
+    print(f"  ❌ Data contains MAGNITUDES (mean={mean_val:.2f})")
+    print("  ERROR: Regenerate data with fixed simulate.py!")
+    sys.exit(1)
+PYEOF
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Data verification failed!"
+    exit 1
+fi
+
+echo ""
+echo "================================================================================"
+
+# ============================================================================
+# STEP 1: CLEAN OLD DATA FROM /tmp
+# ============================================================================
+echo "STEP 1: Cleaning old data from /tmp on all nodes..."
+srun --ntasks-per-node=1 rm -f ${LOCAL_FILE}
+echo "✓ Old data deleted"
+echo ""
+
+# ============================================================================
+# STEP 2: Copy FRESH HDF5 to local /tmp on each node
+# ============================================================================
+echo "STEP 2: Copying FRESH data to /tmp on all nodes"
+echo "  Source: $SOURCE_FILE"
+echo "  Dest:   $LOCAL_FILE"
+echo ""
+
+srun --ntasks-per-node=1 sh -c "
+  echo \"[\$(hostname)] Copying to /tmp...\"
+  cp $SOURCE_FILE ${LOCAL_FILE}
+  echo \"[\$(hostname)] ✓ Copy complete\"
+"
+
+echo ""
+echo "✓ All nodes have FRESH FLUX data in /tmp"
+echo ""
+
+# ============================================================================
 # JOB INFO
 # ============================================================================
-
+echo "================================================================================"
+echo "TRAINING CONFIGURATION"
+echo "================================================================================"
 echo "Job Configuration:"
 echo "  Job ID:          $SLURM_JOB_ID"
 echo "  Nodes:           $SLURM_NNODES"
 echo "  GPUs:            $((SLURM_NNODES * 4))"
-echo "  Data source:     $DATA_FILE (local /tmp)"
-echo "  Workers/GPU:     $NUM_WORKERS (RAM loading mode!)"
 echo "  Batch size/GPU:  $BATCH_SIZE"
 echo "  Global batch:    $((SLURM_NNODES * 4 * BATCH_SIZE))"
+echo "  Max epochs:      $MAX_EPOCHS"
 echo ""
-echo "TWO-STEP ULTRA-FAST MODE:"
-echo "  ✓ STEP 1: HDF5 copied to local /tmp (eliminates Lustre)"
-echo "  ✓ STEP 2: Dataset loaded into RAM from /tmp (fast local read)"
-echo "  ✓ STEP 3: Training with zero I/O (pure RAM access)"
-echo ""
-echo "Expected performance:"
-echo "  Copy to /tmp:  30-60 seconds (one-time)"
-echo "  Load to RAM:   20-30 seconds (one-time)"
+echo "Performance expectations:"
 echo "  Batch time:    0.2-0.5 seconds"
-echo "  Epoch time:    1.5-3 minutes"
-echo "  100 epochs:    2.5-5 hours"
+echo "  Epoch time:    ~2 minutes"
+echo "  100 epochs:    ~3-4 hours"
 echo "================================================================================"
 echo ""
 
 # ============================================================================
 # CHECKPOINT HANDLING
 # ============================================================================
-
 mkdir -p logs "${OUTPUT_DIR}" "${CHECKPOINT_DIR}"
 
 if [ -f "${RESUME_CHECKPOINT}" ]; then
@@ -138,7 +215,9 @@ except:
 " 2>/dev/null || echo "0")
     
     if [ ${CURRENT_EPOCH} -ge ${MAX_EPOCHS} ]; then
-        echo "✓ Training complete (${CURRENT_EPOCH} epochs)"
+        echo "✓ Training already complete (${CURRENT_EPOCH} epochs)"
+        echo ""
+        echo "To restart training, delete: ${RESUME_CHECKPOINT}"
         exit 0
     fi
     
@@ -152,11 +231,12 @@ fi
 echo ""
 
 # ============================================================================
-# LAUNCH ULTRA-FAST TRAINING
+# STEP 3: LAUNCH TRAINING
 # ============================================================================
-
-echo "STEP 2: Loading from /tmp into RAM and starting training..."
 echo "================================================================================"
+echo "STEP 3: TRAINING WITH FLUX DATA"
+echo "================================================================================"
+echo ""
 
 srun torchrun \
     --nnodes=$SLURM_NNODES \
@@ -166,11 +246,10 @@ srun torchrun \
     --rdzv-id="train-$SLURM_JOB_ID" \
     --max-restarts=3 \
     train.py \
-    --data "${DATA_FILE}" \
+    --data "${LOCAL_FILE}" \
     --output "${OUTPUT_DIR}" \
     --batch-size ${BATCH_SIZE} \
     --num-workers ${NUM_WORKERS} \
-    --prefetch-factor ${PREFETCH_FACTOR} \
     --accumulation-steps ${ACCUMULATION_STEPS} \
     --epochs ${MAX_EPOCHS} \
     --lr ${LEARNING_RATE} \
@@ -181,10 +260,7 @@ srun torchrun \
     --n-layers ${N_LAYERS} \
     --dropout ${DROPOUT} \
     --window-size ${WINDOW_SIZE} \
-    --hierarchical \
-    --attention-pooling \
-    --save-every 2 \
-    ${RESUME_FLAG}
+    ${RESUME_FLAG} --hierarchical --attention-pooling --save-every 2
 
 EXIT_CODE=$?
 
@@ -193,7 +269,9 @@ echo "==========================================================================
 echo "Training finished: exit code ${EXIT_CODE}"
 echo "================================================================================"
 
-# Auto-resubmit if needed
+# ============================================================================
+# AUTO-RESUBMIT LOGIC
+# ============================================================================
 if [ ${EXIT_CODE} -eq 0 ] && [ -f "${RESUME_CHECKPOINT}" ]; then
     FINAL_EPOCH=$(python3 -c "
 import torch
@@ -205,12 +283,35 @@ except:
 " 2>/dev/null || echo "0")
     
     if [ ${FINAL_EPOCH} -lt ${MAX_EPOCHS} ]; then
+        echo "  Epochs completed: ${FINAL_EPOCH}/${MAX_EPOCHS}"
         echo "  ⟳ Resubmitting for remaining epochs..."
-        sbatch --parsable "$0"
+        NEW_JOB=$(sbatch --parsable "$0")
+        echo "  New job ID: ${NEW_JOB}"
     else
-        echo "  ✓ Training complete!"
+        echo "  ✓ Training complete! (${FINAL_EPOCH} epochs)"
         echo ""
-        echo "Best model saved to: ${CHECKPOINT_DIR}/checkpoint_best.pt"
+        echo "Best model saved to: ${OUTPUT_DIR}/best.pt"
+        echo ""
+        echo "================================================================================"
+        echo "NEXT STEP: EVALUATE ON TEST SET"
+        echo "================================================================================"
+        echo ""
+        echo "Run evaluation with:"
+        echo ""
+        echo "  cd ~/Thesis/code"
+        echo "  python evaluate.py \\"
+        echo "    --experiment-name test_300k_flux \\"
+        echo "    --data ${TEST_FILE} \\"
+        echo "    --batch-size 512 \\"
+        echo "    --early-detection"
+        echo ""
+        echo "Expected results with FLUX normalization:"
+        echo "  Overall accuracy: 92-96% (vs 33.33% before!)"
+        echo "  Flat   → Flat:   95%+ (vs 0.075% before!)"
+        echo "  PSPL   → PSPL:   93%+ (vs 17.5% before!)"
+        echo "  Binary → Binary: 99%+ (maintained)"
+        echo ""
+        echo "================================================================================"
     fi
 fi
 
