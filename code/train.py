@@ -578,13 +578,20 @@ def create_dataloaders(
         precompute_lengths=False  # FIX: See above
     )
     
+    if args.compile:
+        if is_main_process(rank):
+            logger.info(f"Compiling model with mode={args.compile_mode}...")
+        model = torch.compile(model, mode=args.compile_mode, fullgraph=False)
+
     if is_ddp:
-        train_sampler = DistributedSampler(
-            train_dataset,
-            shuffle=True,
-            seed=SEED,
-            drop_last=True
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=True,
+            gradient_as_bucket_view=True
         )
+        
         val_sampler = DistributedSampler(
             val_dataset,
             shuffle=False,
