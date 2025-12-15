@@ -520,7 +520,7 @@ def load_and_split_data(
     """Load data, compute stats, and create train/val split."""
     with h5py.File(hdf5_path, 'r') as f:
         total_samples = len(f['flux'])
-        all_labels = f['label'][:]
+        all_labels = f['labels'][:]
     
     # Compute statistics
     stats = compute_robust_statistics(hdf5_path, rank)
