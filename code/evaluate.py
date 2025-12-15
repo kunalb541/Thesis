@@ -611,10 +611,10 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     -------
     stats : dict
         Dictionary with keys:
-        - 'flux_median': Median flux value
-        - 'flux_iqr': Interquartile range of flux
-        - 'delta_t_median': Median delta_t value
-        - 'delta_t_iqr': Interquartile range of delta_t
+        - 'flux_mean': Median flux value
+        - 'flux_std': Interquartile range of flux
+        - 'delta_t_mean': Median delta_t value
+        - 'delta_t_std': Interquartile range of delta_t
         
     Raises
     ------
@@ -636,7 +636,7 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     --------
     >>> stats = load_normalization_stats(Path('best_model.pt'))
     >>> print(stats)
-    {'flux_median': 18.5, 'flux_iqr': 2.3, 'delta_t_median': 0.0084, 'delta_t_iqr': 0.015}
+    {'flux_mean': 18.5, 'flux_std': 2.3, 'delta_t_mean': 0.0084, 'delta_t_std': 0.015}
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -659,7 +659,7 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     stats_dict = checkpoint['stats']
     
     # Validate stats dictionary structure
-    required_keys = {'flux_median', 'flux_iqr', 'delta_t_median', 'delta_t_iqr'}
+    required_keys = {'flux_mean', 'flux_std', 'delta_t_mean', 'delta_t_std'}
     missing_keys = required_keys - set(stats_dict.keys())
     
     if missing_keys:
@@ -671,10 +671,10 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     
     # Extract and validate stats
     stats = {
-        'flux_median': float(stats_dict['flux_median']),
-        'flux_iqr': float(stats_dict['flux_iqr']),
-        'delta_t_median': float(stats_dict['delta_t_median']),
-        'delta_t_iqr': float(stats_dict['delta_t_iqr'])
+        'flux_mean': float(stats_dict['flux_mean']),
+        'flux_std': float(stats_dict['flux_std']),
+        'delta_t_mean': float(stats_dict['delta_t_mean']),
+        'delta_t_std': float(stats_dict['delta_t_std'])
     }
     
     # Validate numerical values
@@ -753,8 +753,8 @@ def load_and_prepare_data(
     
     Examples
     --------
-    >>> stats = {'flux_median': 18.5, 'flux_iqr': 2.3, 
-    ...          'delta_t_median': 0.0084, 'delta_t_iqr': 0.015}
+    >>> stats = {'flux_mean': 18.5, 'flux_std': 2.3, 
+    ...          'delta_t_mean': 0.0084, 'delta_t_std': 0.015}
     >>> flux, dt, labels, times, fmt = load_and_prepare_data(
     ...     Path('test.h5'), stats, n_samples=1000, seed=42
     ... )
@@ -886,13 +886,13 @@ def load_and_prepare_data(
         timestamps = timestamps[indices]
     
     # Normalize
-    flux_median = stats['flux_median']
-    flux_iqr = stats['flux_iqr']
-    delta_t_median = stats['delta_t_median']
-    delta_t_iqr = stats['delta_t_iqr']
+    flux_mean = stats['flux_mean']
+    flux_std = stats['flux_std']
+    delta_t_mean = stats['delta_t_mean']
+    delta_t_std = stats['delta_t_std']
     
-    flux_norm = (flux - flux_median) / (flux_iqr + EPS)
-    delta_t_norm = (delta_t - delta_t_median) / (delta_t_iqr + EPS)
+    flux_norm = (flux - flux_mean) / (flux_std + EPS)
+    delta_t_norm = (delta_t - delta_t_mean) / (delta_t_std + EPS)
     
     if logger:
         logger.info(f"Loaded {len(flux_norm)} samples")
@@ -1581,13 +1581,13 @@ class RomanEvaluator:
         self.logger.info("Loading normalization statistics...")
         stats = load_normalization_stats(checkpoint_path)
         
-        self.flux_median = stats['flux_median']
-        self.flux_iqr = stats['flux_iqr']
-        self.delta_t_median = stats['delta_t_median']
-        self.delta_t_iqr = stats['delta_t_iqr']
+        self.flux_mean = stats['flux_mean']
+        self.flux_std = stats['flux_std']
+        self.delta_t_mean = stats['delta_t_mean']
+        self.delta_t_std = stats['delta_t_std']
         
-        self.logger.info(f"  Flux: median={self.flux_median:.4f}, IQR={self.flux_iqr:.4f}")
-        self.logger.info(f"  Delta_t: median={self.delta_t_median:.6f}, IQR={self.delta_t_iqr:.6f}")
+        self.logger.info(f"  Flux: median={self.flux_mean:.4f}, IQR={self.flux_std:.4f}")
+        self.logger.info(f"  Delta_t: median={self.delta_t_mean:.6f}, IQR={self.delta_t_std:.6f}")
         
         # Load data
         self.logger.info("-" * 80)
@@ -2002,7 +2002,7 @@ class RomanEvaluator:
                 times = self.timestamps[idx]
                 
                 # Denormalize
-                flux = flux_norm * (self.flux_iqr + EPS) + self.flux_median
+                flux = flux_norm * (self.flux_std + EPS) + self.flux_mean
                 
                 # Filter padded observations (explicit check for both conditions)
                 valid_mask = (times != INVALID_TIMESTAMP) & (times > 0) & (flux != 0)
@@ -2303,7 +2303,7 @@ class RomanEvaluator:
                 probs_evolution[i] = probs.cpu().numpy()[0]
         
         # Denormalize for plotting
-        flux_denorm = flux_norm * (self.flux_iqr + EPS) + self.flux_median
+        flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
         
         # Filter valid observations (exclude padding: flux=0, invalid timestamps)
         valid_obs_mask = valid_mask & (flux_denorm != 0) & (flux_denorm != SimConfig.PAD_VALUE if 'SimConfig' in dir() else True)
@@ -2604,10 +2604,10 @@ class RomanEvaluator:
                 for i, name in enumerate(CLASS_NAMES)
             },
             'normalization': {
-                'flux_median': float(self.flux_median),
-                'flux_iqr': float(self.flux_iqr),
-                'delta_t_median': float(self.delta_t_median),
-                'delta_t_iqr': float(self.delta_t_iqr)
+                'flux_mean': float(self.flux_mean),
+                'flux_std': float(self.flux_std),
+                'delta_t_mean': float(self.delta_t_mean),
+                'delta_t_std': float(self.delta_t_std)
             },
             'metrics': self.metrics,
             'config': self.config_dict,
