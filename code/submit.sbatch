@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 4
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
@@ -16,7 +16,7 @@ set -e
 # ============================================================================
 
 echo "================================================================================"
-echo "ROMAN MICROLENSING CLASSIFIER - ULTRA-FAST (HDF5 → /tmp → RAM)"
+echo "ROMAN MICROLENSING CLASSIFIER 
 echo "================================================================================"
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -60,11 +60,11 @@ CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
 
 # Training hyperparameters
-BATCH_SIZE=128
+BATCH_SIZE=512
 NUM_WORKERS=0              # No workers needed with RAM loading!
 PREFETCH_FACTOR=2
 ACCUMULATION_STEPS=1
-MAX_EPOCHS=100
+MAX_EPOCHS=10
 
 # Model architecture
 D_MODEL=256
@@ -106,18 +106,6 @@ echo "  Data source:     $DATA_FILE (local /tmp)"
 echo "  Workers/GPU:     $NUM_WORKERS (RAM loading mode!)"
 echo "  Batch size/GPU:  $BATCH_SIZE"
 echo "  Global batch:    $((SLURM_NNODES * 4 * BATCH_SIZE))"
-echo ""
-echo "TWO-STEP ULTRA-FAST MODE:"
-echo "  ✓ STEP 1: HDF5 copied to local /tmp (eliminates Lustre)"
-echo "  ✓ STEP 2: Dataset loaded into RAM from /tmp (fast local read)"
-echo "  ✓ STEP 3: Training with zero I/O (pure RAM access)"
-echo ""
-echo "Expected performance:"
-echo "  Copy to /tmp:  30-60 seconds (one-time)"
-echo "  Load to RAM:   20-30 seconds (one-time)"
-echo "  Batch time:    0.2-0.5 seconds"
-echo "  Epoch time:    1.5-3 minutes"
-echo "  100 epochs:    2.5-5 hours"
 echo "================================================================================"
 echo ""
 

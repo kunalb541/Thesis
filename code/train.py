@@ -916,8 +916,7 @@ def main():
     
     if is_main_process(rank):
         logger.info("=" * 80)
-        logger.info(f"Roman Microlensing Classifier Training v{__version__}")
-        logger.info("ULTRA-FAST MODE: RAM Loading Enabled")
+        logger.info(f"Roman Microlensing Classifier Training")
         logger.info("=" * 80)
         logger.info(f"Device: {device}")
         logger.info(f"World size: {world_size}")
