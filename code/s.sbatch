@@ -4,18 +4,19 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
-#SBATCH -o logs/train_4n_local_%j.out
-#SBATCH -e logs/train_4n_local_%j.err
-#SBATCH --job-name=microlens_local
+#SBATCH -o logs/train_ultrafast_%j.out
+#SBATCH -e logs/train_ultrafast_%j.err
+#SBATCH --job-name=microlens_ultra
 
 set -e
 
 # ============================================================================
-# FIXED: COPY HDF5 TO LOCAL STORAGE FIRST (ELIMINATES LUSTRE BOTTLENECK)
+# ULTRA-FAST TRAINING: Copy to /tmp → Load into RAM
+# Expected: 0.2-0.5 s/batch (20× faster!)
 # ============================================================================
 
 echo "================================================================================"
-echo "ROMAN MICROLENSING CLASSIFIER - LOCAL STORAGE (LUSTRE BOTTLENECK FIX)"
+echo "ROMAN MICROLENSING CLASSIFIER - ULTRA-FAST (HDF5 → /tmp → RAM)"
 echo "================================================================================"
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -23,23 +24,22 @@ conda activate microlens
 cd ~/Thesis/code
 
 # ============================================================================
-# CRITICAL FIX: Copy HDF5 to local /tmp BEFORE training
+# STEP 1: Copy HDF5 to local /tmp on each node
 # ============================================================================
 
 SOURCE_FILE="$HOME/Thesis/data/raw/train_1M_distinct.h5"
-LOCAL_FILE="/tmp/train_1M_distinct.h5"
+LOCAL_FILE="/tmp/train_1M_distinct_${USER}.h5"
 
-echo "CRITICAL FIX: Copying HDF5 to local storage to eliminate Lustre I/O bottleneck"
+echo "STEP 1: Copying HDF5 to local /tmp on all nodes"
 echo "  Source: $SOURCE_FILE (on Lustre)"
-echo "  Dest:   $LOCAL_FILE (local SSD)"
+echo "  Dest:   $LOCAL_FILE (local storage)"
 echo ""
 
 # Copy to /tmp on ALL nodes in parallel
-echo "Copying to all nodes..."
 srun --ntasks-per-node=1 sh -c "
-  if [ ! -f /tmp/train_1M_distinct.h5 ]; then
-    echo \"[\$(hostname)] Copying HDF5 to /tmp...\"
-    cp $SOURCE_FILE /tmp/
+  if [ ! -f ${LOCAL_FILE} ]; then
+    echo \"[\$(hostname)] Copying to /tmp...\"
+    cp $SOURCE_FILE ${LOCAL_FILE}
     echo \"[\$(hostname)] ✓ Copy complete\"
   else
     echo \"[\$(hostname)] ✓ File already in /tmp\"
@@ -47,21 +47,21 @@ srun --ntasks-per-node=1 sh -c "
 "
 
 echo ""
-echo "✓ All nodes have local copy"
+echo "✓ All nodes have HDF5 in /tmp"
 echo ""
 
 # ============================================================================
-# USE LOCAL FILE FOR TRAINING
+# STEP 2: Load from /tmp into RAM and train
 # ============================================================================
 
-DATA_FILE="/tmp/train_1M_distinct.h5"  # ← THIS IS THE KEY FIX
+DATA_FILE="${LOCAL_FILE}"  # ← Use /tmp copy
 OUTPUT_DIR="../results"
 CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
 
 # Training hyperparameters
 BATCH_SIZE=128
-NUM_WORKERS=4              
+NUM_WORKERS=0              # No workers needed with RAM loading!
 PREFETCH_FACTOR=2
 ACCUMULATION_STEPS=1
 MAX_EPOCHS=100
@@ -87,15 +87,9 @@ export TORCH_SHOW_CPP_STACKTRACES=0
 export TORCH_CPP_LOG_LEVEL=ERROR
 export TORCH_DISTRIBUTED_DEBUG=OFF
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export TORCH_DISTRIBUTED_ACK_TIMEOUT=1800
-export TORCH_DISTRIBUTED_SEND_TIMEOUT=1200
 export NCCL_DEBUG=WARN
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=3
-export NCCL_P2P_LEVEL=5
-export NCCL_MIN_NCHANNELS=16
-export NCCL_ALGO=TREE
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
 export PYTHONUNBUFFERED=1
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=29500
@@ -108,13 +102,22 @@ echo "Job Configuration:"
 echo "  Job ID:          $SLURM_JOB_ID"
 echo "  Nodes:           $SLURM_NNODES"
 echo "  GPUs:            $((SLURM_NNODES * 4))"
-echo "  Data source:     LOCAL /tmp (Lustre bottleneck ELIMINATED)"
+echo "  Data source:     $DATA_FILE (local /tmp)"
+echo "  Workers/GPU:     $NUM_WORKERS (RAM loading mode!)"
 echo "  Batch size/GPU:  $BATCH_SIZE"
 echo "  Global batch:    $((SLURM_NNODES * 4 * BATCH_SIZE))"
 echo ""
+echo "TWO-STEP ULTRA-FAST MODE:"
+echo "  ✓ STEP 1: HDF5 copied to local /tmp (eliminates Lustre)"
+echo "  ✓ STEP 2: Dataset loaded into RAM from /tmp (fast local read)"
+echo "  ✓ STEP 3: Training with zero I/O (pure RAM access)"
+echo ""
 echo "Expected performance:"
-echo "  Before (Lustre):  6-12 s/batch  ← SLOW"
-echo "  After (local):    0.3-0.5 s/batch ← FAST (20× speedup!)"
+echo "  Copy to /tmp:  30-60 seconds (one-time)"
+echo "  Load to RAM:   20-30 seconds (one-time)"
+echo "  Batch time:    0.2-0.5 seconds"
+echo "  Epoch time:    1.5-3 minutes"
+echo "  100 epochs:    2.5-5 hours"
 echo "================================================================================"
 echo ""
 
@@ -135,20 +138,24 @@ except:
 " 2>/dev/null || echo "0")
     
     if [ ${CURRENT_EPOCH} -ge ${MAX_EPOCHS} ]; then
-        echo "✓ Training complete"
+        echo "✓ Training complete (${CURRENT_EPOCH} epochs)"
         exit 0
     fi
     
     RESUME_FLAG="--resume ${RESUME_CHECKPOINT}"
+    echo "Resuming from epoch ${CURRENT_EPOCH}"
 else
     RESUME_FLAG=""
+    echo "Starting fresh training"
 fi
 
+echo ""
+
 # ============================================================================
-# LAUNCH TRAINING
+# LAUNCH ULTRA-FAST TRAINING
 # ============================================================================
 
-echo "Starting OPTIMIZED training with LOCAL storage..."
+echo "STEP 2: Loading from /tmp into RAM and starting training..."
 echo "================================================================================"
 
 srun torchrun \
@@ -176,6 +183,7 @@ srun torchrun \
     --window-size ${WINDOW_SIZE} \
     --hierarchical \
     --attention-pooling \
+    --use-prefetcher \
     --save-every 5 \
     ${RESUME_FLAG}
 
@@ -198,10 +206,12 @@ except:
 " 2>/dev/null || echo "0")
     
     if [ ${FINAL_EPOCH} -lt ${MAX_EPOCHS} ]; then
-        echo "  ⟳ Resubmitting..."
+        echo "  ⟳ Resubmitting for remaining epochs..."
         sbatch --parsable "$0"
     else
         echo "  ✓ Training complete!"
+        echo ""
+        echo "Best model saved to: ${CHECKPOINT_DIR}/checkpoint_best.pt"
     fi
 fi
 
