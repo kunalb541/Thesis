@@ -60,11 +60,11 @@ CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
 
 # Training hyperparameters
-BATCH_SIZE=128
+BATCH_SIZE=256
 NUM_WORKERS=0              # No workers needed with RAM loading!
-PREFETCH_FACTOR=2
-ACCUMULATION_STEPS=1
-MAX_EPOCHS=100
+PREFETCH_FACTOR=4
+ACCUMULATION_STEPS=2
+MAX_EPOCHS=10
 
 # Model architecture
 D_MODEL=256
