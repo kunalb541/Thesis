@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
 #SBATCH -N 12
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
 #SBATCH -o logs/train_complete_%j.out
