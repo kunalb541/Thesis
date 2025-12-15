@@ -890,12 +890,9 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     noise = RomanWFI_F146.compute_photon_noise(flux_true)
     flux_obs = flux_true + np.random.normal(0, noise * params['noise_scale'])
     
-    # Convert to magnitude (NOTE: output named 'flux' but contains magnitudes)
-    mag_obs = RomanWFI_F146.flux_to_mag(flux_obs)
-    
     # Apply cadence mask (random missing observations)
     mask = np.random.random(n) > params['mask_prob']
-    mag_obs[~mask] = SimConfig.PAD_VALUE
+    flux_obs[~mask] = 0.0  
     
     # Compute time differences between valid observations
     delta_t = compute_delta_t(t_grid, mask)
