@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 12
+#SBATCH -N 4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
@@ -32,15 +32,15 @@ CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
 RESUME_CHECKPOINT="${CHECKPOINT_DIR}/checkpoint_latest.pt"
 
 # Training hyperparameters
-BATCH_SIZE=64              # Per GPU 
-NUM_WORKERS=8              # Data loading workers per GPU
-PREFETCH_FACTOR=4          # Prefetch batches per worker
+BATCH_SIZE=128              # Per GPU 
+NUM_WORKERS=4              # Data loading workers per GPU
+PREFETCH_FACTOR=2          # Prefetch batches per worker
 ACCUMULATION_STEPS=1       # Gradient accumulation
 MAX_EPOCHS=100             # Total epochs
 
 # Model architecture
-D_MODEL=64                 # Hidden dimension
-N_LAYERS=2                 # Number of GRU layers
+D_MODEL=256                # Hidden dimension
+N_LAYERS=4                 # Number of GRU layers
 DROPOUT=0.3                # Dropout rate
 WINDOW_SIZE=7              # CNN kernel size
 
