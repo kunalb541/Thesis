@@ -233,7 +233,7 @@ srun torchrun \
   --hierarchical \
   --attention-pooling \
   --use-prefetcher \
-  --save-every 5 \
+  --save-every 5 
 ```
 
 ### Checkpoint Resumption 
