@@ -81,7 +81,9 @@ Thumbs.db
 
 # Large data directories
 data/raw/*.npz
-data/processed/*.npz
+data/test/*.npz
+data/raw/*.h5
+data/test/*.h5
 
 # But keep example data
 !data/raw/example.npz
