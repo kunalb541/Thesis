@@ -2,4 +2,6 @@
 *
 !.gitignore
 !.gitkeep
-
+results/*
+!results/checkpoints/
+!results/checkpoints/**
