@@ -11,7 +11,7 @@
 
 ## Overview
 
-Three-class classification of gravitational microlensing events using a transformer-enhanced CNN-GRU architecture:
+Three-class classification of gravitational microlensing events using a CNN-GRU architecture:
 
 - **Class 0**: Flat (no lensing)
 - **Class 1**: PSPL (Point Source Point Lens)
