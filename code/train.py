@@ -1115,7 +1115,7 @@ def compute_hierarchical_loss(
         stage2_pos_weight_scalar = class_weights[1] / (class_weights[2] + EPS)
         
         # v3.0.0 FIX: Proper scalar pos_weight
-        stage2_pos_weight = stage2_pos_weight_scalar.expand(1)  # [1] broadcasts
+        stage2_pos_weight = stage2_pos_weight_scalar 
         
         stage2_bce = F.binary_cross_entropy_with_logits(
             stage2_logit_nonflat,  # raw logit
