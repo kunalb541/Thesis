@@ -25,47 +25,31 @@ KEY MODIFICATION: RAM LOADING
     - Memory requirement: ~29 GB per GPU process, ~116 GB per 4-GPU node
     - A100 nodes (256-512 GB RAM): 25-50% utilization (plenty of headroom)
 
+CRITICAL FIX v2.9.0 - HIERARCHICAL COLLAPSE FIX
+-------------------------------------------------
+**Problem**: Stage 2 (PSPL vs Binary) collapsed to always predict Binary.
+The model achieved 97% training accuracy but 0% PSPL recall on test.
+
+**Root Cause**: 
+- Using NLLLoss on combined probabilities doesn't provide direct supervision to Stage 2
+- When p_deviation is small, gradients to pspl_head are multiplicatively suppressed
+- Stage 2 head initialized with negative bias → sigmoid outputs ~0 → stuck
+
+**Solution**: Separate BCE losses for each hierarchical stage:
+- Stage 1 BCE: train flat_head to distinguish Flat vs Non-Flat
+- Stage 2 BCE: train pspl_head to distinguish PSPL vs Binary (only on non-flat samples)
+- Auxiliary CE: direct 3-class supervision for gradient stability
+
+**Loss function**:
+    total_loss = stage1_bce + stage2_bce + aux_weight * aux_ce
+
 PRESERVED FEATURES (from train.py v2.8.0)
 ------------------------------------------
-All critical bug fixes and optimizations are preserved:
-
-**v2.8.0 Fixes**:
-    - Checkpoint key 'model_config' (not 'config') for model.py compatibility
-    - Argument parsing: --no-class-weights and --no-prefetcher flags
-    - checkpoint_latest.pt saved after every epoch for resumption
-    - torch.compile error handling with graceful fallback
-    - DDP cleanup in try/finally block to prevent hanging
-    - Window size default changed to 7 (matches sbatch)
-
-**v2.7.2 Fixes**:
-    - Explicit DDP init_method with TCP store
-    - NCCL timeout configurations (600s, 300s socket timeout)
-    - MASTER_ADDR/MASTER_PORT validation
-    - Barrier synchronization before data loading
-    - Process group health checks
-
-**v2.7.1 Fixes**:
-    - S0-NEW-1: Sequence compaction enforcing contiguous prefix assumption
-      * Valid observations moved to positions [0, length)
-      * Eliminates fake observations from scattered missing data
-      * Ensures mean pooling doesn't include invalid positions
-
-**v2.6 Fixes**:
-    - S0-1: Hierarchical mode uses F.nll_loss() (model outputs log-probs)
-    - S0-2: Probability computation uses torch.exp() for hierarchical mode
-    - S1-1: Validation sampler.set_epoch() called for proper DDP
-    - S1-3: Minimum sequence length of 1
-
-**v2.7 Optimizations**:
-    - GPU-side metric accumulation (no .item() in training loop)
-    - Pre-computed sequence lengths in dataset
-    - Fused normalization operations
-    - Optimized dataloader with drop_last=True
-    - torch.compile fullgraph support
+All critical bug fixes and optimizations are preserved.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.8.0
+Version: 2.9.0
 Date: December 2024
 """
 
@@ -103,7 +87,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-__version__ = "2.8.0"
+__version__ = "2.9.0"
 
 # =============================================================================
 # ENVIRONMENT CONFIGURATION
@@ -133,7 +117,7 @@ _configure_environment()
 current_dir = Path(__file__).resolve().parent
 if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
-from model import ModelConfig, RomanMicrolensingClassifier
+from model import ModelConfig, RomanMicrolensingClassifier, HierarchicalOutput
 
 # =============================================================================
 # CONSTANTS
@@ -155,6 +139,11 @@ DEFAULT_ACCUMULATION_STEPS = 1
 DEFAULT_CLIP_NORM = 1.0
 DEFAULT_WARMUP_EPOCHS = 3
 DEFAULT_VAL_FRACTION = 0.1
+
+# v2.9: Hierarchical loss weights
+DEFAULT_STAGE1_WEIGHT = 1.0
+DEFAULT_STAGE2_WEIGHT = 1.0
+DEFAULT_AUX_WEIGHT = 0.5
 
 PROGRESS_UPDATE_FREQ = 50
 DDP_INIT_TIMEOUT_MINUTES = 10
@@ -577,6 +566,131 @@ def compute_class_weights(
 
 
 # =============================================================================
+# v2.9 FIX: HIERARCHICAL LOSS COMPUTATION
+# =============================================================================
+
+def compute_hierarchical_loss(
+    output: HierarchicalOutput,
+    labels: Tensor,
+    class_weights: Tensor,
+    stage1_weight: float = 1.0,
+    stage2_weight: float = 1.0,
+    aux_weight: float = 0.5
+) -> Tuple[Tensor, Dict[str, float]]:
+    """
+    Compute hierarchical loss with separate BCE for each stage.
+    
+    This is the CRITICAL FIX for the hierarchical collapse problem.
+    
+    Instead of using NLLLoss on combined probabilities (which doesn't
+    provide direct supervision to Stage 2), we use:
+    - Stage 1 BCE: trains flat_head directly on Flat vs Non-Flat
+    - Stage 2 BCE: trains pspl_head directly on PSPL vs Binary (non-flat only)
+    - Auxiliary CE: direct 3-class supervision for gradient stability
+    
+    Parameters
+    ----------
+    output : HierarchicalOutput
+        Output from model with return_intermediates=True.
+    labels : Tensor
+        Class labels [batch]. 0=Flat, 1=PSPL, 2=Binary.
+    class_weights : Tensor
+        Class weights [3] for weighting.
+    stage1_weight : float
+        Weight for Stage 1 loss.
+    stage2_weight : float
+        Weight for Stage 2 loss.
+    aux_weight : float
+        Weight for auxiliary 3-class loss.
+        
+    Returns
+    -------
+    total_loss : Tensor
+        Combined loss for backpropagation.
+    loss_dict : dict
+        Individual loss components for logging.
+    """
+    device = labels.device
+    B = labels.size(0)
+    
+    # Create binary targets for hierarchical stages
+    # Stage 1: is_deviation (non-flat)
+    # label=0 → is_deviation=0 (Flat)
+    # label=1 → is_deviation=1 (PSPL = deviation)
+    # label=2 → is_deviation=1 (Binary = deviation)
+    is_deviation = (labels > 0).float().unsqueeze(1)  # [B, 1]
+    
+    # Stage 2: is_pspl given deviation
+    # label=1 → is_pspl=1 (among deviations, this is PSPL)
+    # label=2 → is_pspl=0 (among deviations, this is Binary)
+    is_pspl = (labels == 1).float().unsqueeze(1)  # [B, 1]
+    
+    # Mask for non-flat samples (where Stage 2 loss applies)
+    non_flat_mask = (labels > 0)  # [B]
+    n_non_flat = non_flat_mask.sum().item()
+    
+    # =========================================================================
+    # Stage 1 Loss: Flat vs Non-Flat (BCE on all samples)
+    # =========================================================================
+    # Weight: Flat samples get weight[0], Non-Flat get average of weight[1] and weight[2]
+    stage1_pos_weight = (class_weights[1] + class_weights[2]) / 2.0 / class_weights[0]
+    stage1_bce = F.binary_cross_entropy_with_logits(
+        output.stage1_logit,  # [B, 1] raw logit
+        is_deviation,  # [B, 1] target
+        pos_weight=stage1_pos_weight.unsqueeze(0).unsqueeze(0),
+        reduction='mean'
+    )
+    
+    # =========================================================================
+    # Stage 2 Loss: PSPL vs Binary (BCE on non-flat samples only)
+    # =========================================================================
+    if n_non_flat > 0:
+        # Extract non-flat samples
+        stage2_logit_nonflat = output.stage2_logit[non_flat_mask]  # [n_non_flat, 1]
+        is_pspl_nonflat = is_pspl[non_flat_mask]  # [n_non_flat, 1]
+        
+        # Weight: PSPL samples get weight[1], Binary get weight[2]
+        # Among non-flat, pos_weight balances PSPL (positive) vs Binary (negative)
+        stage2_pos_weight = class_weights[1] / class_weights[2]
+        stage2_bce = F.binary_cross_entropy_with_logits(
+            stage2_logit_nonflat,  # raw logit
+            is_pspl_nonflat,  # target
+            pos_weight=stage2_pos_weight.unsqueeze(0).unsqueeze(0),
+            reduction='mean'
+        )
+    else:
+        # No non-flat samples in batch (rare edge case)
+        stage2_bce = torch.tensor(0.0, device=device)
+    
+    # =========================================================================
+    # Auxiliary Loss: Direct 3-class CE (for gradient stability)
+    # =========================================================================
+    if output.aux_logits is not None:
+        aux_ce = F.cross_entropy(output.aux_logits, labels, weight=class_weights)
+    else:
+        aux_ce = torch.tensor(0.0, device=device)
+    
+    # =========================================================================
+    # Combined Loss
+    # =========================================================================
+    total_loss = (
+        stage1_weight * stage1_bce +
+        stage2_weight * stage2_bce +
+        aux_weight * aux_ce
+    )
+    
+    loss_dict = {
+        'stage1_bce': stage1_bce.item(),
+        'stage2_bce': stage2_bce.item() if n_non_flat > 0 else 0.0,
+        'aux_ce': aux_ce.item() if output.aux_logits is not None else 0.0,
+        'total': total_loss.item(),
+        'n_non_flat': n_non_flat
+    }
+    
+    return total_loss, loss_dict
+
+
+# =============================================================================
 # TRAINING LOOP
 # =============================================================================
 
@@ -593,7 +707,10 @@ def train_epoch(
     epoch: int,
     config: ModelConfig,
     accumulation_steps: int = 1,
-    clip_norm: float = 1.0
+    clip_norm: float = 1.0,
+    stage1_weight: float = 1.0,
+    stage2_weight: float = 1.0,
+    aux_weight: float = 0.5
 ) -> Tuple[float, float]:
     """Training epoch with GPU-side metric accumulation."""
     model.train()
@@ -602,11 +719,16 @@ def train_epoch(
     total_correct_gpu = torch.zeros(1, device=device, dtype=torch.long)
     total_samples_gpu = torch.zeros(1, device=device, dtype=torch.long)
     
+    # v2.9: Track per-stage losses
+    total_stage1_loss = torch.zeros(1, device=device)
+    total_stage2_loss = torch.zeros(1, device=device)
+    total_aux_loss = torch.zeros(1, device=device)
+    
     pbar = tqdm(
         loader,
         desc=f'Epoch {epoch} [Train]',
         disable=not is_main_process(rank),
-        ncols=100,
+        ncols=120,
         leave=False
     )
     
@@ -621,11 +743,27 @@ def train_epoch(
         labels = batch[3].to(device, non_blocking=True)
         
         with autocast_ctx:
-            logits = model(flux, delta_t, lengths)
-            
             if config.hierarchical:
-                loss = F.nll_loss(logits, labels, weight=class_weights)
+                # v2.9 FIX: Use return_intermediates for separate stage losses
+                output = model(flux, delta_t, lengths, return_intermediates=True)
+                
+                loss, loss_dict = compute_hierarchical_loss(
+                    output,
+                    labels,
+                    class_weights,
+                    stage1_weight=stage1_weight,
+                    stage2_weight=stage2_weight,
+                    aux_weight=aux_weight
+                )
+                
+                logits = output.logits
+                
+                # Track per-stage losses
+                total_stage1_loss += loss_dict['stage1_bce']
+                total_stage2_loss += loss_dict['stage2_bce']
+                total_aux_loss += loss_dict['aux_ce']
             else:
+                logits = model(flux, delta_t, lengths)
                 loss = F.cross_entropy(logits, labels, weight=class_weights)
             
             loss = loss / accumulation_steps
@@ -663,11 +801,22 @@ def train_epoch(
         if batch_idx % PROGRESS_UPDATE_FREQ == 0:
             current_loss = total_loss_gpu.item() / max(total_samples_gpu.item(), 1)
             current_acc = total_correct_gpu.item() / max(total_samples_gpu.item(), 1)
-            pbar.set_postfix({
-                'loss': f'{current_loss:.4f}',
-                'acc': f'{100*current_acc:.2f}%',
-                'lr': f'{scheduler.get_last_lr()[0]:.2e}'
-            })
+            
+            if config.hierarchical:
+                n_batches = batch_idx + 1
+                pbar.set_postfix({
+                    'loss': f'{current_loss:.4f}',
+                    'acc': f'{100*current_acc:.2f}%',
+                    's1': f'{total_stage1_loss.item()/n_batches:.3f}',
+                    's2': f'{total_stage2_loss.item()/n_batches:.3f}',
+                    'lr': f'{scheduler.get_last_lr()[0]:.2e}'
+                })
+            else:
+                pbar.set_postfix({
+                    'loss': f'{current_loss:.4f}',
+                    'acc': f'{100*current_acc:.2f}%',
+                    'lr': f'{scheduler.get_last_lr()[0]:.2e}'
+                })
     
     if world_size > 1:
         dist.all_reduce(total_loss_gpu, op=dist.ReduceOp.SUM)
@@ -692,14 +841,21 @@ def evaluate(
     device: torch.device,
     rank: int,
     world_size: int,
-    config: ModelConfig
+    config: ModelConfig,
+    stage1_weight: float = 1.0,
+    stage2_weight: float = 1.0,
+    aux_weight: float = 0.5
 ) -> Dict[str, float]:
-    """Evaluation with GPU-side metric accumulation."""
+    """Evaluation with GPU-side metric accumulation and per-class tracking."""
     model.eval()
     
     total_loss_gpu = torch.zeros(1, device=device)
     total_correct_gpu = torch.zeros(1, device=device, dtype=torch.long)
     total_samples_gpu = torch.zeros(1, device=device, dtype=torch.long)
+    
+    # v2.9: Track per-class accuracy
+    class_correct = torch.zeros(3, device=device, dtype=torch.long)
+    class_total = torch.zeros(3, device=device, dtype=torch.long)
     
     autocast_ctx = torch.amp.autocast('cuda', enabled=config.use_amp) if device.type == 'cuda' else nullcontext()
     
@@ -710,11 +866,15 @@ def evaluate(
         labels = batch[3].to(device, non_blocking=True)
         
         with autocast_ctx:
-            logits = model(flux, delta_t, lengths)
-            
             if config.hierarchical:
-                loss = F.nll_loss(logits, labels, weight=class_weights, reduction='sum')
+                output = model(flux, delta_t, lengths, return_intermediates=True)
+                loss, _ = compute_hierarchical_loss(
+                    output, labels, class_weights,
+                    stage1_weight, stage2_weight, aux_weight
+                )
+                logits = output.logits
             else:
+                logits = model(flux, delta_t, lengths)
                 loss = F.cross_entropy(logits, labels, weight=class_weights, reduction='sum')
         
         if config.hierarchical:
@@ -724,21 +884,38 @@ def evaluate(
         
         preds = probs.argmax(dim=1)
         
-        total_loss_gpu += loss
+        total_loss_gpu += loss if not config.hierarchical else loss * labels.size(0)
         total_correct_gpu += (preds == labels).sum()
         total_samples_gpu += labels.size(0)
+        
+        # Per-class tracking
+        for c in range(3):
+            mask = (labels == c)
+            class_total[c] += mask.sum()
+            class_correct[c] += ((preds == c) & mask).sum()
     
     if world_size > 1:
         dist.all_reduce(total_loss_gpu, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_correct_gpu, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_samples_gpu, op=dist.ReduceOp.SUM)
+        dist.all_reduce(class_correct, op=dist.ReduceOp.SUM)
+        dist.all_reduce(class_total, op=dist.ReduceOp.SUM)
     
     avg_loss = total_loss_gpu.item() / max(total_samples_gpu.item(), 1)
     accuracy = total_correct_gpu.item() / max(total_samples_gpu.item(), 1)
     
+    # Per-class recall
+    per_class_recall = {}
+    for c, name in enumerate(CLASS_NAMES):
+        if class_total[c].item() > 0:
+            per_class_recall[name] = class_correct[c].item() / class_total[c].item()
+        else:
+            per_class_recall[name] = 0.0
+    
     return {
         'loss': avg_loss,
-        'accuracy': accuracy
+        'accuracy': accuracy,
+        **{f'recall_{k}': v for k, v in per_class_recall.items()}
     }
 
 
@@ -838,8 +1015,6 @@ def setup_ddp() -> Tuple[int, int, int, torch.device]:
             logger.info("=" * 80)
         
         # CRITICAL FIX: Set CUDA device BEFORE init_process_group
-        # This ensures each process binds to its own GPU (0,1,2,3 per node)
-        # Without this, all processes default to GPU 0 causing "Duplicate GPU" errors
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
             if rank == 0:
@@ -856,7 +1031,6 @@ def setup_ddp() -> Tuple[int, int, int, torch.device]:
                 timeout=timedelta(minutes=DDP_INIT_TIMEOUT_MINUTES)
             )
             
-            # CRITICAL FIX: Remove device_ids parameter (redundant after set_device)
             dist.barrier()
             
             if rank == 0:
@@ -894,7 +1068,7 @@ def cleanup_ddp() -> None:
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Roman Microlensing Classifier - ULTRA-FAST')
+    parser = argparse.ArgumentParser(description='Train Roman Microlensing Classifier - v2.9 HIERARCHICAL FIX')
     
     # Data
     parser.add_argument('--data', type=str, required=True, help='Path to HDF5/NPZ data file')
@@ -908,6 +1082,19 @@ def main():
     parser.add_argument('--window-size', type=int, default=7)
     parser.add_argument('--hierarchical', action='store_true')
     parser.add_argument('--attention-pooling', action='store_true')
+    
+    # v2.9: Hierarchical loss options
+    parser.add_argument('--use-aux-head', action='store_true', default=True,
+                       help='Use auxiliary 3-class head (default: True)')
+    parser.add_argument('--no-aux-head', dest='use_aux_head', action='store_false')
+    parser.add_argument('--stage2-temperature', type=float, default=1.0,
+                       help='Temperature for Stage 2 sigmoid (lower = sharper)')
+    parser.add_argument('--stage1-weight', type=float, default=DEFAULT_STAGE1_WEIGHT,
+                       help='Weight for Stage 1 BCE loss')
+    parser.add_argument('--stage2-weight', type=float, default=DEFAULT_STAGE2_WEIGHT,
+                       help='Weight for Stage 2 BCE loss')
+    parser.add_argument('--aux-weight', type=float, default=DEFAULT_AUX_WEIGHT,
+                       help='Weight for auxiliary CE loss')
     
     # Training
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE)
@@ -924,7 +1111,7 @@ def main():
     parser.add_argument('--compile-mode', type=str, default='reduce-overhead')
     parser.add_argument('--no-class-weights', action='store_true')
     
-    # Data loading (changed defaults for RAM loading!)
+    # Data loading
     parser.add_argument('--num-workers', type=int, default=DEFAULT_NUM_WORKERS)
     parser.add_argument('--prefetch-factor', type=int, default=DEFAULT_PREFETCH_FACTOR)
     
@@ -946,11 +1133,20 @@ def main():
     
     if is_main_process(rank):
         logger.info("=" * 80)
-        logger.info(f"Roman Microlensing Classifier Training")
+        logger.info(f"Roman Microlensing Classifier Training v{__version__}")
         logger.info("=" * 80)
         logger.info(f"Device: {device}")
         logger.info(f"World size: {world_size}")
         logger.info(f"Workers: {args.num_workers} (0 = pure RAM loading)")
+        if args.hierarchical:
+            logger.info("=" * 80)
+            logger.info("HIERARCHICAL MODE (v2.9 FIX ENABLED)")
+            logger.info(f"  Stage 1 weight: {args.stage1_weight}")
+            logger.info(f"  Stage 2 weight: {args.stage2_weight}")
+            logger.info(f"  Aux weight: {args.aux_weight}")
+            logger.info(f"  Stage 2 temperature: {args.stage2_temperature}")
+            logger.info(f"  Use aux head: {args.use_aux_head}")
+            logger.info("=" * 80)
     
     if is_ddp:
         if is_main_process(rank):
@@ -986,13 +1182,15 @@ def main():
         rank
     )
     
-    # Create model
+    # Create model with v2.9 hierarchical options
     config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
         dropout=args.dropout,
         window_size=args.window_size,
         hierarchical=args.hierarchical,
+        use_aux_head=args.use_aux_head,
+        stage2_temperature=args.stage2_temperature,
         use_attention_pooling=args.attention_pooling,
         use_amp=args.use_amp
     )
@@ -1011,6 +1209,12 @@ def main():
         logger.info("Model Architecture:")
         logger.info(f"  Total parameters: {format_number(complexity['total_parameters'])}")
         logger.info(f"  Trainable parameters: {format_number(complexity['trainable_parameters'])}")
+        
+        # v2.9: Verify hierarchical head initialization
+        if config.hierarchical:
+            logger.info("Hierarchical Head Initialization:")
+            logger.info(f"  Stage 1 bias: {model.head_stage1.bias.item():.4f} (should be ~0)")
+            logger.info(f"  Stage 2 bias: {model.head_stage2.bias.item():.4f} (should be ~0)")
         logger.info("-" * 80)
     
     # Wrap in DDP
@@ -1084,12 +1288,14 @@ def main():
             train_loss, train_acc = train_epoch(
                 model, train_loader, optimizer, scheduler, scaler,
                 class_weights, device, rank, world_size, epoch, config,
-                args.accumulation_steps, args.clip_norm
+                args.accumulation_steps, args.clip_norm,
+                args.stage1_weight, args.stage2_weight, args.aux_weight
             )
             
             # Validate
             val_results = evaluate(
-                model, val_loader, class_weights, device, rank, world_size, config
+                model, val_loader, class_weights, device, rank, world_size, config,
+                args.stage1_weight, args.stage2_weight, args.aux_weight
             )
             
             epoch_time = time.time() - epoch_start
@@ -1102,6 +1308,14 @@ def main():
                     f"Val Loss: {val_results['loss']:.4f} | Val Acc: {100*val_results['accuracy']:.2f}% | "
                     f"Time: {format_time(epoch_time)}"
                 )
+                # v2.9: Log per-class recall
+                if config.hierarchical:
+                    logger.info(
+                        f"         Per-class recall: "
+                        f"Flat={100*val_results.get('recall_Flat', 0):.1f}% | "
+                        f"PSPL={100*val_results.get('recall_PSPL', 0):.1f}% | "
+                        f"Binary={100*val_results.get('recall_Binary', 0):.1f}%"
+                    )
             
             # Save
             is_best = val_results['accuracy'] > best_acc
