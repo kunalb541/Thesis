@@ -508,9 +508,12 @@ Thesis/
 │   ├── raw/
 │   └── test/
 │
-├── results/             
-│   ├── checkpoints/
-│   └── <timestamp>/
+results/
+├── best.pt
+├── final.pt
+├── epoch_005.pt
+└── checkpoints/
+│    └── checkpoint_latest.pt
 │
 ├── environment.yml
 ├── README.md
