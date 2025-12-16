@@ -542,83 +542,49 @@ class SimConfig:
 
 
 class BinaryPresets:
-    """
-    Binary lens parameter presets for different astrophysical regimes.
-    
-    Provides scientifically motivated parameter ranges for simulating
-    different types of binary microlensing events.
-    
-    Attributes
-    ----------
-    SHARED_T0_MIN : float
-        Minimum peak time (10% of mission duration).
-    SHARED_T0_MAX : float
-        Maximum peak time (90% of mission duration).
-    SHARED_TE_MIN : float
-        Minimum Einstein crossing time (5 days).
-    SHARED_TE_MAX : float
-        Maximum Einstein crossing time (30 days).
-    SHARED_U0_MIN : float
-        Minimum impact parameter (Einstein radii). v2.8: Shared with PSPL to prevent bias.
-    SHARED_U0_MAX : float
-        Maximum impact parameter (Einstein radii). v2.8: Shared with PSPL to prevent bias.
-    PRESETS : dict
-        Dictionary of preset configurations.
-        
-    Notes
-    -----
-    Preset parameter ranges are based on:
-    - Mao & Paczynski (1991) for binary lens geometry
-    - Gaudi (2012) review for planetary microlensing
-    - OGLE and MOA survey statistics for observed events
-    
-    v2.8 BIAS FIX: Extended t0 range to 10%-90% to include edge cases (partial events).
-    v2.8 BIAS FIX: All presets now use SHARED_U0 range identical to PSPLParams to prevent
-    the model from learning "very high magnification = binary" shortcut.
-    """
-    SHARED_T0_MIN: float = 0.1 * SimConfig.TIME_MAX   # v2.8: was 0.2, extended for edge cases
-    SHARED_T0_MAX: float = 0.9 * SimConfig.TIME_MAX   # v2.8: was 0.8, extended for edge cases
+    SHARED_T0_MIN: float = 0.1 * SimConfig.TIME_MAX
+    SHARED_T0_MAX: float = 0.9 * SimConfig.TIME_MAX
     SHARED_TE_MIN: float = 5.0
     SHARED_TE_MAX: float = 30.0
-    SHARED_U0_MIN: float = 0.01   # v2.8: Shared with PSPL to prevent bias
-    SHARED_U0_MAX: float = 1.0    # v2.8: Shared with PSPL to prevent bias
+    SHARED_U0_MIN: float = 0.01   # Matches PSPL
+    SHARED_U0_MAX: float = 0.5    # Matches PSPL
     
     PRESETS: Dict[str, Dict[str, Tuple[float, float]]] = {
         'distinct': {
-            # Resonant caustics near s=1, guaranteed crossings
-            's_range': (0.90, 1.10),
-            'q_range': (0.1, 1.0),
-            'u0_range': (0.0001, 0.4),
-            'rho_range': (1e-4, 5e-3),
+            # Resonant caustics near s=1, strong binary signatures
+            's_range': (0.8, 1.2),          # Tightened for resonant caustics
+            'q_range': (0.1, 1.0),          # Equal-ish mass binaries
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # FIX: Use shared!
+            'rho_range': (1e-3, 1e-2),      # Finite source for caustic crossings
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)
         },
         'planetary': {
-            # Exoplanet detection regime (low mass ratio)
-            's_range': (0.5, 2.0),
-            'q_range': (1e-4, 1e-2),
-            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  
-            'rho_range': (1e-4, 1e-2),
+            # Exoplanet detection regime
+            's_range': (0.5, 2.0),          # Snow line region
+            'q_range': (1e-4, 1e-2),        # Jupiter to super-Earth
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),
+            'rho_range': (1e-3, 1e-2),      # Need finite source for planets
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)
         },
         'stellar': {
-            # Binary star systems (high mass ratio)
-            's_range': (0.3, 3.0),
-            'q_range': (0.3, 3),
-            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.3), now shared with PSPL
-            'rho_range': (1e-3, 5e-2),
+            # Binary star systems
+            's_range': (0.3, 3.0),          # Wide range of separations
+            'q_range': (0.1, 1.0),          # FIX: q ≤ 1 by convention
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),
+            'rho_range': (1e-3, 5e-2),      # Larger sources for stellar
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX)
         },
         'baseline': {
-            # Full parameter space for general training
-            's_range': (0.01, 3.0),
-            'q_range': (1e-3, 1.0),
-            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.5), now shared with PSPL
+            # Full realistic parameter space
+            's_range': (0.3, 3.0),          # FIX: was 0.01, too small
+            'q_range': (1e-4, 1.0),         # Full range: planets to binaries
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),
             'rho_range': (1e-4, 0.05),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
