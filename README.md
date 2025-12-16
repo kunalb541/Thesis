@@ -497,32 +497,24 @@ Output: Log-Probabilities [B, 3]
 ```
 Thesis/
 ├── code/
-│   ├── simulate.py      # Data generation with VBBinaryLensing
-│   ├── train.py         # Distributed training with hierarchical loss
-│   ├── model.py         # CNN-GRU architecture
-│   ├── evaluate.py      # Comprehensive evaluation suite
-│   └── submit.sbatch    # SLURM pipeline with auto-evaluation
+│   ├── simulate.py
+│   ├── train.py
+│   ├── model.py
+│   ├── evaluate.py
+│   ├── submit.sbatch
+│   └── logs/            
 │
 ├── data/
-│   ├── raw/             # Training datasets (*.h5)
-│   └── test/            # Test datasets (*.h5)
+│   ├── raw/
+│   └── test/
 │
-├── results/
-│   ├── checkpoints/     # Shared checkpoints for resumption
-│   │   ├── checkpoint_latest.pt
-│   │   └── .continuation_job_id
-│   │
-│   └── <experiment>/    # Per-experiment outputs
-│       ├── best_model.pt
-│       ├── checkpoint_epoch_*.pt
-│       ├── training.log
-│       ├── config.json
-│       └── eval_*/      # Evaluation outputs (timestamped)
+├── results/             
+│   ├── checkpoints/
+│   └── <timestamp>/
 │
-├── logs/                # SLURM output logs
-├── environment.yml      # Conda environment
-├── README.md            # This file
-└── LICENSE              # MIT License
+├── environment.yml
+├── README.md
+└── LICENSE
 ```
 
 ---
