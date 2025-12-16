@@ -1725,7 +1725,7 @@ def main() -> None:
     # Data arguments
     parser.add_argument('--data', type=str, required=True,
                        help='Path to HDF5/NPZ data file')
-    parser.add_argument('--output', type=str, default='checkpoints',
+    parser.add_argument('--output', type=str, default='../results/checkpoints',
                        help='Output directory for checkpoints')
     parser.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION,
                        help='Fraction of data for validation')
