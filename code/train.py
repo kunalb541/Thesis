@@ -498,6 +498,8 @@ class RAMLensingDataset(Dataset):
                 self.magnification = f['flux'][:]
             elif 'magnification' in f:
                 self.magnification = f['magnification'][:]
+            elif 'mag' in f:  
+                self.magnification = f['mag'][:] 
             else:
                 raise KeyError(f"HDF5 file missing magnification data. Keys: {list(f.keys())}")
             
