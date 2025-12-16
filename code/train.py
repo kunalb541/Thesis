@@ -253,6 +253,43 @@ logger = setup_logging(0)
 # UTILITIES
 # =============================================================================
 
+def create_experiment_dir(base_dir: Path, args: argparse.Namespace) -> Path:
+    """
+    Create timestamped experiment directory.
+    
+    Parameters
+    ----------
+    base_dir : Path
+        Base output directory
+    args : argparse.Namespace
+        Training arguments
+        
+    Returns
+    -------
+    Path
+        Experiment directory path
+    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Create experiment name from key parameters
+    exp_name = (
+        f"d{args.d_model}_"
+        f"l{args.n_layers}_"
+        f"{'hier' if args.hierarchical else 'flat'}_"
+        f"{timestamp}"
+    )
+    
+    exp_dir = base_dir / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save configuration
+    config_path = exp_dir / 'config.json'
+    with open(config_path, 'w') as f:
+        json.dump(vars(args), f, indent=2, default=str)
+    
+    return exp_dir
+
+
 def is_main_process(rank: int) -> bool:
     """
     Check if current process is the main process.
