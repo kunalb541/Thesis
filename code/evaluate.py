@@ -183,9 +183,6 @@ def magnification_to_delta_mag(A):
     delta_mag = np.where((np.isfinite(delta_mag)) & (A > 0), delta_mag, 0.0)
     return delta_mag
 
-
-# Duplicate function removed - see magnification_to_delta_mag() above
-
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -775,10 +772,13 @@ def load_and_prepare_data(
     logger: Optional[logging.Logger] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     """
-    Load and normalize data from HDF5 or NPZ file.
+    Load and normalize data from HDF5 or NPZ file WITH SEQUENCE COMPACTION.
     
-    Supports both HDF5 (from simulate.py) and NPZ (from train.py) formats.
-    Applies robust normalization using median and IQR from training stats.
+    CRITICAL FIX (v2.7): Implements the same sequence compaction as train.py's
+    RAMLensingDataset to ensure training/evaluation consistency.
+    
+    Compaction moves all valid (non-zero) observations to a contiguous prefix
+    [0, n_valid), matching what the model was trained on.
     
     Parameters
     ----------
@@ -796,39 +796,15 @@ def load_and_prepare_data(
     Returns
     -------
     flux_norm : np.ndarray
-        Normalized flux array, shape (n_samples, seq_len).
+        Normalized AND COMPACTED flux array, shape (n_samples, seq_len).
     delta_t_norm : np.ndarray
-        Normalized delta_t array, shape (n_samples, seq_len).
+        Normalized AND COMPACTED delta_t array, shape (n_samples, seq_len).
     labels : np.ndarray
         Class labels, shape (n_samples,).
     timestamps : np.ndarray
-        Observation timestamps, shape (n_samples, seq_len).
+        COMPACTED observation timestamps, shape (n_samples, seq_len).
     data_format : str
         Format of loaded data ('hdf5' or 'npz').
-        
-    Raises
-    ------
-    FileNotFoundError
-        If data file does not exist.
-    ValueError
-        If data format is not supported or data is invalid.
-        
-    Notes
-    -----
-    Normalization formula:
-        normalized = (value - median) / (iqr + eps)
-    
-    For subsampling, uses stratified sampling to maintain class balance.
-    
-    Examples
-    --------
-    >>> stats = {'flux_mean': 18.5, 'flux_std': 2.3, 
-    ...          'delta_t_mean': 0.0084, 'delta_t_std': 0.015}
-    >>> flux, dt, labels, times, fmt = load_and_prepare_data(
-    ...     Path('test.h5'), stats, n_samples=1000, seed=42
-    ... )
-    >>> flux.shape
-    (1000, 2400)
     """
     if not data_path.exists():
         raise FileNotFoundError(f"Data file not found: {data_path}")
@@ -954,28 +930,75 @@ def load_and_prepare_data(
         labels = labels[indices]
         timestamps = timestamps[indices]
     
-    # Normalize
+    # =========================================================================
+    # CRITICAL FIX: SEQUENCE COMPACTION
+    # Must match train.py's RAMLensingDataset.__getitem__ logic exactly
+    # =========================================================================
+    if logger:
+        logger.info("Applying sequence compaction (matching training pipeline)...")
+    
+    n_total, seq_len = flux.shape
     flux_mean = stats['flux_mean']
     flux_std = stats['flux_std']
     delta_t_mean = stats['delta_t_mean']
     delta_t_std = stats['delta_t_std']
     
-    flux_norm = (flux - flux_mean) / (flux_std + EPS)
-    delta_t_norm = (delta_t - delta_t_mean) / (delta_t_std + EPS)
+    # Pre-allocate compacted arrays
+    flux_compacted = np.zeros_like(flux)
+    delta_t_compacted = np.zeros_like(delta_t)
+    timestamps_compacted = np.full_like(timestamps, INVALID_TIMESTAMP)
+    valid_lengths = np.zeros(n_total, dtype=np.int32)
+    
+    for i in range(n_total):
+        # Identify valid (non-zero/non-masked) observations
+        # This matches train.py: valid_mask = flux_raw != 0.0
+        valid_mask = (flux[i] != 0.0)
+        n_valid = valid_mask.sum()
+        
+        if n_valid == 0:
+            # Edge case: entirely empty sequence
+            # Match train.py behavior: set first element to mean
+            n_valid = 1
+            flux_compacted[i, 0] = flux_mean
+            delta_t_compacted[i, 0] = 0.0
+            timestamps_compacted[i, 0] = timestamps[i, 0] if timestamps[i, 0] != INVALID_TIMESTAMP else 0.0
+        else:
+            # Compact: move valid observations to contiguous prefix [0, n_valid)
+            flux_compacted[i, :n_valid] = flux[i, valid_mask]
+            delta_t_compacted[i, :n_valid] = delta_t[i, valid_mask]
+            timestamps_compacted[i, :n_valid] = timestamps[i, valid_mask]
+        
+        valid_lengths[i] = n_valid
+    
+    if logger:
+        logger.info(f"  Compaction complete. Valid lengths: min={valid_lengths.min()}, "
+                   f"max={valid_lengths.max()}, mean={valid_lengths.mean():.1f}")
+    
+    # =========================================================================
+    # END COMPACTION FIX
+    # =========================================================================
+    
+    # Normalize (using compacted data)
+    flux_norm = (flux_compacted - flux_mean) / (flux_std + EPS)
+    delta_t_norm = (delta_t_compacted - delta_t_mean) / (delta_t_std + EPS)
     
     if logger:
         logger.info(f"Loaded {len(flux_norm)} samples")
-        logger.info(f"Flux range: [{flux.min():.2f}, {flux.max():.2f}] -> "
-                   f"[{flux_norm.min():.2f}, {flux_norm.max():.2f}]")
-        logger.info(f"Delta_t range: [{delta_t.min():.4f}, {delta_t.max():.4f}] -> "
-                   f"[{delta_t_norm.min():.2f}, {delta_t_norm.max():.2f}]")
+        
+        # Report on actual (non-zero) values only
+        flux_valid = flux_compacted[flux_compacted != 0]
+        flux_norm_valid = flux_norm[flux_compacted != 0]
+        
+        logger.info(f"Flux range (valid only): [{flux_valid.min():.2f}, {flux_valid.max():.2f}] -> "
+                   f"[{flux_norm_valid.min():.2f}, {flux_norm_valid.max():.2f}]")
         
         # Class distribution
         unique, counts = np.unique(labels, return_counts=True)
+        CLASS_NAMES = ('Flat', 'PSPL', 'Binary')
         for cls, cnt in zip(unique, counts):
             logger.info(f"  Class {CLASS_NAMES[cls]}: {cnt} ({100*cnt/len(labels):.1f}%)")
     
-    return flux_norm, delta_t_norm, labels, timestamps, data_format
+    return flux_norm, delta_t_norm, labels, timestamps_compacted, data_format
 
 
 # =============================================================================
@@ -1667,6 +1690,7 @@ class RomanEvaluator:
                 self.data_path, stats, n_samples=n_samples, 
                 seed=seed, logger=self.logger
             )
+        self.valid_lengths = get_valid_lengths(self.flux_norm)
         
         # Run inference
         self.logger.info("-" * 80)
@@ -2290,139 +2314,182 @@ class RomanEvaluator:
         self.logger.info(f"Generated: temporal_bias_check (KS p={p_value:.4f})")
     
     def plot_evolution_for_class(self, class_idx: int, sample_idx: int) -> None:
-        """
-        Generate probability evolution plot for specific sample.
+    """
+    Generate probability evolution plot for specific sample.
+    
+    Creates three-panel visualization showing:
+    1. Light curve with observation completeness
+    2. Class probability evolution over time
+    3. Prediction confidence evolution
+    
+    Parameters
+    ----------
+    class_idx : int
+        True class index (0=Flat, 1=PSPL, 2=Binary).
+    sample_idx : int
+        Index of sample in dataset.
         
-        Creates three-panel visualization showing:
-        1. Light curve with observation completeness
-        2. Class probability evolution over time
-        3. Prediction confidence evolution
+    Output
+    ------
+    evolution_{class}_{idx}.{png,pdf,svg} : file
+        Three-panel evolution plot in specified formats.
         
-        Parameters
-        ----------
-        class_idx : int
-            True class index (0=Flat, 1=PSPL, 2=Binary).
-        sample_idx : int
-            Index of sample in dataset.
+    Notes
+    -----
+    FIXED (v2.7): Now correctly handles both compacted and non-compacted data
+    by identifying valid observations and truncating by observation count,
+    not array index.
+    """
+    class_name = CLASS_NAMES[class_idx]
+    
+    # Get data
+    flux_norm = self.flux_norm[sample_idx]
+    delta_t_norm = self.delta_t_norm[sample_idx]
+    times = self.timestamps[sample_idx]
+    true_label = self.y[sample_idx]
+    
+    # =========================================================================
+    # FIX: Identify valid observations regardless of compaction state
+    # =========================================================================
+    # Check if data appears compacted (zeros only at end) or sparse (zeros scattered)
+    # A robust approach: find ALL valid (non-zero flux) indices
+    valid_indices = np.where(flux_norm != 0.0)[0]
+    n_valid = len(valid_indices)
+    
+    if n_valid < 10:
+        self.logger.warning(f"Skipping evolution for {class_name}_{sample_idx} (too few points: {n_valid})")
+        return
+    
+    # Check if data is compacted (valid indices form contiguous prefix)
+    is_compacted = (n_valid > 0 and valid_indices[-1] == n_valid - 1 and valid_indices[0] == 0)
+    
+    if not is_compacted:
+        self.logger.debug(f"Sample {sample_idx}: Data appears non-compacted, will extract valid observations")
+    
+    is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
+    
+    # =========================================================================
+    # Compute evolution by progressively including more valid observations
+    # =========================================================================
+    n_steps = 20
+    # Use observation counts from 10 to n_valid
+    obs_counts = np.linspace(10, n_valid, n_steps, dtype=int)
+    
+    probs_evolution = np.zeros((n_steps, 3))
+    times_evolution = np.zeros(n_steps)
+    
+    with torch.no_grad(), torch.inference_mode():
+        for i, n_obs in enumerate(obs_counts):
+            # =========================================================================
+            # FIX: Extract first n_obs VALID observations, then create padded array
+            # =========================================================================
+            if is_compacted:
+                # Data is compacted: valid observations are at [0, n_valid)
+                # Simple truncation works
+                flux_subset = flux_norm[:n_obs]
+                delta_t_subset = delta_t_norm[:n_obs]
+                time_at_step = times[n_obs - 1]
+            else:
+                # Data is NOT compacted: valid observations are scattered
+                # Must extract valid values and repack
+                subset_indices = valid_indices[:n_obs]
+                flux_subset = flux_norm[subset_indices]
+                delta_t_subset = delta_t_norm[subset_indices]
+                time_at_step = times[subset_indices[-1]]
             
-        Output
-        ------
-        evolution_{class}_{idx}.{png,pdf,svg} : file
-            Three-panel evolution plot in specified formats.
+            # Record time at this step (for x-axis)
+            times_evolution[i] = time_at_step
             
-        Notes
-        -----
-        Requires model to support partial sequence inference.
-        Useful for understanding early detection capabilities and
-        confidence development over observation campaign.
-        """
-        class_name = CLASS_NAMES[class_idx]
-        
-        # Get data
-        flux_norm = self.flux_norm[sample_idx]
-        delta_t_norm = self.delta_t_norm[sample_idx]
-        times = self.timestamps[sample_idx]
-        true_label = self.y[sample_idx]
-        
-        # Find valid observations (using explicit padding value)
-        valid_mask = (times != INVALID_TIMESTAMP)
-        n_valid = valid_mask.sum()
-        
-        if n_valid < 10:
-            self.logger.warning(f"Skipping evolution for {class_name}_{sample_idx} (too few points)")
-            return
-        is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
-       
-        # Compute evolution by truncating sequence
-        n_steps = 20
-        step_indices = np.linspace(10, n_valid, n_steps, dtype=int)
-        
-        probs_evolution = np.zeros((n_steps, 3))
-        times_evolution = np.zeros(n_steps)
-        
-        with torch.no_grad(), torch.inference_mode():
-            for i, n_obs in enumerate(step_indices):
-                # Truncate sequence
-                flux_trunc = flux_norm[:n_obs]
-                delta_t_trunc = delta_t_norm[:n_obs]
-                
-                # Record time at this step
-                times_evolution[i] = times[n_obs - 1]
-                
-                # Pad to max length
-                max_len = len(flux_norm)
-                flux_padded = np.zeros(max_len, dtype=np.float32)
-                delta_t_padded = np.zeros(max_len, dtype=np.float32)
-                
-                flux_padded[:n_obs] = flux_trunc
-                delta_t_padded[:n_obs] = delta_t_trunc
-                
-                # Inference
-                flux_tensor = torch.from_numpy(flux_padded[None, :]).to(self.device)
-                delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
-                
-                logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
-               
-                if is_hierarchical:
-                   probs = torch.exp(logits)
-                   probs = probs / probs.sum(dim=-1, keepdim=True)
-                else:
-                   probs = F.softmax(logits, dim=-1)
-                
-                probs_evolution[i] = probs.cpu().numpy()[0]
-        
-        # Denormalize for plotting
-        flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
-        
-        # Filter valid observations (exclude padding: flux=0, invalid timestamps)
-        valid_obs_mask = valid_mask & (flux_denorm != 0) & (flux_denorm != SimConfig.PAD_VALUE if 'SimConfig' in dir() else True)
-        times_valid = times[valid_obs_mask]
-        flux_valid = flux_denorm[valid_obs_mask]
-        
-        # Plot
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-        
-        # Panel 1: Light curve
-        ax1.scatter(times_valid, magnification_to_delta_mag(flux_valid), s=5)
-        ax1.invert_yaxis()
-        ax1.set_ylabel('Magnitude (AB)', fontsize=11)
-        ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
-                     fontsize=12, fontweight='bold')
-        ax1.grid(alpha=0.2)
-        
-        # Panel 2: Probability evolution
-        for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
-            ax2.plot(times_evolution, probs_evolution[:, i], 
-                    'o-', color=color, label=name, linewidth=2, markersize=4)
-        
-        ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-        ax2.set_ylabel('Class Probability', fontsize=11)
-        ax2.set_ylim([0, 1.05])
-        ax2.legend(fontsize=9, loc='best', framealpha=0.9)
-        ax2.grid(alpha=0.2)
-        
-        # Panel 3: Confidence
-        confidence = probs_evolution.max(axis=1)
-        predicted_class = probs_evolution.argmax(axis=1)
-        
-        ax3.plot(times_evolution, confidence, 'o-', color='black', 
-                linewidth=2, markersize=4, label='Confidence')
-        ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
-        
-        ax3.set_xlabel('Time (days)', fontsize=11)
-        ax3.set_ylabel('Max Probability', fontsize=11)
-        ax3.set_ylim([0, 1.05])
-        ax3.set_xlim([times_valid.min(), times_valid.max()])
-        ax3.legend(fontsize=9, framealpha=0.9)
-        ax3.grid(alpha=0.2)
-        
-        # Improve spacing
-        plt.subplots_adjust(hspace=0.25)
-        plt.tight_layout()
-        self._save_figure(fig, f'evolution_{class_name}_{sample_idx}')
-        plt.close()
-        
-        self.logger.debug(f"Generated: evolution_{class_name}_{sample_idx}")
+            # Pad to max sequence length for model input
+            max_len = len(flux_norm)
+            flux_padded = np.zeros(max_len, dtype=np.float32)
+            delta_t_padded = np.zeros(max_len, dtype=np.float32)
+            
+            flux_padded[:n_obs] = flux_subset
+            delta_t_padded[:n_obs] = delta_t_subset
+            
+            # Inference
+            flux_tensor = torch.from_numpy(flux_padded[None, :]).to(self.device)
+            delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
+            
+            logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
+            
+            if is_hierarchical:
+                probs = torch.exp(logits)
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(logits, dim=-1)
+            
+            probs_evolution[i] = probs.cpu().numpy()[0]
+    
+    # =========================================================================
+    # Denormalize for plotting
+    # =========================================================================
+    flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
+    
+    # Get valid observations for light curve plot
+    if is_compacted:
+        times_valid = times[:n_valid]
+        flux_valid = flux_denorm[:n_valid]
+    else:
+        times_valid = times[valid_indices]
+        flux_valid = flux_denorm[valid_indices]
+    
+    # Filter any remaining invalid values
+    plot_mask = (times_valid > 0) & (flux_valid > 0) & np.isfinite(flux_valid)
+    times_plot = times_valid[plot_mask]
+    flux_plot = flux_valid[plot_mask]
+    
+    if len(times_plot) < 3:
+        self.logger.warning(f"Skipping evolution plot for {class_name}_{sample_idx} (insufficient valid points for plot)")
+        return
+    
+    # =========================================================================
+    # Plot
+    # =========================================================================
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+    
+    # Panel 1: Light curve
+    ax1.scatter(times_plot, magnification_to_delta_mag(flux_plot), s=5)
+    ax1.invert_yaxis()
+    ax1.set_ylabel('Δ Magnitude', fontsize=11)
+    ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
+                 fontsize=12, fontweight='bold')
+    ax1.grid(alpha=0.2)
+    
+    # Panel 2: Probability evolution
+    for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
+        ax2.plot(times_evolution, probs_evolution[:, i], 
+                'o-', color=color, label=name, linewidth=2, markersize=4)
+    
+    ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax2.set_ylabel('Class Probability', fontsize=11)
+    ax2.set_ylim([0, 1.05])
+    ax2.legend(fontsize=9, loc='best', framealpha=0.9)
+    ax2.grid(alpha=0.2)
+    
+    # Panel 3: Confidence
+    confidence = probs_evolution.max(axis=1)
+    predicted_class = probs_evolution.argmax(axis=1)
+    
+    ax3.plot(times_evolution, confidence, 'o-', color='black', 
+            linewidth=2, markersize=4, label='Confidence')
+    ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
+    
+    ax3.set_xlabel('Time (days)', fontsize=11)
+    ax3.set_ylabel('Max Probability', fontsize=11)
+    ax3.set_ylim([0, 1.05])
+    ax3.set_xlim([times_plot.min(), times_plot.max()])
+    ax3.legend(fontsize=9, framealpha=0.9)
+    ax3.grid(alpha=0.2)
+    
+    # Improve spacing
+    plt.subplots_adjust(hspace=0.25)
+    plt.tight_layout()
+    self._save_figure(fig, f'evolution_{class_name}_{sample_idx}')
+    plt.close()
+    
+    self.logger.debug(f"Generated: evolution_{class_name}_{sample_idx}")
     
     def run_early_detection_analysis(self) -> None:
         """
@@ -2453,8 +2520,7 @@ class RomanEvaluator:
         fractions = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
         
         # Validate sequence lengths
-        valid_mask = (self.timestamps != INVALID_TIMESTAMP)
-        n_valid_per_sample = valid_mask.sum(axis=1)
+        n_valid_per_sample = self.valid_lengths
         min_valid = n_valid_per_sample.min()
         
         # Filter fractions that would give too few points
