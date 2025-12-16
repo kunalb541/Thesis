@@ -1847,9 +1847,15 @@ def main() -> None:
         exp_name = output_dir.name
         with open(base_output_dir / '.current_experiment', 'w') as f:
             f.write(exp_name)
+    else:
+        exp_name = None
             
     if is_ddp:
         dist.barrier()
+        exp_name_list = [exp_name] if is_main_process(rank) else [None]
+        dist.broadcast_object_list(exp_name_list, src=0)
+        exp_name = exp_name_list[0]
+        output_dir = base_output_dir / exp_name
 
     # Load data
     train_idx, val_idx, train_labels, stats = load_and_split_data(
