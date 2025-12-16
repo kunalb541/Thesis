@@ -1798,13 +1798,22 @@ def main() -> None:
         dist.barrier()
     
     # Create output directory
-    output_dir = Path(args.output)
+    base_output_dir = Path(args.output)
     if is_main_process(rank):
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_output_dir.mkdir(parents=True, exist_ok=True)
     
     if is_ddp:
         dist.barrier()
-    
+        
+    if is_main_process(rank):
+        output_dir = create_experiment_dir(base_output_dir, args)
+        exp_name = output_dir.name
+        with open(base_output_dir / '.current_experiment', 'w') as f:
+            f.write(exp_name)
+            
+    if is_ddp:
+        dist.barrier()
+
     # Load data
     train_idx, val_idx, train_labels, stats = load_and_split_data(
         args.data,
