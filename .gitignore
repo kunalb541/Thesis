@@ -86,5 +86,6 @@ data/raw/*.h5
 data/test/*.h5
 
 # But keep example data
-!data/raw/example.npz
-!data/processed/example.npz
+!data/raw
+!data/test
+!code/logs
