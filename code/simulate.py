@@ -627,12 +627,12 @@ class BinaryPresets:
             # Planets have tiny caustics, need small u0 and caustic check
             's_range': (0.6, 1.6),          # Tighter around snow line
             'q_range': (1e-4, 1e-2),        # Jupiter to super-Earth
-            'u0_range': (SHARED_U0_MIN, 0.2),  # Planets have tiny caustics
+            'u0_range': (SHARED_U0_MIN, 0.3),  # Planets have tiny caustics
             'rho_range': (1e-3, 1e-2),      # Need finite source for planets
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-            'require_caustic': True         # Force anomaly detection
+            'require_caustic': False         # Force anomaly detection
         },
         'stellar': {
             # Binary star systems (high mass ratio)
