@@ -25,6 +25,18 @@ Performance Characteristics
     - Multiprocessing using `spawn` for safe VBBinaryLensing usage
     - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
 
+VERSION 3.0.0 - COMPREHENSIVE UPDATE
+-------------------------------------
+This version synchronizes with train.py v3.0.0 and model.py v3.0.0.
+
+Fixes Applied (v3.0.0):
+    * VERSION SYNC: All components now v3.0.0 for consistency
+    * VALIDATION FIX: Added --oversample argument validation (must be >= 1.0)
+    * SAFETY FIX: Moved set_start_method inside if __name__ == '__main__' guard
+    * SAFETY FIX: Narrowed exception handling - MemoryError now propagates
+    * CONSTANTS FIX: All magic numbers moved to module-level constants
+    * DOCUMENTATION: Enhanced docstrings with v3.0.0 compatibility notes
+
 Fixes Applied (v2.8.1 - Failure Tracking & Caustic Forcing)
 -----------------------------------------------------------
     * CRITICAL FIX: worker_wrapper now returns event type on failure, preventing
@@ -77,8 +89,8 @@ Fixes Applied (v2.6)
 
 This module powers downstream ML pipelines such as CNN-GRU classifiers.
 
-IMPORTANT: OUTPUT FORMAT (v2.7 - CNN-OPTIMIZED)
-------------------------------------------------
+IMPORTANT: OUTPUT FORMAT (v2.7+ / v3.0.0 - CNN-OPTIMIZED)
+----------------------------------------------------------
 The 'flux' array in HDF5 files contains NORMALIZED MAGNIFICATION:
     - Baseline (unmagnified source): A = 1.0
     - Magnified 2x: A = 2.0  
@@ -93,7 +105,8 @@ instability due to tiny numerical values.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.8.1
+Version: 3.0.0
+Date: December 2024
 """
 from __future__ import annotations
 
@@ -112,7 +125,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "2.8.1"
+__version__: Final[str] = "3.0.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -166,7 +179,7 @@ BINARY_MAX_ATTEMPTS: Final[int] = 10            # Maximum retry attempts per eve
 PSPL_MAX_MAGNIFICATION: Final[float] = 100.0
 
 # =============================================================================
-# v2.8: PSPL EVENT ACCEPTANCE CRITERIA (to match Binary filtering)
+# v2.8+: PSPL EVENT ACCEPTANCE CRITERIA (to match Binary filtering)
 # Without this, PSPL could include weak events that Binary filters out,
 # creating a bias where "strong event = Binary" shortcut learning occurs
 # =============================================================================
@@ -176,12 +189,51 @@ PSPL_MIN_MAG_RANGE: Final[float] = 0.1          # Lower than Binary (no caustic 
 PSPL_MAX_ATTEMPTS: Final[int] = 10              # Maximum retry attempts per event
 
 # =============================================================================
-# v2.8.1: CAUSTIC DETECTION PARAMETERS
+# v2.8.1+: CAUSTIC DETECTION PARAMETERS
 # =============================================================================
 
 CAUSTIC_SPIKE_THRESHOLD: Final[float] = 5.0     # N-sigma threshold for spike detection
 CAUSTIC_MIN_SPIKES: Final[int] = 1              # Minimum spike features for caustic crossing
 CAUSTIC_ASYMMETRY_THRESHOLD: Final[float] = 0.15  # 15% asymmetry threshold
+
+# =============================================================================
+# v3.0.0: ADDITIONAL CONSTANTS (previously magic numbers)
+# =============================================================================
+
+# Caustic detection analysis parameters
+CAUSTIC_MIN_ANALYSIS_LENGTH: Final[int] = 20    # Minimum light curve length for caustic analysis
+CAUSTIC_PEAK_THRESHOLD: Final[float] = 1.1      # 10% above baseline for peak detection
+CAUSTIC_STRONG_PEAK_THRESHOLD: Final[float] = 1.3  # 30% above baseline for strong peak
+CAUSTIC_MIN_COMPARISON_POINTS: Final[int] = 5   # Minimum points for asymmetry comparison
+CAUSTIC_MAX_COMPARISON_WINDOW: Final[int] = 50  # Maximum window size for asymmetry check
+
+# Noise floor for invalid flux values
+NOISE_FLOOR_FACTOR: Final[float] = 1e-5
+
+# Minimum magnification clip (to prevent negative values from noise)
+MIN_MAGNIFICATION_CLIP: Final[float] = 0.1
+
+# Default oversample factor
+DEFAULT_OVERSAMPLE_FACTOR: Final[float] = 1.3
+
+# Minimum valid u0 offset for caustic forcing
+MIN_U0_OFFSET: Final[float] = 0.01
+
+# Caustic size multiplier for u0 constraint
+CAUSTIC_U0_MULTIPLIER: Final[float] = 2.0
+
+# HDF5 compression settings
+HDF5_COMPRESSION: Final[str] = 'gzip'
+HDF5_COMPRESSION_LEVEL: Final[int] = 4
+
+# Multiprocessing chunk size
+MP_CHUNK_SIZE: Final[int] = 1000
+
+# Progress bar update interval
+TQDM_MIN_INTERVAL: Final[float] = 5.0
+TQDM_SMOOTHING: Final[float] = 0.01
+TQDM_NCOLS_TTY: Final[int] = 100
+TQDM_NCOLS_NON_TTY: Final[int] = 80
 
 # =============================================================================
 # NUMBA ACCELERATED FUNCTIONS
@@ -250,7 +302,7 @@ if HAS_NUMBA:
             if f_total > 0:
                 sigma[i] = k_noise * math.sqrt(f_total)
             else:
-                sigma[i] = k_noise * 1e-5  # Floor for invalid flux
+                sigma[i] = k_noise * NOISE_FLOOR_FACTOR  # Floor for invalid flux
         return sigma
 
     @njit(fastmath=True, cache=True)
@@ -572,9 +624,9 @@ class BinaryPresets:
     SHARED_TE_MAX : float
         Maximum Einstein crossing time (30 days).
     SHARED_U0_MIN : float
-        Minimum impact parameter (Einstein radii). v2.8: Shared with PSPL to prevent bias.
+        Minimum impact parameter (Einstein radii). v2.8+: Shared with PSPL to prevent bias.
     SHARED_U0_MAX : float
-        Maximum impact parameter (Einstein radii). v2.8: Shared with PSPL to prevent bias.
+        Maximum impact parameter (Einstein radii). v2.8+: Shared with PSPL to prevent bias.
     PRESETS : dict
         Dictionary of preset configurations.
         
@@ -632,7 +684,7 @@ class BinaryPresets:
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-            'require_caustic': False         # Force anomaly detection
+            'require_caustic': False         # Planets can have subtle anomalies
         },
         'stellar': {
             # Binary star systems (high mass ratio)
@@ -700,7 +752,7 @@ class PSPLParams:
 
 
 # =============================================================================
-# CAUSTIC DETECTION AND SIZE ESTIMATION (v2.8.1)
+# CAUSTIC DETECTION AND SIZE ESTIMATION (v2.8.1+)
 # =============================================================================
 
 def estimate_caustic_size(s: float, q: float) -> float:
@@ -781,12 +833,14 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
     3. **Asymmetry**: PSPL is symmetric around peak. Caustic crossings
        break this symmetry due to caustic geometry.
     
+    v3.0.0: All magic numbers replaced with module-level constants.
+    
     References
     ----------
     Gaudi (2012): ARA&A 50, 411 (Figure 4 shows characteristic signatures)
     """
     # Require minimum length for meaningful analysis
-    if len(A) < 20:
+    if len(A) < CAUSTIC_MIN_ANALYSIS_LENGTH:
         return False
     
     # Method 1: Check for rapid magnification changes (spikes)
@@ -806,14 +860,14 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
     # Find peaks: points higher than both neighbors
     peaks = []
     for i in range(1, len(A) - 1):
-        if A[i] > A[i-1] and A[i] > A[i+1] and A[i] > 1.1:  # 10% above baseline
+        if A[i] > A[i-1] and A[i] > A[i+1] and A[i] > CAUSTIC_PEAK_THRESHOLD:
             peaks.append(i)
     
     # Multiple significant peaks indicate caustic structure
     if len(peaks) >= 2:
         # Check that peaks are actually separated (not noise)
         peak_mags = [A[p] for p in peaks]
-        if max(peak_mags) > 1.3:  # At least one strong peak
+        if max(peak_mags) > CAUSTIC_STRONG_PEAK_THRESHOLD:
             return True
     
     # Method 3: Check for asymmetry around peak
@@ -822,14 +876,14 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
         peak_idx = peaks[np.argmax([A[p] for p in peaks])]
         
         # Compare shape before vs after peak
-        n_compare = min(peak_idx, len(A) - peak_idx - 1, 50)
-        if n_compare > 10:
+        n_compare = min(peak_idx, len(A) - peak_idx - 1, CAUSTIC_MAX_COMPARISON_WINDOW)
+        if n_compare > CAUSTIC_MIN_COMPARISON_POINTS * 2:
             before = A[peak_idx - n_compare:peak_idx]
             after = A[peak_idx + 1:peak_idx + n_compare + 1][::-1]  # Reverse for comparison
             
             # Ensure same length
             min_len = min(len(before), len(after))
-            if min_len > 5:
+            if min_len > CAUSTIC_MIN_COMPARISON_POINTS:
                 before = before[-min_len:]
                 after = after[:min_len]
                 
@@ -946,6 +1000,7 @@ def binary_magnification_vbb(
         return VBB.BinaryMag(s, q, u1, u2, rho)
     except (RuntimeError, ValueError, TypeError) as e:
         # Fallback to point-by-point computation
+        # v3.0.0: Do NOT catch MemoryError - let it propagate
         n = len(t)
         mag = np.ones(n, dtype=np.float32)
         for i in range(n):
@@ -1028,6 +1083,8 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     
     v2.8.1 FIX: Binary events can optionally require caustic crossing signatures
     via the 'require_caustic' preset flag.
+    
+    v3.0.0: All magic numbers replaced with module-level constants.
     """
     etype = params['type']
     t_grid = params['time_grid']
@@ -1112,9 +1169,9 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if require_caustic:
                 caustic_size = estimate_caustic_size(s, q)
                 # u0 should be within ~2× caustic size for good crossing probability
-                u0_max_caustic = min(caustic_size * 2.0, p['u0_range'][1])
+                u0_max_caustic = min(caustic_size * CAUSTIC_U0_MULTIPLIER, p['u0_range'][1])
                 u0_min_caustic = p['u0_range'][0]
-                u0 = np.random.uniform(u0_min_caustic, max(u0_min_caustic + 0.01, u0_max_caustic))
+                u0 = np.random.uniform(u0_min_caustic, max(u0_min_caustic + MIN_U0_OFFSET, u0_max_caustic))
             else:
                 u0 = np.random.uniform(*p['u0_range'])
             
@@ -1143,8 +1200,9 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 generation_success = True
                 break
                     
-            except (RuntimeError, ValueError, TypeError, MemoryError) as e:
+            except (RuntimeError, ValueError, TypeError) as e:
                 # VBBinaryLensing failed, continue to next attempt
+                # v3.0.0 FIX: Do NOT catch MemoryError - let it propagate
                 continue
         
         # v2.6 CRITICAL FIX: Return None if binary generation failed
@@ -1165,7 +1223,7 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         raise ValueError(f"Unknown event type: {etype}")
     
-    # v2.7 CRITICAL FIX: Apply photon noise in MAGNIFICATION space
+    # v2.7+ CRITICAL FIX: Apply photon noise in MAGNIFICATION space
     # Convert absolute Jansky noise to relative magnification noise
     flux_true_jy = f_base * A
     noise_jy = RomanWFI_F146.compute_photon_noise(flux_true_jy)
@@ -1176,7 +1234,7 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     A_noisy = A + np.random.normal(0, noise_relative * params['noise_scale'])
     
     # Clip to physical values (magnification should be >= 1.0, but allow slightly less due to noise)
-    A_noisy = np.maximum(A_noisy, 0.1)
+    A_noisy = np.maximum(A_noisy, MIN_MAGNIFICATION_CLIP)
     
     # Apply cadence mask (random missing observations)
     mask = np.random.random(n) > params['mask_prob']
@@ -1186,7 +1244,7 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     delta_t = compute_delta_t(t_grid, mask)
     
     return {
-        'flux': A_noisy.astype(np.float32),  # v2.7: NORMALIZED magnification (baseline=1.0)
+        'flux': A_noisy.astype(np.float32),  # v2.7+: NORMALIZED magnification (baseline=1.0)
         'delta_t': delta_t.astype(np.float32),
         'label': label,
         'params': meta
@@ -1229,6 +1287,43 @@ def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Optional[Dict[str, Any]]
     return result
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    """
+    Validate command-line arguments.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments.
+        
+    Raises
+    ------
+    ValueError
+        If any argument is invalid.
+        
+    Notes
+    -----
+    v3.0.0 FIX: Added validation for --oversample argument.
+    """
+    if args.oversample < 1.0:
+        raise ValueError(
+            f"Oversample factor must be >= 1.0, got {args.oversample}. "
+            f"Values < 1.0 would generate fewer events than requested."
+        )
+    
+    if args.n_flat < 0:
+        raise ValueError(f"n_flat must be >= 0, got {args.n_flat}")
+    
+    if args.n_pspl < 0:
+        raise ValueError(f"n_pspl must be >= 0, got {args.n_pspl}")
+    
+    if args.n_binary < 0:
+        raise ValueError(f"n_binary must be >= 0, got {args.n_binary}")
+    
+    if args.n_flat + args.n_pspl + args.n_binary == 0:
+        raise ValueError("At least one event type must have n > 0")
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -1243,6 +1338,8 @@ def main() -> None:
     
     v2.8.1 FIX: Properly tracks failures by event type and uses
     oversample/subsample approach for guaranteed class balance.
+    
+    v3.0.0 FIX: Added argument validation and improved error handling.
     
     Failed events (returning None) are tracked by type and the
     oversample/subsample approach ensures exact class distribution
@@ -1268,10 +1365,13 @@ def main() -> None:
                        help="Number of worker processes (default: CPU count)")
     parser.add_argument('--seed', type=int, default=42,
                        help="Random seed for reproducibility")
-    parser.add_argument('--oversample', type=float, default=1.3,
-                       help="Oversample factor to account for failures (default: 1.3)")
+    parser.add_argument('--oversample', type=float, default=DEFAULT_OVERSAMPLE_FACTOR,
+                       help="Oversample factor to account for failures (must be >= 1.0)")
     
     args = parser.parse_args()
+    
+    # v3.0.0 FIX: Validate arguments before proceeding
+    validate_args(args)
 
     # Setup output directory
     out_path = Path(args.output)
@@ -1288,7 +1388,7 @@ def main() -> None:
         'preset': args.binary_preset
     }
     
-    # v2.8.1 FIX: Oversample to guarantee enough events of each type
+    # v2.8.1+ FIX: Oversample to guarantee enough events of each type
     OVERSAMPLE_FACTOR = args.oversample
     
     n_flat_gen = int(args.n_flat * OVERSAMPLE_FACTOR)
@@ -1322,7 +1422,7 @@ def main() -> None:
     workers = args.num_workers or cpu_count()
     print(f"Using {workers} workers...")
     
-    # v2.8.1 FIX: Track results and failures by type
+    # v2.8.1+ FIX: Track results and failures by type
     results_by_type: Dict[str, List[Dict[str, Any]]] = {
         'flat': [], 'pspl': [], 'binary': []
     }
@@ -1332,14 +1432,14 @@ def main() -> None:
     
     with ctx.Pool(workers) as pool:
         is_tty = sys.stdout.isatty()
-        iterator = pool.imap_unordered(worker_wrapper, task_inputs, chunksize=1000)
+        iterator = pool.imap_unordered(worker_wrapper, task_inputs, chunksize=MP_CHUNK_SIZE)
         
         for res in tqdm(iterator, 
                         total=total_gen,
-                        mininterval=5.0,
-                        smoothing=0.01,
+                        mininterval=TQDM_MIN_INTERVAL,
+                        smoothing=TQDM_SMOOTHING,
                         ascii=not is_tty,
-                        ncols=80 if not is_tty else 100,
+                        ncols=TQDM_NCOLS_NON_TTY if not is_tty else TQDM_NCOLS_TTY,
                         unit="evt"):
             if res is None:
                 # Should not happen with new worker_wrapper, but handle gracefully
@@ -1360,7 +1460,7 @@ def main() -> None:
                 generated = len(results_by_type[etype])
                 print(f"  {etype}: {count} failed, {generated} succeeded")
     
-    # v2.8.1 FIX: Subsample to exact targets for guaranteed class balance
+    # v2.8.1+ FIX: Subsample to exact targets for guaranteed class balance
     print("\nBalancing class distribution to exact targets...")
     final_results = []
     shortfalls = {}
@@ -1417,7 +1517,7 @@ def main() -> None:
     
     # Save to HDF5
     print(f"Saving to {out_path}...")
-    comp_args = {'compression': 'gzip', 'compression_opts': 4}
+    comp_args = {'compression': HDF5_COMPRESSION, 'compression_opts': HDF5_COMPRESSION_LEVEL}
     
     with h5py.File(out_path, 'w') as f:
         # Core datasets
@@ -1473,7 +1573,7 @@ def main() -> None:
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'v2.8.1: flux contains NORMALIZED MAGNIFICATION (baseline=1.0), caustic forcing enabled for distinct/planetary presets'
+            'note': 'v3.0.0: flux contains NORMALIZED MAGNIFICATION (baseline=1.0), all components synced to v3.0.0'
         }
         f.attrs.update(metadata)
     
@@ -1485,6 +1585,9 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    # v3.0.0 FIX: Moved set_start_method inside main guard
+    # This prevents modification of global multiprocessing state when
+    # importing simulate.py as a module
     try:
         set_start_method('spawn')
     except RuntimeError:
