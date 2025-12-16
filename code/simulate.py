@@ -1227,11 +1227,8 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # Convert absolute Jansky noise to relative magnification noise
     flux_true_jy = f_base * A
     noise_jy = RomanWFI_F146.compute_photon_noise(flux_true_jy)
-    noise_relative = noise_jy / f_base  # Noise as fraction of baseline
-    
-    # Add noise to magnification (not absolute flux)
-    # This preserves physical realism while maintaining numerical stability
-    A_noisy = A + np.random.normal(0, noise_relative * params['noise_scale'])
+    flux_noisy_jy = flux_true_jy + np.random.normal(0, noise_jy)
+    A_noisy = np.maximum(flux_noisy_jy / f_base, MIN_MAGNIFICATION_CLIP)
     
     # Clip to physical values (magnification should be >= 1.0, but allow slightly less due to noise)
     A_noisy = np.maximum(A_noisy, MIN_MAGNIFICATION_CLIP)
