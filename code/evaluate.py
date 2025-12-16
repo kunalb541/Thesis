@@ -125,6 +125,37 @@ __version__ = "2.6.0"
 # ============================================================================
 # FLUX TO MAGNITUDE CONVERSION FOR PLOTTING
 # ============================================================================
+
+def magnification_to_mag(A: np.ndarray, baseline_mag: float = 22.0) -> np.ndarray:
+    """
+    Convert magnification to apparent magnitude.
+    
+    v2.7: Added for cleaner astronomical plotting conventions.
+    
+    Parameters
+    ----------
+    A : np.ndarray
+        Magnification values (A = 1.0 is baseline, A > 1 is brighter)
+    baseline_mag : float
+        Baseline magnitude when A = 1.0 (default: 22.0 for typical Roman source)
+        
+    Returns
+    -------
+    np.ndarray
+        Apparent magnitude (m = baseline_mag - 2.5*log10(A))
+        Brighter objects have smaller (more negative) magnitude values.
+        
+    Notes
+    -----
+    When plotting, use ax.invert_yaxis() to follow astronomical convention
+    where brighter objects appear higher on the plot.
+    """
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mag = baseline_mag - 2.5 * np.log10(np.maximum(A, 1e-8))
+    mag = np.where(np.isfinite(mag) & (A > 0), mag, np.nan)
+    return mag
+
+
 def magnification_to_delta_mag(A):
     """
     Convert magnification to delta magnitude for plotting.
