@@ -680,8 +680,8 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     -------
     stats : dict
         Dictionary with keys:
-        - 'flux_mean': Median flux value
-        - 'flux_std': Interquartile range of flux
+        - 'flux_mean': Mean flux value
+        - 'flux_std': STD
         - 'delta_t_mean': Median delta_t value
         - 'delta_t_std': Interquartile range of delta_t
         
