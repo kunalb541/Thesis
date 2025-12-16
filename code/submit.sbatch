@@ -274,7 +274,7 @@ if [ $EXIT_CODE -eq 0 ]; then
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH -t 45:00
+#SBATCH -t 30:00
 #SBATCH -o logs/eval_${EXP_NAME}.out
 #SBATCH --job-name=eval_v3
 
