@@ -2,8 +2,4 @@
 *
 !.gitignore
 !.gitkeep
-!checkpoints/
 
-# But ignore contents of checkpoints too
-checkpoints/*
-!checkpoints/.gitkeep
