@@ -283,7 +283,7 @@ conda activate microlens
 cd ~/Thesis/code
 
 python evaluate.py \\
-    --checkpoint "${CHECKPOINT_PATH}" \\
+    --experiment-name  "${EXP_NAME}" \\
     --data "${TEST_FILE}" \\
     --batch-size ${EVAL_BATCH_SIZE} \\
     --early-detection \\
