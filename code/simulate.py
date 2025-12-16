@@ -25,6 +25,17 @@ Performance Characteristics
     - Multiprocessing using `spawn` for safe VBBinaryLensing usage
     - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
 
+Fixes Applied (v2.8 - Bias Removal)
+--------------------
+    * CRITICAL FIX: Aligned u0 ranges between PSPL and Binary to prevent
+      "high magnification = binary" shortcut learning. All presets now use
+      SHARED_U0_MIN/MAX identical to PSPLParams.
+    * CRITICAL FIX: Extended t0 range from 20%-80% to 10%-90% of mission
+      duration for better coverage of edge cases (partial events).
+    * CRITICAL FIX: Added PSPL acceptance criteria (retry loop) to match
+      Binary filtering, preventing "strong/detectable event = Binary" bias.
+    * MAJOR: All presets now use shared parameter constants for t0, tE, u0.
+
 Fixes Applied (v2.6)
 --------------------
     * CRITICAL FIX: Binary generation now returns None on failure instead of 
@@ -69,7 +80,7 @@ instability due to tiny numerical values.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.6
+Version: 2.8
 """
 from __future__ import annotations
 
@@ -88,7 +99,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "2.7.0"
+__version__: Final[str] = "2.8.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -140,6 +151,16 @@ BINARY_MAX_ATTEMPTS: Final[int] = 10            # Maximum retry attempts per eve
 
 # PSPL magnification cap to avoid unrealistic values
 PSPL_MAX_MAGNIFICATION: Final[float] = 100.0
+
+# =============================================================================
+# v2.8: PSPL EVENT ACCEPTANCE CRITERIA (to match Binary filtering)
+# Without this, PSPL could include weak events that Binary filters out,
+# creating a bias where "strong event = Binary" shortcut learning occurs
+# =============================================================================
+
+PSPL_MIN_MAGNIFICATION: Final[float] = 1.3      # Slightly lower than Binary (PSPL has smoother curves)
+PSPL_MIN_MAG_RANGE: Final[float] = 0.1          # Lower than Binary (no caustic features needed)
+PSPL_MAX_ATTEMPTS: Final[int] = 10              # Maximum retry attempts per event
 
 # =============================================================================
 # NUMBA ACCELERATED FUNCTIONS
@@ -522,13 +543,17 @@ class BinaryPresets:
     Attributes
     ----------
     SHARED_T0_MIN : float
-        Minimum peak time (20% of mission duration).
+        Minimum peak time (10% of mission duration).
     SHARED_T0_MAX : float
-        Maximum peak time (80% of mission duration).
+        Maximum peak time (90% of mission duration).
     SHARED_TE_MIN : float
         Minimum Einstein crossing time (5 days).
     SHARED_TE_MAX : float
         Maximum Einstein crossing time (30 days).
+    SHARED_U0_MIN : float
+        Minimum impact parameter (Einstein radii). v2.8: Shared with PSPL to prevent bias.
+    SHARED_U0_MAX : float
+        Maximum impact parameter (Einstein radii). v2.8: Shared with PSPL to prevent bias.
     PRESETS : dict
         Dictionary of preset configurations.
         
@@ -538,18 +563,24 @@ class BinaryPresets:
     - Mao & Paczynski (1991) for binary lens geometry
     - Gaudi (2012) review for planetary microlensing
     - OGLE and MOA survey statistics for observed events
+    
+    v2.8 BIAS FIX: Extended t0 range to 10%-90% to include edge cases (partial events).
+    v2.8 BIAS FIX: All presets now use SHARED_U0 range identical to PSPLParams to prevent
+    the model from learning "very high magnification = binary" shortcut.
     """
-    SHARED_T0_MIN: float = 0.2 * SimConfig.TIME_MAX
-    SHARED_T0_MAX: float = 0.8 * SimConfig.TIME_MAX
+    SHARED_T0_MIN: float = 0.1 * SimConfig.TIME_MAX   # v2.8: was 0.2, extended for edge cases
+    SHARED_T0_MAX: float = 0.9 * SimConfig.TIME_MAX   # v2.8: was 0.8, extended for edge cases
     SHARED_TE_MIN: float = 5.0
     SHARED_TE_MAX: float = 30.0
+    SHARED_U0_MIN: float = 0.01   # v2.8: Shared with PSPL to prevent bias
+    SHARED_U0_MAX: float = 0.5    # v2.8: Shared with PSPL to prevent bias
     
     PRESETS: Dict[str, Dict[str, Tuple[float, float]]] = {
         'distinct': {
             # Resonant caustics near s=1, guaranteed crossings
             's_range': (0.90, 1.10),
             'q_range': (0.1, 1.0),
-            'u0_range': (0.0001, 0.4),
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.0001, 0.4), now shared with PSPL
             'rho_range': (1e-4, 5e-3),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -559,7 +590,7 @@ class BinaryPresets:
             # Exoplanet detection regime (low mass ratio)
             's_range': (0.5, 2.0),
             'q_range': (1e-4, 1e-2),
-            'u0_range': (0.001, 0.3),
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.3), now shared with PSPL
             'rho_range': (1e-4, 1e-2),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -569,7 +600,7 @@ class BinaryPresets:
             # Binary star systems (high mass ratio)
             's_range': (0.3, 3.0),
             'q_range': (0.3, 1.0),
-            'u0_range': (0.001, 0.3),
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.3), now shared with PSPL
             'rho_range': (1e-3, 5e-2),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -579,7 +610,7 @@ class BinaryPresets:
             # Full parameter space for general training
             's_range': (0.5, 2.0),
             'q_range': (1e-3, 1.0),
-            'u0_range': (0.001, 0.5),
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.5), now shared with PSPL
             'rho_range': (1e-4, 0.05),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -614,13 +645,17 @@ class PSPLParams:
     v2.6: u0 range tightened to (0.01, 0.5) to avoid:
     - Extreme magnifications at very low u0 (numerical instability)
     - Undetectable events at high u0 (weak signal)
+    
+    v2.8 BIAS FIX: Now uses SHARED_U0 from BinaryPresets to ensure identical
+    u0 distribution between PSPL and Binary, preventing the model from learning
+    "very high magnification = binary" shortcut.
     """
     T0_MIN: float = BinaryPresets.SHARED_T0_MIN
     T0_MAX: float = BinaryPresets.SHARED_T0_MAX
     TE_MIN: float = BinaryPresets.SHARED_TE_MIN
     TE_MAX: float = BinaryPresets.SHARED_TE_MAX
-    U0_MIN: float = 0.01   # Avoid extreme magnifications
-    U0_MAX: float = 0.5    # Focus on detectable events
+    U0_MIN: float = BinaryPresets.SHARED_U0_MIN   # v2.8: Now shared with Binary
+    U0_MAX: float = BinaryPresets.SHARED_U0_MAX   # v2.8: Now shared with Binary
 
 
 # =============================================================================
@@ -822,13 +857,38 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         label = 0
         
     elif etype == 'pspl':
-        t0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
-        tE = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
-        u0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
-        A = pspl_magnification(t_grid, tE, u0, t0)
+        # v2.8 BIAS FIX: PSPL now has acceptance criteria like Binary
+        # This ensures PSPL events are similarly detectable, preventing
+        # the model from learning "strong/detectable event = Binary" shortcut
+        generation_success = False
+        t0: Optional[float] = None
+        tE: Optional[float] = None
+        u0: Optional[float] = None
+        A: Optional[np.ndarray] = None
         
-        # Cap extreme magnifications for physical realism
-        A = np.minimum(A, PSPL_MAX_MAGNIFICATION)
+        for attempt in range(PSPL_MAX_ATTEMPTS):
+            t0 = np.random.uniform(PSPLParams.T0_MIN, PSPLParams.T0_MAX)
+            tE = np.random.uniform(PSPLParams.TE_MIN, PSPLParams.TE_MAX)
+            u0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
+            A_candidate = pspl_magnification(t_grid, tE, u0, t0)
+            
+            # Cap extreme magnifications for physical realism
+            A_candidate = np.minimum(A_candidate, PSPL_MAX_MAGNIFICATION)
+            
+            max_mag = np.max(A_candidate)
+            min_mag = np.min(A_candidate)
+            mag_range = max_mag - min_mag
+            
+            # v2.8: Apply acceptance criteria (similar to Binary but slightly relaxed)
+            if (PSPL_MIN_MAGNIFICATION < max_mag < PSPL_MAX_MAGNIFICATION 
+                and mag_range > PSPL_MIN_MAG_RANGE):
+                A = A_candidate
+                generation_success = True
+                break
+        
+        # v2.8: Return None if PSPL generation failed (consistent with Binary behavior)
+        if not generation_success or A is None:
+            return None
         
         label = 1
         meta.update({'t0': float(t0), 'tE': float(tE), 'u0': float(u0)})
