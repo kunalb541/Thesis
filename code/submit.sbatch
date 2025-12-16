@@ -243,7 +243,7 @@ import h5py
 import numpy as np
 import sys
 
-with h5py.File("../data/raw/train_1M_distinct.h5", 'r') as f:
+with h5py.File("../data/raw/train.h5", 'r') as f:
     flux = f['flux'][:]
     
 flux_valid = flux[flux != 0]
