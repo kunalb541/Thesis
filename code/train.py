@@ -1577,7 +1577,7 @@ def load_checkpoint_for_resume(
     best_acc : float
         Best validation accuracy from checkpoint.
     """
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
     
     # Handle DDP wrapper
     if isinstance(model, DDP):
