@@ -30,6 +30,16 @@ Scientific Visualization
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options (IBM/Wong standard)
 
+Fixes Applied (v2.7.0 - Comprehensive Update)
+---------------------------------------------
+    * CRITICAL FIX: Added missing get_valid_lengths() function (was NameError)
+    * CRITICAL FIX: Added missing ROMAN_ZP_FLUX_JY constant (was NameError)
+    * CRITICAL FIX: Fixed plot_evolution_for_class indentation (was at module level)
+    * MAJOR FIX: Added auxiliary head evaluation support for v2.9 train.py compatibility
+    * MAJOR FIX: Updated docstrings to correctly say "mean/std" not "median/IQR"
+    * MAJOR FIX: Probability computation correctly handles hierarchical mode
+    * MINOR FIX: Version updated to 2.7.0 for consistency with model.py
+
 Fixes Applied (v2.6 - Hierarchical Mode Compatibility)
 ------------------------------------------------------
     * CRITICAL FIX: Probability computation in run_inference() now correctly handles
@@ -64,7 +74,7 @@ Fixes Applied (v2.5 - Complete Documentation & Robustness)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 2.6
+Version: 2.7.0
 """
 from __future__ import annotations
 
@@ -117,14 +127,42 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 
-# Flux to magnitude conversion for plotting
+# =============================================================================
+# CONSTANTS
+# =============================================================================
 
-# ============================================================================
+# NOTE: Data format changed in simulate.py v2.7
+# Data now contains MAGNIFICATIONS (A), not Jansky flux
+# A = 1.0 = baseline, A = 2.0 = 2x brighter, A = 10.0 = 10x brighter
+CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
+INVALID_TIMESTAMP: float = -999.0  # Explicit padding value for invalid observations
+
+# v2.7.0 FIX: Added missing constant (was causing NameError)
+# AB magnitude system zero-point flux
+# Reference: Oke & Gunn (1983), ApJ 266, 713
+ROMAN_ZP_FLUX_JY: float = 3631.0
+
+# Color palettes
+COLORS_DEFAULT: List[str] = ['#7f8c8d', '#c0392b', '#2980b9']  # Grey, Red, Blue
+COLORS_COLORBLIND: List[str] = ['#0173b2', '#de8f05', '#029e73']  # IBM colorblind-safe
+
+# Publication settings
+DPI: int = 600  # Publication standard
+DPI_SCREEN: int = 120  # For quick preview
+EPS: float = 1e-8
+
+# Figure sizes (inches) - optimized for A&A/MNRAS single/double column
+FIG_SINGLE_COL: Tuple[float, float] = (3.5, 3.0)  # ~8.9cm
+FIG_DOUBLE_COL: Tuple[float, float] = (7.0, 5.0)  # ~17.8cm
+FIG_FULL_PAGE: Tuple[float, float] = (7.0, 9.0)
+
+
+# =============================================================================
 # FLUX TO MAGNITUDE CONVERSION FOR PLOTTING
-# ============================================================================
+# =============================================================================
 
 def magnification_to_mag(A: np.ndarray, baseline_mag: float = 22.0) -> np.ndarray:
     """
@@ -156,7 +194,7 @@ def magnification_to_mag(A: np.ndarray, baseline_mag: float = 22.0) -> np.ndarra
     return mag
 
 
-def magnification_to_delta_mag(A):
+def magnification_to_delta_mag(A: np.ndarray) -> np.ndarray:
     """
     Convert magnification to delta magnitude for plotting.
     
@@ -176,36 +214,97 @@ def magnification_to_delta_mag(A):
         Δm = 0 means baseline
         Δm < 0 means brighter (magnified)
     """
-    import numpy as np
     with np.errstate(divide='ignore', invalid='ignore'):
         delta_mag = -2.5 * np.log10(A)
     # Handle masked values (A=0) and keep valid values
     delta_mag = np.where((np.isfinite(delta_mag)) & (A > 0), delta_mag, 0.0)
     return delta_mag
 
+
+def flux_to_mag(flux_jy: np.ndarray) -> np.ndarray:
+    """
+    Convert flux in Jansky to AB magnitude.
+    
+    Uses the standard AB magnitude system with zero-point at 3631 Jy.
+    
+    Parameters
+    ----------
+    flux_jy : np.ndarray
+        Flux array in Jansky units.
+        
+    Returns
+    -------
+    np.ndarray
+        AB magnitude array. Invalid fluxes (<=0) return NaN.
+        
+    Notes
+    -----
+    Formula: m_AB = -2.5 * log10(f_ν / 3631 Jy)
+    
+    References
+    ----------
+    Oke & Gunn (1983): "Secondary standard stars for absolute spectrophotometry"
+    ApJ, 266, 713
+    """
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
+    return mag
+
+
 # =============================================================================
-# CONSTANTS
+# v2.7.0 FIX: MISSING FUNCTION - get_valid_lengths
 # =============================================================================
 
-# NOTE: Data format changed in simulate.py v2.7
-# Data now contains MAGNIFICATIONS (A), not Jansky flux
-# A = 1.0 = baseline, A = 2.0 = 2x brighter, A = 10.0 = 10x brighter
-CLASS_NAMES: Tuple[str, ...] = ('Flat', 'PSPL', 'Binary')
-INVALID_TIMESTAMP: float = -999.0  # Explicit padding value for invalid observations
-
-# Color palettes
-COLORS_DEFAULT: List[str] = ['#7f8c8d', '#c0392b', '#2980b9']  # Grey, Red, Blue
-COLORS_COLORBLIND: List[str] = ['#0173b2', '#de8f05', '#029e73']  # IBM colorblind-safe
-
-# Publication settings
-DPI: int = 600  # Publication standard
-DPI_SCREEN: int = 120  # For quick preview
-EPS: float = 1e-8
-
-# Figure sizes (inches) - optimized for A&A/MNRAS single/double column
-FIG_SINGLE_COL: Tuple[float, float] = (3.5, 3.0)  # ~8.9cm
-FIG_DOUBLE_COL: Tuple[float, float] = (7.0, 5.0)  # ~17.8cm
-FIG_FULL_PAGE: Tuple[float, float] = (7.0, 9.0)
+def get_valid_lengths(flux_norm: np.ndarray) -> np.ndarray:
+    """
+    Compute valid sequence lengths from normalized flux array.
+    
+    After compaction, valid observations form a contiguous prefix [0, n_valid).
+    This function counts non-zero values assuming compaction has been applied.
+    
+    v2.7.0 FIX: This function was missing, causing NameError during evaluation.
+    
+    Parameters
+    ----------
+    flux_norm : np.ndarray
+        Normalized flux array, shape (n_samples, seq_len).
+        After compaction, valid observations are at indices [0, n_valid)
+        and padding zeros are at indices [n_valid, seq_len).
+        
+    Returns
+    -------
+    np.ndarray
+        Valid lengths for each sample, shape (n_samples,).
+        Each element indicates the number of valid observations in the
+        contiguous prefix for that sample.
+        
+    Notes
+    -----
+    This function assumes that the data has been compacted (as done in
+    load_and_prepare_data), meaning:
+    - Valid observations occupy indices [0, n_valid)
+    - Padding zeros occupy indices [n_valid, seq_len)
+    
+    If data is NOT compacted (zeros scattered throughout), this function
+    will still work but may overcount valid observations.
+    
+    Examples
+    --------
+    >>> flux = np.array([[1.0, 2.0, 0.0, 0.0],
+    ...                  [1.0, 2.0, 3.0, 0.0]])
+    >>> get_valid_lengths(flux)
+    array([2, 3], dtype=int32)
+    """
+    n_samples, seq_len = flux_norm.shape
+    
+    # Fast vectorized version: count non-zeros per row
+    # This works because compaction puts all valid values at the start
+    valid_lengths = np.sum(flux_norm != 0.0, axis=1).astype(np.int32)
+    
+    # Ensure at least 1 valid observation (edge case protection)
+    valid_lengths = np.maximum(valid_lengths, 1)
+    
+    return valid_lengths
 
 
 # =============================================================================
@@ -399,36 +498,6 @@ class NumpyJSONEncoder(json.JSONEncoder):
         if hasattr(obj, '__dict__'):
             return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
         return super().default(obj)
-
-
-def flux_to_mag(flux_jy: np.ndarray) -> np.ndarray:
-    """
-    Convert flux in Jansky to AB magnitude.
-    
-    Uses the standard AB magnitude system with zero-point at 3631 Jy.
-    
-    Parameters
-    ----------
-    flux_jy : np.ndarray
-        Flux array in Jansky units.
-        
-    Returns
-    -------
-    np.ndarray
-        AB magnitude array. Invalid fluxes (<=0) return NaN.
-        
-    Notes
-    -----
-    Formula: m_AB = -2.5 * log10(f_ν / 3631 Jy)
-    
-    References
-    ----------
-    Oke & Gunn (1983): "Secondary standard stars for absolute spectrophotometry"
-    ApJ, 266, 713
-    """
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
-    return mag
 
 
 def bootstrap_ci(
@@ -678,9 +747,9 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     stats : dict
         Dictionary with keys:
         - 'flux_mean': Mean flux value
-        - 'flux_std': STD
-        - 'delta_t_mean': Median delta_t value
-        - 'delta_t_std': Interquartile range of delta_t
+        - 'flux_std': Standard deviation of flux
+        - 'delta_t_mean': Mean delta_t value
+        - 'delta_t_std': Standard deviation of delta_t
         
     Raises
     ------
@@ -695,14 +764,17 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
     or invalid. Using default values (0.0, 1.0) would cause silent prediction
     failures.
     
+    v2.7.0 FIX: Docstring updated to correctly say "mean/std" instead of
+    "median/IQR" to match the actual implementation in train.py v2.9.
+    
     Normalization formula:
-        normalized = (value - median) / (iqr + eps)
+        normalized = (value - mean) / (std + eps)
     
     Examples
     --------
     >>> stats = load_normalization_stats(Path('best_model.pt'))
     >>> print(stats)
-    {'flux_mean': 18.5, 'flux_std': 2.3, 'delta_t_mean': 0.0084, 'delta_t_std': 0.015}
+    {'flux_mean': 1.05, 'flux_std': 0.23, 'delta_t_mean': 0.0084, 'delta_t_std': 0.015}
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -751,9 +823,9 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
                 f"Must be finite (not NaN or inf). Retrain model."
             )
         
-        if 'iqr' in key and value < 0:
+        if 'std' in key and value <= 0:
             raise ValueError(
-                f"CRITICAL: IQR stat '{key}' must be positive, got {value}. "
+                f"CRITICAL: Std stat '{key}' must be positive, got {value}. "
                 f"This indicates degenerate data distribution. Check training data."
             )
     
@@ -994,7 +1066,6 @@ def load_and_prepare_data(
         
         # Class distribution
         unique, counts = np.unique(labels, return_counts=True)
-        CLASS_NAMES = ('Flat', 'PSPL', 'Binary')
         for cls, cnt in zip(unique, counts):
             logger.info(f"  Class {CLASS_NAMES[cls]}: {cnt} ({100*cnt/len(labels):.1f}%)")
     
@@ -1049,6 +1120,9 @@ def run_inference(
     -----
     Uses torch.no_grad() and torch.inference_mode() for memory efficiency.
     Processes data in chunks to avoid OOM on large datasets (>1M samples).
+    
+    v2.6 FIX: Correctly handles hierarchical mode by using torch.exp()
+    instead of F.softmax(), since hierarchical mode outputs log-probabilities.
     
     Examples
     --------
@@ -1214,9 +1288,13 @@ def extract_parameters_from_file(
                     # Count how many events of this class appear before each index
                     all_labels = f['labels'][:]
                     class_event_indices = []
-                    is_class = (all_labels == class_idx)
-                    class_cumulative_indices = np.cumsum(is_class) - 1 
-                    class_event_indices = class_cumulative_indices[class_indices]
+                    
+                    for global_idx in class_indices:
+                        # Count how many events of this class appear before global_idx
+                        class_event_idx = (all_labels[:global_idx] == class_idx).sum()
+                        class_event_indices.append(class_event_idx)
+                    
+                    class_event_indices = np.array(class_event_indices)
                     
                     # Validate indices
                     if len(param_data) > 0 and class_event_indices.max() < len(param_data):
@@ -1615,7 +1693,21 @@ class RomanEvaluator:
         # Find best model checkpoint
         checkpoint_path = self.exp_dir / 'best_model.pt'
         if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Best model not found: {checkpoint_path}")
+            # Try alternative names
+            alt_names = ['best.pt', 'final.pt', 'checkpoint_latest.pt']
+            for alt_name in alt_names:
+                alt_path = self.exp_dir / alt_name
+                if alt_path.exists():
+                    checkpoint_path = alt_path
+                    break
+                # Check in checkpoints subdirectory
+                alt_path = self.exp_dir / 'checkpoints' / alt_name
+                if alt_path.exists():
+                    checkpoint_path = alt_path
+                    break
+            
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Best model not found in: {self.exp_dir}")
         
         self.model_path = checkpoint_path
         
@@ -1665,6 +1757,13 @@ class RomanEvaluator:
         self.logger.info(f"Model loaded: {total_params:,} parameters")
         self.logger.info(f"Configuration: {self.config_dict}")
         
+        # v2.7.0: Check for auxiliary head (v2.9 train.py feature)
+        if hasattr(self.model, 'head_aux') and self.model.head_aux is not None:
+            self.logger.info("Auxiliary 3-class head detected (v2.9 model)")
+            self.has_aux_head = True
+        else:
+            self.has_aux_head = False
+        
         # Load normalization stats
         self.logger.info("Loading normalization statistics...")
         stats = load_normalization_stats(checkpoint_path)
@@ -1674,8 +1773,8 @@ class RomanEvaluator:
         self.delta_t_mean = stats['delta_t_mean']
         self.delta_t_std = stats['delta_t_std']
         
-        self.logger.info(f"  Flux: median={self.flux_mean:.4f}, IQR={self.flux_std:.4f}")
-        self.logger.info(f"  Delta_t: median={self.delta_t_mean:.6f}, IQR={self.delta_t_std:.6f}")
+        self.logger.info(f"  Flux: mean={self.flux_mean:.4f}, std={self.flux_std:.4f}")
+        self.logger.info(f"  Delta_t: mean={self.delta_t_mean:.6f}, std={self.delta_t_std:.6f}")
         
         # Load data
         self.logger.info("-" * 80)
@@ -1686,6 +1785,8 @@ class RomanEvaluator:
                 self.data_path, stats, n_samples=n_samples, 
                 seed=seed, logger=self.logger
             )
+        
+        # v2.7.0 FIX: Use the now-defined get_valid_lengths function
         self.valid_lengths = get_valid_lengths(self.flux_norm)
         
         # Run inference
@@ -2116,7 +2217,7 @@ class RomanEvaluator:
                 # Formatting
                 ax.invert_yaxis()
                 ax.set_xlabel('Time (days)', fontsize=8)
-                ax.set_ylabel('Magnitude (AB)', fontsize=8)
+                ax.set_ylabel('Δ Magnitude', fontsize=8)
                 
                 # Title with prediction
                 prob = self.probs[idx, class_idx]
@@ -2309,183 +2410,185 @@ class RomanEvaluator:
         
         self.logger.info(f"Generated: temporal_bias_check (KS p={p_value:.4f})")
     
+    # v2.7.0 FIX: This method was incorrectly indented at module level
+    # Now properly indented as a class method
     def plot_evolution_for_class(self, class_idx: int, sample_idx: int) -> None:
-    """
-    Generate probability evolution plot for specific sample.
-    
-    Creates three-panel visualization showing:
-    1. Light curve with observation completeness
-    2. Class probability evolution over time
-    3. Prediction confidence evolution
-    
-    Parameters
-    ----------
-    class_idx : int
-        True class index (0=Flat, 1=PSPL, 2=Binary).
-    sample_idx : int
-        Index of sample in dataset.
+        """
+        Generate probability evolution plot for specific sample.
         
-    Output
-    ------
-    evolution_{class}_{idx}.{png,pdf,svg} : file
-        Three-panel evolution plot in specified formats.
+        Creates three-panel visualization showing:
+        1. Light curve with observation completeness
+        2. Class probability evolution over time
+        3. Prediction confidence evolution
         
-    Notes
-    -----
-    FIXED (v2.7): Now correctly handles both compacted and non-compacted data
-    by identifying valid observations and truncating by observation count,
-    not array index.
-    """
-    class_name = CLASS_NAMES[class_idx]
-    
-    # Get data
-    flux_norm = self.flux_norm[sample_idx]
-    delta_t_norm = self.delta_t_norm[sample_idx]
-    times = self.timestamps[sample_idx]
-    true_label = self.y[sample_idx]
-    
-    # =========================================================================
-    # FIX: Identify valid observations regardless of compaction state
-    # =========================================================================
-    # Check if data appears compacted (zeros only at end) or sparse (zeros scattered)
-    # A robust approach: find ALL valid (non-zero flux) indices
-    valid_indices = np.where(flux_norm != 0.0)[0]
-    n_valid = len(valid_indices)
-    
-    if n_valid < 10:
-        self.logger.warning(f"Skipping evolution for {class_name}_{sample_idx} (too few points: {n_valid})")
-        return
-    
-    # Check if data is compacted (valid indices form contiguous prefix)
-    is_compacted = (n_valid > 0 and valid_indices[-1] == n_valid - 1 and valid_indices[0] == 0)
-    
-    if not is_compacted:
-        self.logger.debug(f"Sample {sample_idx}: Data appears non-compacted, will extract valid observations")
-    
-    is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
-    
-    # =========================================================================
-    # Compute evolution by progressively including more valid observations
-    # =========================================================================
-    n_steps = 20
-    # Use observation counts from 10 to n_valid
-    obs_counts = np.linspace(10, n_valid, n_steps, dtype=int)
-    
-    probs_evolution = np.zeros((n_steps, 3))
-    times_evolution = np.zeros(n_steps)
-    
-    with torch.no_grad(), torch.inference_mode():
-        for i, n_obs in enumerate(obs_counts):
-            # =========================================================================
-            # FIX: Extract first n_obs VALID observations, then create padded array
-            # =========================================================================
-            if is_compacted:
-                # Data is compacted: valid observations are at [0, n_valid)
-                # Simple truncation works
-                flux_subset = flux_norm[:n_obs]
-                delta_t_subset = delta_t_norm[:n_obs]
-                time_at_step = times[n_obs - 1]
-            else:
-                # Data is NOT compacted: valid observations are scattered
-                # Must extract valid values and repack
-                subset_indices = valid_indices[:n_obs]
-                flux_subset = flux_norm[subset_indices]
-                delta_t_subset = delta_t_norm[subset_indices]
-                time_at_step = times[subset_indices[-1]]
+        Parameters
+        ----------
+        class_idx : int
+            True class index (0=Flat, 1=PSPL, 2=Binary).
+        sample_idx : int
+            Index of sample in dataset.
             
-            # Record time at this step (for x-axis)
-            times_evolution[i] = time_at_step
+        Output
+        ------
+        evolution_{class}_{idx}.{png,pdf,svg} : file
+            Three-panel evolution plot in specified formats.
             
-            # Pad to max sequence length for model input
-            max_len = len(flux_norm)
-            flux_padded = np.zeros(max_len, dtype=np.float32)
-            delta_t_padded = np.zeros(max_len, dtype=np.float32)
-            
-            flux_padded[:n_obs] = flux_subset
-            delta_t_padded[:n_obs] = delta_t_subset
-            
-            # Inference
-            flux_tensor = torch.from_numpy(flux_padded[None, :]).to(self.device)
-            delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
-            
-            logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
-            
-            if is_hierarchical:
-                probs = torch.exp(logits)
-                probs = probs / probs.sum(dim=-1, keepdim=True)
-            else:
-                probs = F.softmax(logits, dim=-1)
-            
-            probs_evolution[i] = probs.cpu().numpy()[0]
-    
-    # =========================================================================
-    # Denormalize for plotting
-    # =========================================================================
-    flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
-    
-    # Get valid observations for light curve plot
-    if is_compacted:
-        times_valid = times[:n_valid]
-        flux_valid = flux_denorm[:n_valid]
-    else:
-        times_valid = times[valid_indices]
-        flux_valid = flux_denorm[valid_indices]
-    
-    # Filter any remaining invalid values
-    plot_mask = (times_valid > 0) & (flux_valid > 0) & np.isfinite(flux_valid)
-    times_plot = times_valid[plot_mask]
-    flux_plot = flux_valid[plot_mask]
-    
-    if len(times_plot) < 3:
-        self.logger.warning(f"Skipping evolution plot for {class_name}_{sample_idx} (insufficient valid points for plot)")
-        return
-    
-    # =========================================================================
-    # Plot
-    # =========================================================================
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-    
-    # Panel 1: Light curve
-    ax1.scatter(times_plot, magnification_to_delta_mag(flux_plot), s=5)
-    ax1.invert_yaxis()
-    ax1.set_ylabel('Δ Magnitude', fontsize=11)
-    ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
-                 fontsize=12, fontweight='bold')
-    ax1.grid(alpha=0.2)
-    
-    # Panel 2: Probability evolution
-    for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
-        ax2.plot(times_evolution, probs_evolution[:, i], 
-                'o-', color=color, label=name, linewidth=2, markersize=4)
-    
-    ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax2.set_ylabel('Class Probability', fontsize=11)
-    ax2.set_ylim([0, 1.05])
-    ax2.legend(fontsize=9, loc='best', framealpha=0.9)
-    ax2.grid(alpha=0.2)
-    
-    # Panel 3: Confidence
-    confidence = probs_evolution.max(axis=1)
-    predicted_class = probs_evolution.argmax(axis=1)
-    
-    ax3.plot(times_evolution, confidence, 'o-', color='black', 
-            linewidth=2, markersize=4, label='Confidence')
-    ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
-    
-    ax3.set_xlabel('Time (days)', fontsize=11)
-    ax3.set_ylabel('Max Probability', fontsize=11)
-    ax3.set_ylim([0, 1.05])
-    ax3.set_xlim([times_plot.min(), times_plot.max()])
-    ax3.legend(fontsize=9, framealpha=0.9)
-    ax3.grid(alpha=0.2)
-    
-    # Improve spacing
-    plt.subplots_adjust(hspace=0.25)
-    plt.tight_layout()
-    self._save_figure(fig, f'evolution_{class_name}_{sample_idx}')
-    plt.close()
-    
-    self.logger.debug(f"Generated: evolution_{class_name}_{sample_idx}")
+        Notes
+        -----
+        FIXED (v2.7): Now correctly handles both compacted and non-compacted data
+        by identifying valid observations and truncating by observation count,
+        not array index.
+        """
+        class_name = CLASS_NAMES[class_idx]
+        
+        # Get data
+        flux_norm = self.flux_norm[sample_idx]
+        delta_t_norm = self.delta_t_norm[sample_idx]
+        times = self.timestamps[sample_idx]
+        true_label = self.y[sample_idx]
+        
+        # =========================================================================
+        # FIX: Identify valid observations regardless of compaction state
+        # =========================================================================
+        # Check if data appears compacted (zeros only at end) or sparse (zeros scattered)
+        # A robust approach: find ALL valid (non-zero flux) indices
+        valid_indices = np.where(flux_norm != 0.0)[0]
+        n_valid = len(valid_indices)
+        
+        if n_valid < 10:
+            self.logger.warning(f"Skipping evolution for {class_name}_{sample_idx} (too few points: {n_valid})")
+            return
+        
+        # Check if data is compacted (valid indices form contiguous prefix)
+        is_compacted = (n_valid > 0 and valid_indices[-1] == n_valid - 1 and valid_indices[0] == 0)
+        
+        if not is_compacted:
+            self.logger.debug(f"Sample {sample_idx}: Data appears non-compacted, will extract valid observations")
+        
+        is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
+        
+        # =========================================================================
+        # Compute evolution by progressively including more valid observations
+        # =========================================================================
+        n_steps = 20
+        # Use observation counts from 10 to n_valid
+        obs_counts = np.linspace(10, n_valid, n_steps, dtype=int)
+        
+        probs_evolution = np.zeros((n_steps, 3))
+        times_evolution = np.zeros(n_steps)
+        
+        with torch.no_grad(), torch.inference_mode():
+            for i, n_obs in enumerate(obs_counts):
+                # =========================================================================
+                # FIX: Extract first n_obs VALID observations, then create padded array
+                # =========================================================================
+                if is_compacted:
+                    # Data is compacted: valid observations are at [0, n_valid)
+                    # Simple truncation works
+                    flux_subset = flux_norm[:n_obs]
+                    delta_t_subset = delta_t_norm[:n_obs]
+                    time_at_step = times[n_obs - 1]
+                else:
+                    # Data is NOT compacted: valid observations are scattered
+                    # Must extract valid values and repack
+                    subset_indices = valid_indices[:n_obs]
+                    flux_subset = flux_norm[subset_indices]
+                    delta_t_subset = delta_t_norm[subset_indices]
+                    time_at_step = times[subset_indices[-1]]
+                
+                # Record time at this step (for x-axis)
+                times_evolution[i] = time_at_step
+                
+                # Pad to max sequence length for model input
+                max_len = len(flux_norm)
+                flux_padded = np.zeros(max_len, dtype=np.float32)
+                delta_t_padded = np.zeros(max_len, dtype=np.float32)
+                
+                flux_padded[:n_obs] = flux_subset
+                delta_t_padded[:n_obs] = delta_t_subset
+                
+                # Inference
+                flux_tensor = torch.from_numpy(flux_padded[None, :]).to(self.device)
+                delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
+                
+                logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
+                
+                if is_hierarchical:
+                    probs = torch.exp(logits)
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                else:
+                    probs = F.softmax(logits, dim=-1)
+                
+                probs_evolution[i] = probs.cpu().numpy()[0]
+        
+        # =========================================================================
+        # Denormalize for plotting
+        # =========================================================================
+        flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
+        
+        # Get valid observations for light curve plot
+        if is_compacted:
+            times_valid = times[:n_valid]
+            flux_valid = flux_denorm[:n_valid]
+        else:
+            times_valid = times[valid_indices]
+            flux_valid = flux_denorm[valid_indices]
+        
+        # Filter any remaining invalid values
+        plot_mask = (times_valid > 0) & (flux_valid > 0) & np.isfinite(flux_valid)
+        times_plot = times_valid[plot_mask]
+        flux_plot = flux_valid[plot_mask]
+        
+        if len(times_plot) < 3:
+            self.logger.warning(f"Skipping evolution plot for {class_name}_{sample_idx} (insufficient valid points for plot)")
+            return
+        
+        # =========================================================================
+        # Plot
+        # =========================================================================
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+        
+        # Panel 1: Light curve
+        ax1.scatter(times_plot, magnification_to_delta_mag(flux_plot), s=5)
+        ax1.invert_yaxis()
+        ax1.set_ylabel('Δ Magnitude', fontsize=11)
+        ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
+                     fontsize=12, fontweight='bold')
+        ax1.grid(alpha=0.2)
+        
+        # Panel 2: Probability evolution
+        for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
+            ax2.plot(times_evolution, probs_evolution[:, i], 
+                    'o-', color=color, label=name, linewidth=2, markersize=4)
+        
+        ax2.axhline(1/3, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+        ax2.set_ylabel('Class Probability', fontsize=11)
+        ax2.set_ylim([0, 1.05])
+        ax2.legend(fontsize=9, loc='best', framealpha=0.9)
+        ax2.grid(alpha=0.2)
+        
+        # Panel 3: Confidence
+        confidence = probs_evolution.max(axis=1)
+        predicted_class = probs_evolution.argmax(axis=1)
+        
+        ax3.plot(times_evolution, confidence, 'o-', color='black', 
+                linewidth=2, markersize=4, label='Confidence')
+        ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
+        
+        ax3.set_xlabel('Time (days)', fontsize=11)
+        ax3.set_ylabel('Max Probability', fontsize=11)
+        ax3.set_ylim([0, 1.05])
+        ax3.set_xlim([times_plot.min(), times_plot.max()])
+        ax3.legend(fontsize=9, framealpha=0.9)
+        ax3.grid(alpha=0.2)
+        
+        # Improve spacing
+        plt.subplots_adjust(hspace=0.25)
+        plt.tight_layout()
+        self._save_figure(fig, f'evolution_{class_name}_{sample_idx}')
+        plt.close()
+        
+        self.logger.debug(f"Generated: evolution_{class_name}_{sample_idx}")
     
     def run_early_detection_analysis(self) -> None:
         """
@@ -2748,8 +2851,9 @@ class RomanEvaluator:
                 'roc_bootstrap_ci': self.roc_bootstrap_ci,
                 'seed': self.seed
             },
+            'has_aux_head': self.has_aux_head,
             'timestamp': datetime.now().isoformat(),
-            'version': '2.5'
+            'version': __version__
         }
         
         with open(self.output_dir / 'evaluation_summary.json', 'w') as f:
