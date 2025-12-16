@@ -1,0 +1,12 @@
+# Ignore all data files (HDF5, etc.)
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.csv
+*.pkl
+*.pickle
+
+# Keep directory structure
+!.gitkeep
+!.gitignore

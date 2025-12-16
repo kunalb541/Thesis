@@ -1,0 +1,6 @@
+# Ignore all log files
+*.out
+*.err
+*.log
+!.gitkeep
+!.gitignore
