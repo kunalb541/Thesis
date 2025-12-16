@@ -1214,13 +1214,9 @@ def extract_parameters_from_file(
                     # Count how many events of this class appear before each index
                     all_labels = f['labels'][:]
                     class_event_indices = []
-                    
-                    for global_idx in class_indices:
-                        # Count how many events of this class appear before global_idx
-                        class_event_idx = (all_labels[:global_idx] == class_idx).sum()
-                        class_event_indices.append(class_event_idx)
-                    
-                    class_event_indices = np.array(class_event_indices)
+                    is_class = (all_labels == class_idx)
+                    class_cumulative_indices = np.cumsum(is_class) - 1 
+                    class_event_indices = class_cumulative_indices[class_indices]
                     
                     # Validate indices
                     if len(param_data) > 0 and class_event_indices.max() < len(param_data):
