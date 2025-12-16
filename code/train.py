@@ -582,20 +582,16 @@ class RAMLensingDataset(Dataset):
         return magnification_tensor, delta_t_tensor, length, label
     
     def __del__(self) -> None:
-        """
-        Explicit cleanup of large arrays to prevent memory leaks.
-        
-        v3.0.0 FIX: Added destructor to ensure memory is released when
-        dataset object is destroyed, especially important in multi-epoch
-        training where datasets may be recreated.
-        """
-        if hasattr(self, 'magnification'):
-            del self.magnification
-        if hasattr(self, 'delta_t'):
-            del self.delta_t
-        if hasattr(self, 'labels'):
-            del self.labels
-        gc.collect()
+        """Cleanup large arrays - let GC handle collection naturally."""
+        try:
+            if hasattr(self, 'magnification'):
+                self.magnification = None 
+            if hasattr(self, 'delta_t'):
+                self.delta_t = None
+            if hasattr(self, 'labels'):
+                self.labels = None    
+        except:
+            pass
 
 
 # =============================================================================
@@ -1063,14 +1059,10 @@ def compute_hierarchical_loss(
     # Higher weight for non-flat makes model more sensitive to detecting events
     stage1_pos_weight_scalar = (class_weights[1] + class_weights[2]) / 2.0 / (class_weights[0] + EPS)
     
-    # v3.0.0 FIX: Create pos_weight tensor with proper shape for broadcasting
-    # binary_cross_entropy_with_logits expects pos_weight to be broadcastable to input
-    stage1_pos_weight = stage1_pos_weight_scalar.expand(1)  # [1] scalar broadcast
-    
     stage1_bce = F.binary_cross_entropy_with_logits(
         output.stage1_logit,  # [B, 1] raw logit
         is_deviation,         # [B, 1] target
-        pos_weight=stage1_pos_weight,  # [1] broadcasts to [B, 1]
+        pos_weight=stage1_pos_weight_scalar,  
         reduction='mean'
     )
     
