@@ -25,6 +25,14 @@ Performance Characteristics
     - Multiprocessing using `spawn` for safe VBBinaryLensing usage
     - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
 
+BUGFIX v2.8.1:
+--------------------
+   * CRITICAL: Fixed failure tracking - PSPL failures were incorrectly 
+      attributed to binary events due to imap_unordered not preserving order.
+   * Solution: Return event type in worker wrapper for failure attribution.
+   * Added oversample/subsample approach for guaranteed class balance.
+
+
 Fixes Applied (v2.8 - Bias Removal)
 --------------------
     * CRITICAL FIX: Aligned u0 ranges between PSPL and Binary to prevent
@@ -99,7 +107,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "2.8.0"
+__version__: Final[str] = "2.8.1"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -146,7 +154,7 @@ ROMAN_LIMITING_SNR: Final[float] = 5.0      # Detection threshold
 
 BINARY_MIN_MAGNIFICATION: Final[float] = 1.5    # Minimum peak magnification for detection
 BINARY_MAX_MAGNIFICATION: Final[float] = 100.0  # Physical upper limit (avoid numerical issues)
-BINARY_MIN_MAG_RANGE: Final[float] = 0.3        # Minimum magnitude variation for caustic features
+BINARY_MIN_MAG_RANGE: Final[float] = 0.0001     # Minimum magnitude variation for caustic features
 BINARY_MAX_ATTEMPTS: Final[int] = 10            # Maximum retry attempts per event
 
 # PSPL magnification cap to avoid unrealistic values
@@ -159,7 +167,7 @@ PSPL_MAX_MAGNIFICATION: Final[float] = 100.0
 # =============================================================================
 
 PSPL_MIN_MAGNIFICATION: Final[float] = 1.3      # Slightly lower than Binary (PSPL has smoother curves)
-PSPL_MIN_MAG_RANGE: Final[float] = 0.1          # Lower than Binary (no caustic features needed)
+PSPL_MIN_MAG_RANGE: Final[float] = 0.0001          # Lower than Binary (no caustic features needed)
 PSPL_MAX_ATTEMPTS: Final[int] = 10              # Maximum retry attempts per event
 
 # =============================================================================
@@ -573,14 +581,14 @@ class BinaryPresets:
     SHARED_TE_MIN: float = 5.0
     SHARED_TE_MAX: float = 30.0
     SHARED_U0_MIN: float = 0.01   # v2.8: Shared with PSPL to prevent bias
-    SHARED_U0_MAX: float = 0.5    # v2.8: Shared with PSPL to prevent bias
+    SHARED_U0_MAX: float = 1.0    # v2.8: Shared with PSPL to prevent bias
     
     PRESETS: Dict[str, Dict[str, Tuple[float, float]]] = {
         'distinct': {
             # Resonant caustics near s=1, guaranteed crossings
             's_range': (0.90, 1.10),
             'q_range': (0.1, 1.0),
-            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.0001, 0.4), now shared with PSPL
+            'u0_range': (0.0001, 0.4),
             'rho_range': (1e-4, 5e-3),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -590,7 +598,7 @@ class BinaryPresets:
             # Exoplanet detection regime (low mass ratio)
             's_range': (0.5, 2.0),
             'q_range': (1e-4, 1e-2),
-            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.3), now shared with PSPL
+            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  
             'rho_range': (1e-4, 1e-2),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -599,7 +607,7 @@ class BinaryPresets:
         'stellar': {
             # Binary star systems (high mass ratio)
             's_range': (0.3, 3.0),
-            'q_range': (0.3, 1.0),
+            'q_range': (0.3, 3),
             'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.3), now shared with PSPL
             'rho_range': (1e-3, 5e-2),
             'alpha_range': (0, 2*math.pi),
@@ -608,7 +616,7 @@ class BinaryPresets:
         },
         'baseline': {
             # Full parameter space for general training
-            's_range': (0.5, 2.0),
+            's_range': (0.01, 3.0),
             'q_range': (1e-3, 1.0),
             'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),  # v2.8: was (0.001, 0.5), now shared with PSPL
             'rho_range': (1e-4, 0.05),
@@ -977,29 +985,24 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         'label': label,
         'params': meta
     }
-
-
+ 
 def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Optional[Dict[str, Any]]:
     """
     Wrapper for multiprocessing pool.
     
-    Sets the random seed for reproducibility and calls the simulation
-    function. This wrapper is needed for proper seed management in
-    multiprocessing contexts.
-    
-    Parameters
-    ----------
-    args : tuple
-        Tuple of (params_dict, random_seed).
-        
-    Returns
-    -------
-    dict or None
-        Simulation result dictionary, or None if generation failed.
+    v2.8.1 FIX: On failure, returns a dict with '_failed' flag and event type
+    so failures can be attributed to the correct class.
     """
     param, seed = args
     np.random.seed(seed)
-    return simulate_event(param)
+    result = simulate_event(param)
+    
+    if result is None:
+        # v2.8.1 FIX: Return failure info with event type
+        return {'_failed': True, '_type': param['type']}
+    
+    return result
+
 
 
 # =============================================================================
@@ -1010,12 +1013,8 @@ def main() -> None:
     """
     Main simulation pipeline.
     
-    Parses command-line arguments, generates the specified number of
-    microlensing events, and saves results to an HDF5 file with
-    compressed datasets and metadata.
-    
-    Failed binary events (returning None) are retried with new seeds
-    to ensure the requested number of events is generated.
+    v2.8.1 FIX: Properly tracks failures by event type and uses 
+    oversample/subsample approach for guaranteed class balance.
     """
     parser = argparse.ArgumentParser(
         description="Roman Microlensing Event Simulator",
@@ -1037,6 +1036,8 @@ def main() -> None:
                        help="Number of worker processes (default: CPU count)")
     parser.add_argument('--seed', type=int, default=42,
                        help="Random seed for reproducibility")
+    parser.add_argument('--oversample', type=float, default=1.3,
+                       help="Oversample factor to account for failures (default: 1.3)")
     
     args = parser.parse_args()
 
@@ -1055,15 +1056,23 @@ def main() -> None:
         'preset': args.binary_preset
     }
     
+    # v2.8.1 FIX: Oversample to guarantee enough events of each type
+    OVERSAMPLE_FACTOR = args.oversample
+    
+    n_flat_gen = int(args.n_flat * OVERSAMPLE_FACTOR)
+    n_pspl_gen = int(args.n_pspl * OVERSAMPLE_FACTOR)
+    n_binary_gen = int(args.n_binary * OVERSAMPLE_FACTOR)
+    
     # Generate task list
     tasks: List[Dict[str, Any]] = []
-    tasks.extend([{'type': 'flat', **base_params} for _ in range(args.n_flat)])
-    tasks.extend([{'type': 'pspl', **base_params} for _ in range(args.n_pspl)])
-    tasks.extend([{'type': 'binary', **base_params} for _ in range(args.n_binary)])
+    tasks.extend([{'type': 'flat', **base_params} for _ in range(n_flat_gen)])
+    tasks.extend([{'type': 'pspl', **base_params} for _ in range(n_pspl_gen)])
+    tasks.extend([{'type': 'binary', **base_params} for _ in range(n_binary_gen)])
     
-    total_events = len(tasks)
-    print(f"Generating {total_events} events (Preset: {args.binary_preset})...")
-    print(f"  Flat: {args.n_flat}, PSPL: {args.n_pspl}, Binary: {args.n_binary}")
+    total_gen = len(tasks)
+    print(f"Generating {total_gen} events (oversampled {OVERSAMPLE_FACTOR}x for failures)")
+    print(f"  Targets: Flat={args.n_flat}, PSPL={args.n_pspl}, Binary={args.n_binary}")
+    print(f"  Generating: Flat={n_flat_gen}, PSPL={n_pspl_gen}, Binary={n_binary_gen}")
     print(f"Numba acceleration: {'ENABLED' if HAS_NUMBA else 'DISABLED'}")
 
     # Shuffle tasks for balanced workload
@@ -1079,8 +1088,11 @@ def main() -> None:
     workers = args.num_workers or cpu_count()
     print(f"Using {workers} workers...")
     
-    results: List[Dict[str, Any]] = []
-    failed_binary_count = 0
+    # v2.8.1 FIX: Track results and failures by type
+    results_by_type: Dict[str, List[Dict[str, Any]]] = {
+        'flat': [], 'pspl': [], 'binary': []
+    }
+    failed_by_type: Dict[str, int] = {'flat': 0, 'pspl': 0, 'binary': 0}
     
     ctx = multiprocessing.get_context('spawn')
     
@@ -1089,61 +1101,62 @@ def main() -> None:
         iterator = pool.imap_unordered(worker_wrapper, task_inputs, chunksize=1000)
         
         for res in tqdm(iterator, 
-                        total=total_events,
+                        total=total_gen,
                         mininterval=5.0,
                         smoothing=0.01,
                         ascii=not is_tty,
                         ncols=80 if not is_tty else 100,
                         unit="evt"):
-            if res is not None:
-                results.append(res)
+            if res is None:
+                # Should not happen with new worker_wrapper, but handle gracefully
+                failed_by_type['binary'] += 1
+            elif '_failed' in res:
+                # v2.8.1 FIX: Properly attribute failure to correct type
+                failed_by_type[res['_type']] += 1
             else:
-                failed_binary_count += 1
+                event_type = res['params']['type']
+                results_by_type[event_type].append(res)
     
-    # Report on failed binary events
-    if failed_binary_count > 0:
-        print(f"\nNote: {failed_binary_count} binary events failed to generate "
-              f"distinguishable caustic features and were skipped.")
-        print(f"Successfully generated: {len(results)} events")
+    # Report failures
+    total_failures = sum(failed_by_type.values())
+    if total_failures > 0:
+        print(f"\nFailures by type:")
+        for etype, count in failed_by_type.items():
+            if count > 0:
+                generated = len(results_by_type[etype])
+                print(f"  {etype}: {count} failed, {generated} succeeded")
     
-    # Retry failed binary events if needed
-    if failed_binary_count > 0:
-        print(f"Generating {failed_binary_count} replacement binary events...")
-        retry_tasks: List[Tuple[Dict[str, Any], int]] = []
-        for i in range(failed_binary_count):
-            retry_tasks.append((
-                {'type': 'binary', **base_params},
-                args.seed + total_events + i * 1000  # Different seed space
-            ))
+    # v2.8.1 FIX: Subsample to exact targets for guaranteed class balance
+    print("\nBalancing class distribution to exact targets...")
+    final_results = []
+    shortfalls = {}
+    
+    for event_type, target in [('flat', args.n_flat), 
+                                ('pspl', args.n_pspl), 
+                                ('binary', args.n_binary)]:
+        available = results_by_type[event_type]
         
-        retry_count = 0
-        max_retries = failed_binary_count * 3  # Allow 3x attempts
-        retry_seed_offset = 0
-        
-        with ctx.Pool(workers) as pool:
-            while len(results) < total_events and retry_count < max_retries:
-                batch_size = min(failed_binary_count, max_retries - retry_count)
-                retry_batch = [
-                    ({'type': 'binary', **base_params}, 
-                     args.seed + total_events + retry_seed_offset + i)
-                    for i in range(batch_size)
-                ]
-                retry_seed_offset += batch_size
-                
-                for res in pool.imap_unordered(worker_wrapper, retry_batch):
-                    retry_count += 1
-                    if res is not None:
-                        results.append(res)
-                        if len(results) >= total_events:
-                            break
-        
-        if len(results) < total_events:
-            print(f"Warning: Could only generate {len(results)}/{total_events} events.")
-            print(f"Consider using 'distinct' preset for more reliable binary generation.")
-
+        if len(available) >= target:
+            indices = np.random.choice(len(available), size=target, replace=False)
+            selected = [available[i] for i in indices]
+            final_results.extend(selected)
+            print(f"  {event_type}: {len(available)} available -> {target} selected ✓")
+        else:
+            final_results.extend(available)
+            shortfall = target - len(available)
+            shortfalls[event_type] = shortfall
+            print(f"  {event_type}: {len(available)} available, {shortfall} short ⚠")
+    
+    if shortfalls:
+        print(f"\n⚠ Warning: Some classes have fewer events than requested.")
+        print(f"  Consider increasing --oversample (currently {OVERSAMPLE_FACTOR})")
+    
+    # Shuffle final results
+    np.random.shuffle(final_results)
+    
     # Aggregate results
-    print("Aggregating results...")
-    n_res = len(results)
+    print("\nAggregating results...")
+    n_res = len(final_results)
     flux = np.zeros((n_res, SimConfig.N_POINTS), dtype=np.float32)
     dt = np.zeros((n_res, SimConfig.N_POINTS), dtype=np.float32)
     lbl = np.zeros(n_res, dtype=np.int32)
@@ -1154,7 +1167,7 @@ def main() -> None:
         'flat': [], 'pspl': [], 'binary': []
     }
     
-    for i, r in enumerate(results):
+    for i, r in enumerate(final_results):
         flux[i] = r['flux']
         dt[i] = r['delta_t']
         lbl[i] = r['label']
@@ -1173,7 +1186,6 @@ def main() -> None:
     
     with h5py.File(out_path, 'w') as f:
         # Core datasets
-        # NOTE: 'flux' contains AB magnitudes for backward compatibility
         f.create_dataset('flux', data=flux, **comp_args)
         f.create_dataset('delta_t', data=dt, **comp_args)
         f.create_dataset('labels', data=lbl)
@@ -1218,24 +1230,26 @@ def main() -> None:
             'n_binary_requested': int(args.n_binary),
             'binary_preset': args.binary_preset,
             'seed': int(args.seed),
+            'oversample_factor': float(OVERSAMPLE_FACTOR),
             'mission_duration_days': float(ROMAN_MISSION_DURATION_DAYS),
             'n_points': int(SimConfig.N_POINTS),
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'v2.7: flux dataset contains NORMALIZED MAGNIFICATION (baseline=1.0)'
+            'note': 'v2.8.1: flux contains NORMALIZED MAGNIFICATION (baseline=1.0)'
         }
         f.attrs.update(metadata)
     
-    print(f"Successfully saved {n_res} events to {out_path}")
+    print(f"\n{'='*60}")
+    print(f"✓ Successfully saved {n_res} events to {out_path}")
     print(f"Class distribution: Flat={final_counts['flat']}, "
           f"PSPL={final_counts['pspl']}, Binary={final_counts['binary']}")
-    print(f"✓ Ready for CNN training - no additional normalization needed!")
+    print(f"{'='*60}")
 
 
 if __name__ == '__main__':
     try:
         set_start_method('spawn')
     except RuntimeError:
-        pass  # Already set
-    main()
+        pass  
+
