@@ -1,0 +1,96 @@
+2025-12-16 17:21:25 - INFO - ================================================================================
+2025-12-16 17:21:25 - INFO - ROMAN MICROLENSING CLASSIFIER EVALUATION
+2025-12-16 17:21:25 - INFO - ================================================================================
+2025-12-16 17:21:25 - INFO - Evaluator version: 3.0.0
+2025-12-16 17:21:25 - INFO - Experiment: d64_l4_hier_20251216_171049
+2025-12-16 17:21:25 - INFO - Checkpoint: final.pt
+2025-12-16 17:21:25 - INFO - Data: /home/hd/hd_hd/hd_vm305/Thesis/data/test/test.h5
+2025-12-16 17:21:25 - INFO - Device: cuda
+2025-12-16 17:21:25 - INFO - Output: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125
+2025-12-16 17:21:25 - INFO - Seed: 42
+2025-12-16 17:21:25 - INFO - --------------------------------------------------------------------------------
+2025-12-16 17:21:25 - INFO - Loading model...
+2025-12-16 17:21:40 - INFO - Model loaded: 130,565 parameters
+2025-12-16 17:21:40 - INFO - Configuration: {'d_model': 64, 'n_layers': 4, 'dropout': 0.3, 'window_size': 5, 'max_seq_len': 2400, 'n_classes': 3, 'hierarchical': True, 'use_aux_head': True, 'stage2_temperature': 1.0, 'use_residual': True, 'use_layer_norm': True, 'feature_extraction': 'conv', 'use_attention_pooling': True, 'use_amp': False, 'use_gradient_checkpointing': False, 'use_flash_attention': True, 'num_attention_heads': 2, 'gru_dropout': 0.1, 'bn_momentum': 0.2, 'init_scale': 1.0}
+2025-12-16 17:21:40 - INFO - Auxiliary 3-class head detected (v2.9+ model)
+2025-12-16 17:21:40 - INFO - Loading normalization statistics...
+2025-12-16 17:21:40 - INFO -   Flux: mean=1.2683, std=1.1089
+2025-12-16 17:21:40 - INFO -   Delta_t: mean=0.087834, std=0.019618
+2025-12-16 17:21:40 - INFO - --------------------------------------------------------------------------------
+2025-12-16 17:21:40 - INFO - Loading data from: /home/hd/hd_hd/hd_vm305/Thesis/data/test/test.h5
+2025-12-16 17:21:53 - INFO - Applying sequence compaction (matching training pipeline)...
+2025-12-16 17:22:03 - INFO -   Compaction complete. Valid lengths: min=2226, max=2322, mean=2280.0
+2025-12-16 17:22:04 - INFO - Loaded 150000 samples
+2025-12-16 17:22:06 - INFO - Flux range (valid only): [0.96, 99.97] -> [-0.28, 89.01]
+2025-12-16 17:22:06 - INFO -   Class Flat: 50000 (33.3%)
+2025-12-16 17:22:06 - INFO -   Class PSPL: 50000 (33.3%)
+2025-12-16 17:22:06 - INFO -   Class Binary: 50000 (33.3%)
+2025-12-16 17:22:06 - INFO - --------------------------------------------------------------------------------
+2025-12-16 17:22:06 - INFO - Running inference on 150000 samples (293 batches of size 512)
+2025-12-16 17:22:25 - INFO - Inference complete. Mean confidence: 0.9139
+2025-12-16 17:22:25 - INFO - --------------------------------------------------------------------------------
+2025-12-16 17:22:25 - INFO - Computing comprehensive metrics...
+2025-12-16 17:22:30 - INFO -   Accuracy: 96.73% [96.64%, 96.82%]
+2025-12-16 17:22:30 - INFO -   F1 (macro): 0.9672
+2025-12-16 17:22:30 - INFO -   ROC-AUC (macro): 1.0000
+2025-12-16 17:22:30 - INFO - --------------------------------------------------------------------------------
+2025-12-16 17:22:30 - INFO - Attempting to load physical parameters...
+2025-12-16 17:22:37 - INFO - Parameters loaded successfully
+2025-12-16 17:22:37 - INFO - ================================================================================
+2025-12-16 17:22:37 - INFO - INITIALIZATION COMPLETE
+2025-12-16 17:22:37 - INFO - ================================================================================
+2025-12-16 17:22:37 - INFO - 
+================================================================================
+2025-12-16 17:22:37 - INFO - GENERATING VISUALIZATIONS
+2025-12-16 17:22:37 - INFO - ================================================================================
+2025-12-16 17:22:38 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/confusion_matrix.png
+2025-12-16 17:22:38 - INFO - Generated: confusion_matrix
+2025-12-16 17:22:50 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/roc_curves.png
+2025-12-16 17:22:50 - INFO - Generated: roc_curves
+2025-12-16 17:22:51 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/calibration.png
+2025-12-16 17:22:51 - INFO - Generated: calibration
+2025-12-16 17:22:53 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/class_distributions.png
+2025-12-16 17:22:53 - INFO - Generated: class_distributions
+2025-12-16 17:22:53 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/per_class_metrics.png
+2025-12-16 17:22:53 - INFO - Generated: per_class_metrics
+2025-12-16 17:22:55 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/example_light_curves.png
+2025-12-16 17:22:55 - INFO - Generated: example_light_curves
+2025-12-16 17:22:56 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/u0_dependency.png
+2025-12-16 17:22:56 - INFO - Generated: u0_dependency
+2025-12-16 17:22:57 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/temporal_bias_check.png
+2025-12-16 17:22:57 - INFO - Generated: temporal_bias_check (KS p=0.7727)
+2025-12-16 17:22:57 - INFO - 
+Generating probability evolution plots...
+2025-12-16 17:22:58 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Flat_11.png
+2025-12-16 17:22:58 - DEBUG - Generated: evolution_Flat_11
+2025-12-16 17:23:00 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Flat_12.png
+2025-12-16 17:23:00 - DEBUG - Generated: evolution_Flat_12
+2025-12-16 17:23:02 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Flat_13.png
+2025-12-16 17:23:02 - DEBUG - Generated: evolution_Flat_13
+2025-12-16 17:23:04 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Flat_15.png
+2025-12-16 17:23:04 - DEBUG - Generated: evolution_Flat_15
+2025-12-16 17:23:06 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Flat_21.png
+2025-12-16 17:23:06 - DEBUG - Generated: evolution_Flat_21
+2025-12-16 17:23:08 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_PSPL_3.png
+2025-12-16 17:23:08 - DEBUG - Generated: evolution_PSPL_3
+2025-12-16 17:23:10 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_PSPL_4.png
+2025-12-16 17:23:10 - DEBUG - Generated: evolution_PSPL_4
+2025-12-16 17:23:12 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_PSPL_5.png
+2025-12-16 17:23:12 - DEBUG - Generated: evolution_PSPL_5
+2025-12-16 17:23:13 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_PSPL_7.png
+2025-12-16 17:23:13 - DEBUG - Generated: evolution_PSPL_7
+2025-12-16 17:23:15 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_PSPL_9.png
+2025-12-16 17:23:15 - DEBUG - Generated: evolution_PSPL_9
+2025-12-16 17:23:17 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Binary_0.png
+2025-12-16 17:23:17 - DEBUG - Generated: evolution_Binary_0
+2025-12-16 17:23:19 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Binary_1.png
+2025-12-16 17:23:19 - DEBUG - Generated: evolution_Binary_1
+2025-12-16 17:23:21 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Binary_2.png
+2025-12-16 17:23:21 - DEBUG - Generated: evolution_Binary_2
+2025-12-16 17:23:23 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Binary_6.png
+2025-12-16 17:23:23 - DEBUG - Generated: evolution_Binary_6
+2025-12-16 17:23:24 - DEBUG - Saved: ../results/checkpoints/d64_l4_hier_20251216_171049/eval_test_20251216_172125/evolution_Binary_8.png
+2025-12-16 17:23:24 - DEBUG - Generated: evolution_Binary_8
+2025-12-16 17:23:24 - INFO - 
+Running early detection analysis...
+2025-12-16 17:23:24 - INFO -   Testing 10% completeness...
