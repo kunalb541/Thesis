@@ -151,12 +151,12 @@ python simulate.py \
 
 **Binary Lens Presets:**
 
-| Preset | Mass Ratio (q) | Separation (s) | Impact (u₀) | Description |
-|--------|----------------|----------------|-------------|-------------|
-| `distinct` | 0.1 - 1.0 | 0.90 - 1.10 | 0.0001 - 0.4 | Resonant caustics, guaranteed crossings |
-| `planetary` | 10⁻⁴ - 10⁻² | 0.5 - 2.0 | 0.001 - 0.3 | Exoplanet detection regime |
-| `stellar` | 0.3 - 1.0 | 0.3 - 3.0 | 0.001 - 0.3 | Binary star systems |
-| `baseline` | 10⁻⁴ - 1.0 | 0.1 - 3.0 | 0.001 - 1.0 | Full parameter space |
+| Preset | Mass Ratio (q) | Separation (s) | Impact (u₀) | Caustic Required | Description |
+|--------|----------------|----------------|-------------|:----------------:|-------------|
+| `distinct` | 0.1 - 1.0 | 0.8 - 1.2 | 0.01 - 0.3 | ✓ | Resonant caustics, forced crossings |
+| `planetary` | 10⁻⁴ - 10⁻² | 0.6 - 1.6 | 0.01 - 0.2 | ✓ | Exoplanet detection regime |
+| `stellar` | 0.1 - 1.0 | 0.3 - 3.0 | 0.01 - 0.5 | ✗ | Binary star systems |
+| `baseline` | 10⁻⁴ - 1.0 | 0.3 - 3.0 | 0.01 - 0.5 | ✗ | Full parameter space |
 
 **Output:** `<output>.h5` (HDF5 format, ~3-4 GB per 1M events)
 - Core datasets: `flux`, `delta_t`, `labels`, `timestamps`
