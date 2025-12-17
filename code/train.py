@@ -10,7 +10,7 @@ curves into Flat, PSPL (Point Source Point Lens), and Binary classes.
 OPTIMIZATION STRATEGY
 ---------------------
 This is an optimized version of the production training script with
-RAM-based dataset loading for 20-50× speedup over disk-based loading.
+RAM-based dataset loading for speedup over disk-based loading.
 
 All architectural features, bug fixes, and training logic are preserved exactly.
 
