@@ -2112,7 +2112,7 @@ class RomanEvaluator:
         # Load model
         self.logger.info("Loading model...")
         self.model, self.config_dict = load_model_from_checkpoint(
-            checkpoint_path, self.device
+            self.model_path, self.device
         )
         
         # Log model info
@@ -2129,7 +2129,7 @@ class RomanEvaluator:
         
         # Load normalization stats
         self.logger.info("Loading normalization statistics...")
-        stats = load_normalization_stats(checkpoint_path)
+        stats = load_normalization_stats(self.model_path)
         
         self.flux_mean = stats['flux_mean']
         self.flux_std = stats['flux_std']
