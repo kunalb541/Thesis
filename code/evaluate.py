@@ -7,6 +7,17 @@ Production-grade evaluation framework for gravitational microlensing event
 classification models. Computes comprehensive metrics, generates publication-
 quality visualizations, and performs physics-based performance analysis.
 
+VERSION 3.0.2 CRITICAL FIXES:
+-----------------------------
+    * CRITICAL FIX: plot_evolution_for_class padding bug
+      - Was using 0.0 for padding, but normalized padding is -flux_mean/flux_std
+      - Now uses np.full() with correct normalized padding value
+      - Fixed valid_indices detection to use self.valid_lengths
+    * CRITICAL FIX: run_early_detection_analysis padding bug
+      - Same issue: was using 0.0, now uses correct normalized padding
+    * These bugs caused evolution plots to show incorrect predictions
+      (model interpreted zeros as baseline magnification instead of padding)
+
 VERSION 3.0.1 COSMETIC FIXES:
 -----------------------------
     * FIX: Confusion matrix text sizing and overlap prevention
@@ -120,7 +131,7 @@ Fixes Applied (v2.5 - Complete Documentation & Robustness)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 3.0.1
+Version: 3.0.2
 Date: December 2024
 """
 from __future__ import annotations
@@ -174,7 +185,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "3.0.1"
+__version__: Final[str] = "3.0.2"
 
 # =============================================================================
 # CONSTANTS
@@ -2947,22 +2958,22 @@ class RomanEvaluator:
         true_label = self.y[sample_idx]
 
         # =========================================================================
-        # FIX: Identify valid observations regardless of compaction state
+        # v3.0.2 FIX: Use pre-computed valid_lengths instead of flux_norm != 0.0
         # =========================================================================
-        # Check if data appears compacted (zeros only at end) or sparse (zeros scattered)
-        # A robust approach: find ALL valid (non-zero flux) indices
-        valid_indices = np.where(flux_norm != 0.0)[0]
-        n_valid = len(valid_indices)
+        # The old code used: valid_indices = np.where(flux_norm != 0.0)[0]
+        # This was WRONG because after normalization, padding value is 
+        # -flux_mean/flux_std, NOT 0.0!
+        # 
+        # Use self.valid_lengths which was correctly computed during data loading
+        # from the original (pre-normalized) data.
+        n_valid = int(self.valid_lengths[sample_idx])
 
         if n_valid < EVOLUTION_MIN_VALID_POINTS:
             self.logger.warning(f"Skipping evolution for {class_name}_{sample_idx} (too few points: {n_valid})")
             return
 
-        # Check if data is compacted (valid indices form contiguous prefix)
-        is_compacted = (n_valid > 0 and valid_indices[-1] == n_valid - 1 and valid_indices[0] == 0)
-
-        if not is_compacted:
-            self.logger.debug(f"Sample {sample_idx}: Data appears non-compacted, will extract valid observations")
+        # Data is compacted: valid observations are at [0, n_valid)
+        # This is guaranteed by the data loading pipeline
 
         is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
 
@@ -2983,32 +2994,32 @@ class RomanEvaluator:
         probs_evolution = np.zeros((n_steps, NUM_CLASSES))
         times_evolution = np.zeros(n_steps)
 
+        # =========================================================================
+        # v3.0.2 FIX: Compute correct normalized padding value
+        # =========================================================================
+        # The model was trained with padding = (0 - flux_mean) / flux_std
+        # We must use the SAME padding value during inference!
+        padding_flux = (0.0 - self.flux_mean) / (self.flux_std + EPS)
+        padding_delta_t = (0.0 - self.delta_t_mean) / (self.delta_t_std + EPS)
+
         with torch.no_grad(), torch.inference_mode():
             for i, n_obs in enumerate(obs_counts):
                 # =========================================================================
-                # FIX: Extract first n_obs VALID observations, then create padded array
+                # Extract first n_obs VALID observations (data is compacted)
                 # =========================================================================
-                if is_compacted:
-                    # Data is compacted: valid observations are at [0, n_valid)
-                    # Simple truncation works
-                    flux_subset = flux_norm[:n_obs]
-                    delta_t_subset = delta_t_norm[:n_obs]
-                    time_at_step = times[n_obs - 1]
-                else:
-                    # Data is NOT compacted: valid observations are scattered
-                    # Must extract valid values and repack
-                    subset_indices = valid_indices[:n_obs]
-                    flux_subset = flux_norm[subset_indices]
-                    delta_t_subset = delta_t_norm[subset_indices]
-                    time_at_step = times[subset_indices[-1]]
+                flux_subset = flux_norm[:n_obs]
+                delta_t_subset = delta_t_norm[:n_obs]
+                time_at_step = times[n_obs - 1]
 
                 # Record time at this step (for x-axis)
                 times_evolution[i] = time_at_step
 
-                # Pad to max sequence length for model input
+                # =========================================================================
+                # v3.0.2 FIX: Use correct normalized padding value, not 0.0!
+                # =========================================================================
                 max_len = len(flux_norm)
-                flux_padded = np.zeros(max_len, dtype=np.float32)
-                delta_t_padded = np.zeros(max_len, dtype=np.float32)
+                flux_padded = np.full(max_len, padding_flux, dtype=np.float32)
+                delta_t_padded = np.full(max_len, padding_delta_t, dtype=np.float32)
 
                 flux_padded[:n_obs] = flux_subset
                 delta_t_padded[:n_obs] = delta_t_subset
@@ -3032,13 +3043,9 @@ class RomanEvaluator:
         # =========================================================================
         flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
 
-        # Get valid observations for light curve plot
-        if is_compacted:
-            times_valid = times[:n_valid]
-            flux_valid = flux_denorm[:n_valid]
-        else:
-            times_valid = times[valid_indices]
-            flux_valid = flux_denorm[valid_indices]
+        # Get valid observations for light curve plot (data is compacted)
+        times_valid = times[:n_valid]
+        flux_valid = flux_denorm[:n_valid]
 
         # Filter any remaining invalid values
         plot_mask = (times_valid > 0) & (flux_valid > 0) & np.isfinite(flux_valid)
@@ -3164,9 +3171,12 @@ class RomanEvaluator:
                     delta_t_trunc = self.delta_t_norm[i, :n_use]
 
                     # Pad to full length
+                    # v3.0.2 FIX: Use correct normalized padding value, not 0.0!
+                    padding_flux = (0.0 - self.flux_mean) / (self.flux_std + EPS)
+                    padding_delta_t = (0.0 - self.delta_t_mean) / (self.delta_t_std + EPS)
                     max_len = self.flux_norm.shape[1]
-                    flux_padded = np.zeros(max_len, dtype=np.float32)
-                    delta_t_padded = np.zeros(max_len, dtype=np.float32)
+                    flux_padded = np.full(max_len, padding_flux, dtype=np.float32)
+                    delta_t_padded = np.full(max_len, padding_delta_t, dtype=np.float32)
 
                     flux_padded[:n_use] = flux_trunc
                     delta_t_padded[:n_use] = delta_t_trunc
