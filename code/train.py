@@ -3,7 +3,7 @@
 Roman Microlensing Classifier Training Engine v3.0.0
 ====================================================
 
-High-performance distributed training pipeline with RAM-based data loading for
+Distributed training pipeline with RAM-based data loading for
 classifying Nancy Grace Roman Space Telescope gravitational microlensing light
 curves into Flat, PSPL (Point Source Point Lens), and Binary classes.
 

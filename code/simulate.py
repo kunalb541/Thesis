@@ -3,7 +3,7 @@
 Roman Microlensing Event Simulator
 ==================================
 
-High-throughput simulation pipeline for generating realistic gravitational
+Parallel simulation pipeline for generating realistic gravitational
 microlensing light curves for the Nancy Grace Roman Space Telescope. Designed
 for large-scale dataset generation, parameter inference experiments, and
 training machine-learning models for event classification and regression.

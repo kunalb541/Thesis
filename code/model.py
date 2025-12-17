@@ -3,7 +3,7 @@
 Roman Microlensing Event Classifier - Neural Network Architecture
 =================================================================
 
-High-performance strictly causal CNN-GRU architecture for Nancy Grace Roman
+Strictly causal CNN-GRU architecture for Nancy Grace Roman
 Space Telescope gravitational microlensing event classification.
 
 ARCHITECTURE DESIGN:

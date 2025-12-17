@@ -351,7 +351,7 @@ ls ../results/
 
 ```bash
 python evaluate.py \
-    --experiment-name experiment_20241216_143022 \
+    --experiment-name d32_l2_hier  # Partial match \
     --data test.h5 \
     --save-formats png pdf svg \
     --colorblind-safe \
@@ -359,7 +359,7 @@ python evaluate.py \
 
 # Verbose logging for debugging
 python evaluate.py \
-    --experiment-name experiment_20241216_143022 \
+    --experiment-name d32_l2_hier  # Partial match \
     --data test.h5 \
     --verbose
 ```
