@@ -377,15 +377,8 @@ class RAMLensingDataset(Dataset):
     Load entire dataset into RAM for Fast training.
 
     This dataset implementation loads all data into system RAM at initialization,
-    eliminating disk I/O during training. This provides 20-50× speedup over
-    disk-based loading, especially on network filesystems.
-
-    Performance Characteristics
-    ---------------------------
-    - Speed: 0.2-0.5 s/batch (vs 2-12 s/batch on disk)
-    - Memory: ~7 GB per 1M samples
-    - Startup: ~30 seconds to load into RAM
-
+    eliminating disk I/O during training. 
+    
     Data Format
     -----------
     The 'flux' array contains NORMALIZED MAGNIFICATION values:
