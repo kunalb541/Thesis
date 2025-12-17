@@ -180,7 +180,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         echo "Generating training data..."
         FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
         srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
-            --n_flat 100000 --n_pspl 500000 --n_binary 50000 \
+            --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
             --output ${SOURCE_FILE} --num_workers 100 --seed 42 --oversample 1.3
     fi
 
@@ -270,11 +270,11 @@ if [ $EXIT_CODE -eq 0 ]; then
             echo "Submitting evaluation job..."
             sbatch << EVALEOF
 #!/bin/bash
-#SBATCH -p gpu_a100_short
+#SBATCH -p gpu_h100_il
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH -t 30:00
+#SBATCH -t 03:00:00
 #SBATCH -o logs/eval_${EXP_NAME}.out
 #SBATCH --job-name=eval_v3
 
@@ -286,7 +286,8 @@ python evaluate.py \\
     --experiment-name  "${EXP_NAME}" \\
     --data "${TEST_FILE}" \\
     --batch-size ${EVAL_BATCH_SIZE} \\
-    --n-evolution-per-type 5 \\
+    --n-evolution-per-type 10 \\
+    --early-detection  \\
     --save-formats png
 EVALEOF
             echo "✓ Evaluation job submitted for ${EXP_NAME}"
