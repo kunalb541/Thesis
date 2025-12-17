@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Classifier - Comprehensive Evaluation Suite v3.0.0
+Roman Microlensing Classifier - Comprehensive Evaluation Suite v3.0.1
 =====================================================================
 
 Production-grade evaluation framework for gravitational microlensing event
 classification models. Computes comprehensive metrics, generates publication-
 quality visualizations, and performs physics-based performance analysis.
+
+VERSION 3.0.1 COSMETIC FIXES:
+-----------------------------
+    * FIX: Confusion matrix text sizing and overlap prevention
+    * FIX: ROC curves legend positioning outside plot area
+    * FIX: u0 dependency plot count annotations repositioned
+    * FIX: Temporal bias check legend/text box overlap resolved
+    * FIX: Calibration curve legend positioning improved
+    * FIX: Per-class metrics bar chart label overlap prevention
+    * FIX: Evolution plots panel spacing increased
+    * FIX: Example light curves grid spacing improved
 
 VERSION 3.0.0 CRITICAL FIXES:
 -----------------------------
@@ -54,7 +65,12 @@ Scientific Visualization
 
 VERSION HISTORY
 ---------------
-v3.0.0 (Current):
+v3.0.1 (Current):
+    * COSMETIC: Fixed all plot text/legend overlap issues
+    * COSMETIC: Improved figure sizing and spacing
+    * COSMETIC: Better annotation positioning
+
+v3.0.0:
     * CRITICAL: m_base auto-generation if not in HDF5
     * CRITICAL: Fixed evolution plots (progressive truncation)
     * MAJOR: Smart experiment/checkpoint finding
@@ -104,7 +120,7 @@ Fixes Applied (v2.5 - Complete Documentation & Robustness)
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 3.0.0
+Version: 3.0.1
 Date: December 2024
 """
 from __future__ import annotations
@@ -158,7 +174,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "3.0.0"
+__version__: Final[str] = "3.0.1"
 
 # =============================================================================
 # CONSTANTS
@@ -190,6 +206,15 @@ EPS: Final[float] = 1e-8
 FIG_SINGLE_COL: Final[Tuple[float, float]] = (3.5, 3.0)  # ~8.9cm
 FIG_DOUBLE_COL: Final[Tuple[float, float]] = (7.0, 5.0)  # ~17.8cm
 FIG_FULL_PAGE: Final[Tuple[float, float]] = (7.0, 9.0)
+
+# v3.0.1: Adjusted figure sizes for better cosmetics
+FIG_CONFUSION_MATRIX: Final[Tuple[float, float]] = (4.5, 4.0)  # Larger for text clarity
+FIG_ROC_CURVES: Final[Tuple[float, float]] = (5.0, 4.0)  # Wider for legend
+FIG_CALIBRATION: Final[Tuple[float, float]] = (8.0, 4.0)  # Wider two-panel
+FIG_U0_DEPENDENCY: Final[Tuple[float, float]] = (5.0, 4.0)  # More height for annotations
+FIG_TEMPORAL_BIAS: Final[Tuple[float, float]] = (5.0, 4.0)  # More space for legend
+FIG_PER_CLASS_METRICS: Final[Tuple[float, float]] = (5.0, 4.0)  # Wider for bars
+FIG_EVOLUTION: Final[Tuple[float, float]] = (8, 10)  # Taller for 3 panels
 
 # =============================================================================
 # v3.0.0: ADDITIONAL CONSTANTS (previously magic numbers)
@@ -246,6 +271,26 @@ ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
 
 # Evolution plot observation checkpoints (progressive truncation)
 EVOLUTION_OBS_COUNTS: Final[List[int]] = [10, 50, 100, 200, 400, 800, 1200, 1600, 2000, 2400]
+
+# =============================================================================
+# v3.0.1: COSMETIC CONSTANTS
+# =============================================================================
+
+# Font sizes for plots
+FONT_SIZE_TITLE: Final[int] = 12
+FONT_SIZE_LABEL: Final[int] = 10
+FONT_SIZE_TICK: Final[int] = 9
+FONT_SIZE_LEGEND: Final[int] = 8
+FONT_SIZE_ANNOTATION: Final[int] = 7
+FONT_SIZE_CONFUSION_CELL: Final[int] = 9
+
+# Legend positioning
+LEGEND_BBOX_ROC: Final[Tuple[float, float]] = (1.02, 0.5)  # Outside right
+LEGEND_BBOX_CALIBRATION: Final[Tuple[float, float]] = (0.02, 0.98)  # Upper left inside
+LEGEND_BBOX_U0: Final[Tuple[float, float]] = (0.98, 0.98)  # Upper right inside
+
+# Annotation offsets
+U0_ANNOTATION_Y_OFFSET: Final[float] = -0.12  # Below axis for count annotations
 
 # =============================================================================
 # FLUX TO MAGNITUDE CONVERSION FOR PLOTTING
@@ -718,11 +763,11 @@ def configure_matplotlib(use_latex: bool = False) -> None:
         'font.family': 'serif',
         'font.serif': ['Computer Modern Roman', 'DejaVu Serif', 'Times New Roman'],
         'font.size': 10,
-        'axes.titlesize': 12,
-        'axes.labelsize': 11,
-        'xtick.labelsize': 9,
-        'ytick.labelsize': 9,
-        'legend.fontsize': 9,
+        'axes.titlesize': FONT_SIZE_TITLE,
+        'axes.labelsize': FONT_SIZE_LABEL,
+        'xtick.labelsize': FONT_SIZE_TICK,
+        'ytick.labelsize': FONT_SIZE_TICK,
+        'legend.fontsize': FONT_SIZE_LEGEND,
         
         # Lines
         'lines.linewidth': 1.5,
@@ -2011,6 +2056,7 @@ class RomanEvaluator:
     
     Notes
     -----
+    v3.0.1: All plotting methods updated with cosmetic fixes for text/legend overlap.
     v3.0.0: Compatible with train.py v3.0.0, model.py v3.0.0, and simulate.py v3.0.0.
     
     Examples
@@ -2225,6 +2271,9 @@ class RomanEvaluator:
         Creates a publication-quality confusion matrix visualization with
         percentages and sample counts. Uses astronomy-standard colormap.
         
+        v3.0.1 FIX: Increased figure size and reduced font size to prevent
+        text overlap in cells.
+        
         Output
         ------
         confusion_matrix.{png,pdf,svg} : file
@@ -2238,31 +2287,40 @@ class RomanEvaluator:
         cm = np.array(self.metrics['confusion_matrix'])
         cm_norm = np.array(self.metrics['confusion_matrix_normalized'])
         
-        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
+        # v3.0.1: Use larger figure size to prevent text overlap
+        fig, ax = plt.subplots(figsize=FIG_CONFUSION_MATRIX)
         
         # Plot normalized confusion matrix
-        im = ax.imshow(cm_norm, cmap='Blues', vmin=0, vmax=1, aspect='auto')
+        im = ax.imshow(cm_norm, cmap='Blues', vmin=0, vmax=1, aspect='equal')
         
-        # Colorbar
-        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label('Fraction', rotation=270, labelpad=15)
+        # Colorbar with adjusted size
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, shrink=0.9)
+        cbar.set_label('Fraction', rotation=270, labelpad=15, fontsize=FONT_SIZE_LABEL)
+        cbar.ax.tick_params(labelsize=FONT_SIZE_TICK)
         
-        # Annotate cells
+        # v3.0.1: Annotate cells with smaller font and better formatting
         for i in range(len(CLASS_NAMES)):
             for j in range(len(CLASS_NAMES)):
-                text = f'{cm_norm[i, j]*100:.1f}%\n({cm[i, j]})'
+                # Use smaller font and split percentage/count on two lines
+                pct_text = f'{cm_norm[i, j]*100:.1f}%'
+                count_text = f'({cm[i, j]:,})'
                 color = 'white' if cm_norm[i, j] > 0.5 else 'black'
-                ax.text(j, i, text, ha='center', va='center', 
-                       color=color, fontsize=8)
+                
+                # Draw percentage
+                ax.text(j, i - 0.12, pct_text, ha='center', va='center', 
+                       color=color, fontsize=FONT_SIZE_CONFUSION_CELL, fontweight='bold')
+                # Draw count below
+                ax.text(j, i + 0.18, count_text, ha='center', va='center', 
+                       color=color, fontsize=FONT_SIZE_ANNOTATION)
         
-        # Labels
+        # Labels with proper sizing
         ax.set_xticks(np.arange(len(CLASS_NAMES)))
         ax.set_yticks(np.arange(len(CLASS_NAMES)))
-        ax.set_xticklabels(CLASS_NAMES)
-        ax.set_yticklabels(CLASS_NAMES)
-        ax.set_xlabel('Predicted Class', fontweight='bold')
-        ax.set_ylabel('True Class', fontweight='bold')
-        ax.set_title('Confusion Matrix (Normalized)', fontweight='bold')
+        ax.set_xticklabels(CLASS_NAMES, fontsize=FONT_SIZE_TICK)
+        ax.set_yticklabels(CLASS_NAMES, fontsize=FONT_SIZE_TICK)
+        ax.set_xlabel('Predicted Class', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('True Class', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('Confusion Matrix (Normalized)', fontweight='bold', fontsize=FONT_SIZE_TITLE)
         
         plt.tight_layout()
         self._save_figure(fig, 'confusion_matrix')
@@ -2276,6 +2334,8 @@ class RomanEvaluator:
         
         Creates one-vs-rest ROC curves for each class with optional
         bootstrap confidence bands for statistical rigor.
+        
+        v3.0.1 FIX: Legend moved outside plot area to prevent overlap with curves.
         
         Output
         ------
@@ -2295,7 +2355,8 @@ class RomanEvaluator:
         """
         y_true_bin = label_binarize(self.y, classes=[0, 1, 2])
         
-        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
+        # v3.0.1: Use wider figure for external legend
+        fig, ax = plt.subplots(figsize=FIG_ROC_CURVES)
         
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
             # Compute ROC curve
@@ -2304,7 +2365,7 @@ class RomanEvaluator:
             
             # Plot main curve
             ax.plot(fpr, tpr, color=color, linewidth=2,
-                   label=f'{name} (AUC = {auc:.3f})')
+                   label=f'{name} (AUC={auc:.3f})')
             
             # Bootstrap confidence interval
             if self.roc_bootstrap_ci and len(self.y) > MIN_SAMPLES_FOR_BOOTSTRAP:
@@ -2336,14 +2397,20 @@ class RomanEvaluator:
         # Diagonal reference (random classifier)
         ax.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.5, label='Random')
         
-        ax.set_xlabel('False Positive Rate', fontweight='bold')
-        ax.set_ylabel('True Positive Rate', fontweight='bold')
-        ax.set_title('ROC Curves (One-vs-Rest)', fontweight='bold')
-        ax.legend(loc='lower right', fontsize=7, framealpha=0.95, edgecolor='black')
+        ax.set_xlabel('False Positive Rate', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('True Positive Rate', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('ROC Curves (One-vs-Rest)', fontweight='bold', fontsize=FONT_SIZE_TITLE)
+        
+        # v3.0.1: Move legend outside plot to prevent overlap
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), 
+                 fontsize=FONT_SIZE_LEGEND, framealpha=0.95, edgecolor='black')
+        
         ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
         ax.set_aspect('equal')
+        ax.tick_params(labelsize=FONT_SIZE_TICK)
         
+        # Adjust layout to accommodate external legend
         plt.tight_layout()
         self._save_figure(fig, 'roc_curves')
         plt.close()
@@ -2356,6 +2423,8 @@ class RomanEvaluator:
         
         Plots predicted probabilities vs observed frequencies to assess
         model calibration. Includes confidence histogram.
+        
+        v3.0.1 FIX: Improved legend positioning and panel spacing.
         
         Output
         ------
@@ -2373,7 +2442,8 @@ class RomanEvaluator:
         Niculescu-Mizil & Caruana (2005): "Predicting Good Probabilities 
         with Supervised Learning", ICML
         """
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=FIG_DOUBLE_COL)
+        # v3.0.1: Use wider figure for two panels
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=FIG_CALIBRATION)
         
         # Calibration curve
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
@@ -2398,23 +2468,30 @@ class RomanEvaluator:
         # Perfect calibration line
         ax1.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.5, label='Perfect')
         
-        ax1.set_xlabel('Predicted Probability', fontweight='bold')
-        ax1.set_ylabel('Observed Frequency', fontweight='bold')
-        ax1.set_title('Calibration Curve', fontweight='bold')
-        ax1.legend(fontsize=8, loc='upper left')
+        ax1.set_xlabel('Predicted Probability', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax1.set_ylabel('Observed Frequency', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax1.set_title('Calibration Curve', fontweight='bold', fontsize=FONT_SIZE_TITLE)
+        
+        # v3.0.1: Position legend in upper left, inside plot
+        ax1.legend(fontsize=FONT_SIZE_LEGEND, loc='upper left', 
+                  bbox_to_anchor=LEGEND_BBOX_CALIBRATION, framealpha=0.9)
         ax1.set_xlim([0, 1])
         ax1.set_ylim([0, 1])
         ax1.set_aspect('equal')
+        ax1.tick_params(labelsize=FONT_SIZE_TICK)
         
         # Confidence histogram
         ax2.hist(self.confs, bins=DEFAULT_HIST_BINS, color='gray', alpha=0.7, edgecolor='black')
         ax2.axvline(self.confs.mean(), color='red', linestyle='--', 
-                   linewidth=2, label=f'Mean = {self.confs.mean():.3f}')
-        ax2.set_xlabel('Prediction Confidence', fontweight='bold')
-        ax2.set_ylabel('Count', fontweight='bold')
-        ax2.set_title('Confidence Distribution', fontweight='bold')
-        ax2.legend(fontsize=8)
+                   linewidth=2, label=f'Mean={self.confs.mean():.3f}')
+        ax2.set_xlabel('Prediction Confidence', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax2.set_ylabel('Count', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax2.set_title('Confidence Distribution', fontweight='bold', fontsize=FONT_SIZE_TITLE)
+        ax2.legend(fontsize=FONT_SIZE_LEGEND, loc='upper left')
+        ax2.tick_params(labelsize=FONT_SIZE_TICK)
         
+        # v3.0.1: Increase spacing between panels
+        plt.subplots_adjust(wspace=0.3)
         plt.tight_layout()
         self._save_figure(fig, 'calibration')
         plt.close()
@@ -2457,11 +2534,12 @@ class RomanEvaluator:
                 ax.hist(p_class[incorrect], bins=DEFAULT_HIST_BINS, alpha=0.7,
                        color='red', label='Incorrect', edgecolor='black')
             
-            ax.set_xlabel('Predicted Probability', fontweight='bold')
-            ax.set_ylabel('Count', fontweight='bold')
-            ax.set_title(f'{name}', fontsize=11, fontweight='bold', pad=10)
-            ax.legend(fontsize=8)
+            ax.set_xlabel('Predicted Probability', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+            ax.set_ylabel('Count', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+            ax.set_title(f'{name}', fontsize=FONT_SIZE_TITLE, fontweight='bold', pad=10)
+            ax.legend(fontsize=FONT_SIZE_LEGEND, loc='upper center')
             ax.set_xlim([0, 1])
+            ax.tick_params(labelsize=FONT_SIZE_TICK)
         
         plt.tight_layout()
         self._save_figure(fig, 'class_distributions')
@@ -2475,6 +2553,8 @@ class RomanEvaluator:
         
         Displays precision, recall, and F1-score for each class as
         grouped bar chart for easy comparison.
+        
+        v3.0.1 FIX: Increased figure width and adjusted bar spacing to prevent overlap.
         
         Output
         ------
@@ -2494,23 +2574,41 @@ class RomanEvaluator:
             class_metrics[i, 1] = self.metrics[f'recall_{name}']
             class_metrics[i, 2] = self.metrics[f'f1_{name}']
         
-        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
+        # v3.0.1: Use wider figure
+        fig, ax = plt.subplots(figsize=FIG_PER_CLASS_METRICS)
         
         x = np.arange(len(CLASS_NAMES))
-        width = 0.25
+        width = 0.22  # v3.0.1: Slightly narrower bars
         
-        for i, metric_name in enumerate(metrics_names):
+        # Define bar colors for metrics
+        metric_colors = ['#3498db', '#e74c3c', '#2ecc71']  # Blue, Red, Green
+        
+        for i, (metric_name, metric_color) in enumerate(zip(metrics_names, metric_colors)):
             offset = (i - 1) * width
-            ax.bar(x + offset, class_metrics[:, i], width, 
-                  label=metric_name, alpha=0.8)
+            bars = ax.bar(x + offset, class_metrics[:, i], width, 
+                         label=metric_name, alpha=0.85, color=metric_color,
+                         edgecolor='black', linewidth=0.5)
+            
+            # v3.0.1: Add value labels on top of bars
+            for bar, val in zip(bars, class_metrics[:, i]):
+                height = bar.get_height()
+                ax.annotate(f'{val:.2f}',
+                           xy=(bar.get_x() + bar.get_width() / 2, height),
+                           xytext=(0, 2),  # 2 points vertical offset
+                           textcoords="offset points",
+                           ha='center', va='bottom', fontsize=FONT_SIZE_ANNOTATION,
+                           rotation=0)
         
-        ax.set_xlabel('Class', fontweight='bold')
-        ax.set_ylabel('Score', fontweight='bold')
-        ax.set_title('Per-Class Metrics', fontweight='bold')
+        ax.set_xlabel('Class', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('Score', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('Per-Class Metrics', fontweight='bold', fontsize=FONT_SIZE_TITLE)
         ax.set_xticks(x)
-        ax.set_xticklabels(CLASS_NAMES)
-        ax.legend(fontsize=8)
-        ax.set_ylim([0, 1.05])
+        ax.set_xticklabels(CLASS_NAMES, fontsize=FONT_SIZE_TICK)
+        ax.tick_params(axis='y', labelsize=FONT_SIZE_TICK)
+        
+        # v3.0.1: Position legend at top to avoid overlapping bars
+        ax.legend(fontsize=FONT_SIZE_LEGEND, loc='upper right', ncol=3)
+        ax.set_ylim([0, 1.15])  # Extra space for value labels
         
         plt.tight_layout()
         self._save_figure(fig, 'per_class_metrics')
@@ -2525,6 +2623,8 @@ class RomanEvaluator:
         Shows n_example_grid_per_type correctly classified examples
         for each class with predicted probabilities.
         
+        v3.0.1 FIX: Improved grid spacing and label sizing.
+        
         Output
         ------
         example_light_curves.{png,pdf,svg} : file
@@ -2538,9 +2638,13 @@ class RomanEvaluator:
         """
         n_per_class = self.n_example_grid_per_type
         
+        # v3.0.1: Adjust figure size based on grid dimensions
+        fig_width = n_per_class * 2.8
+        fig_height = len(CLASS_NAMES) * 2.5
+        
         fig, axes = plt.subplots(
             len(CLASS_NAMES), n_per_class,
-            figsize=(n_per_class * 2.5, len(CLASS_NAMES) * 2),
+            figsize=(fig_width, fig_height),
             squeeze=False
         )
         
@@ -2556,8 +2660,20 @@ class RomanEvaluator:
                 if len(all_indices) > 0:
                     indices = all_indices
             
-            for col_idx, idx in enumerate(indices):
+            for col_idx in range(n_per_class):
                 ax = axes[class_idx, col_idx]
+                
+                if col_idx >= len(indices):
+                    # No more examples for this class
+                    ax.text(0.5, 0.5, 'No data', 
+                           ha='center', va='center', transform=ax.transAxes,
+                           fontsize=FONT_SIZE_TICK)
+                    ax.set_xlabel('Time (days)', fontsize=FONT_SIZE_ANNOTATION)
+                    ax.set_ylabel('Mag (AB)', fontsize=FONT_SIZE_ANNOTATION)
+                    ax.set_title(f'{class_name}', fontsize=FONT_SIZE_TICK, fontweight='bold')
+                    continue
+                
+                idx = indices[col_idx]
                 
                 # Get data
                 flux_norm = self.flux_norm[idx]
@@ -2571,12 +2687,13 @@ class RomanEvaluator:
                 
                 if valid_mask.sum() < MIN_VALID_POINTS_PLOT:
                     # Not enough valid points, show empty plot
-                    ax.text(0.5, 0.5, 'Insufficient data', 
-                           ha='center', va='center', transform=ax.transAxes)
-                    ax.set_xlabel('Time (days)', fontsize=8)
-                    ax.set_ylabel('Magnitude (AB)', fontsize=8)
+                    ax.text(0.5, 0.5, 'Insufficient\ndata', 
+                           ha='center', va='center', transform=ax.transAxes,
+                           fontsize=FONT_SIZE_ANNOTATION)
+                    ax.set_xlabel('Time (days)', fontsize=FONT_SIZE_ANNOTATION)
+                    ax.set_ylabel('Mag (AB)', fontsize=FONT_SIZE_ANNOTATION)
                     prob = self.probs[idx, class_idx]
-                    ax.set_title(f'{class_name} (P={prob:.3f})', fontsize=9, fontweight='bold')
+                    ax.set_title(f'{class_name} (P={prob:.2f})', fontsize=FONT_SIZE_TICK, fontweight='bold')
                     continue
                 
                 # Extract valid observations
@@ -2588,20 +2705,22 @@ class RomanEvaluator:
                 mag_valid = magnification_to_mag(flux_valid, m_base)
                 
                 # Plot
-                ax.scatter(times_valid, mag_valid, s=5)
+                ax.scatter(times_valid, mag_valid, s=3, alpha=0.7)
                 
                 # Formatting
                 ax.invert_yaxis()
-                ax.set_xlabel('Time (days)', fontsize=8)
-                ax.set_ylabel('AB Magnitude', fontsize=8)
+                ax.set_xlabel('Time (days)', fontsize=FONT_SIZE_ANNOTATION)
+                ax.set_ylabel('Mag (AB)', fontsize=FONT_SIZE_ANNOTATION)
                 
-                # Title with prediction
+                # Title with prediction - v3.0.1: more compact
                 prob = self.probs[idx, class_idx]
-                ax.set_title(f'{class_name} (P={prob:.3f})', fontsize=9, fontweight='bold')
+                ax.set_title(f'{class_name} (P={prob:.2f})', fontsize=FONT_SIZE_TICK, fontweight='bold')
                 
-                ax.tick_params(labelsize=7)
+                ax.tick_params(labelsize=FONT_SIZE_ANNOTATION)
                 ax.grid(alpha=0.2)
         
+        # v3.0.1: Adjust subplot spacing
+        plt.subplots_adjust(hspace=0.4, wspace=0.35)
         plt.tight_layout()
         self._save_figure(fig, 'example_light_curves')
         plt.close()
@@ -2614,6 +2733,8 @@ class RomanEvaluator:
         
         Stratifies binary events by impact parameter (u0) and computes
         accuracy to reveal physical limitations of classification.
+        
+        v3.0.1 FIX: Repositioned count annotations and improved legend placement.
         
         Output
         ------
@@ -2670,8 +2791,8 @@ class RomanEvaluator:
                 errors.append(0)
                 counts.append(0)
         
-        # Plot
-        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
+        # v3.0.1: Use adjusted figure size
+        fig, ax = plt.subplots(figsize=FIG_U0_DEPENDENCY)
         
         # Filter valid points
         valid = ~np.isnan(accuracies)
@@ -2681,24 +2802,41 @@ class RomanEvaluator:
                    yerr=np.array(errors)[valid],
                    fmt='o-', color=self.colors[2], 
                    capsize=4, linewidth=2, markersize=6,
-                   label='Binary Classification')
+                   label='Binary Accuracy')
         
         # Reference line at U0_REFERENCE_LINE (typical detectability threshold)
         ax.axvline(U0_REFERENCE_LINE, color='gray', linestyle='--', linewidth=1.5, 
                   alpha=0.7, label=rf'$u_0 = {U0_REFERENCE_LINE}$')
         
-        ax.set_xlabel(r'Impact Parameter $u_0$', fontweight='bold')
-        ax.set_ylabel('Binary Classification Accuracy', fontweight='bold')
-        ax.set_title('Binary Detection vs Impact Parameter', fontweight='bold')
+        ax.set_xlabel(r'Impact Parameter $u_0$', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('Binary Classification Accuracy', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('Binary Detection vs Impact Parameter', fontweight='bold', fontsize=FONT_SIZE_TITLE)
         ax.set_ylim([0, 1.05])
-        ax.legend(fontsize=8, loc='upper right')
+        ax.set_xlim([0, 1.05])
+        ax.tick_params(labelsize=FONT_SIZE_TICK)
         
-        # Annotate counts
-        for i, (bc, cnt) in enumerate(zip(bin_centers[valid], np.array(counts)[valid])):
-            ax.text(bc, 0.05, f'n={cnt}', ha='center', fontsize=7, 
-                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        # v3.0.1: Position legend inside plot, upper right
+        ax.legend(fontsize=FONT_SIZE_LEGEND, loc='upper right', 
+                 bbox_to_anchor=LEGEND_BBOX_U0, framealpha=0.95)
+        
+        # v3.0.1: Add count annotations below x-axis using secondary axis technique
+        # Create annotation text below the plot
+        valid_bin_centers = bin_centers[valid]
+        valid_counts = np.array(counts)[valid]
+        
+        # Add counts as text below each point, positioned at y=-0.08 in axes coordinates
+        for bc, cnt in zip(valid_bin_centers, valid_counts):
+            ax.annotate(f'n={cnt}', 
+                       xy=(bc, 0), 
+                       xytext=(bc, U0_ANNOTATION_Y_OFFSET),
+                       textcoords=('data', 'axes fraction'),
+                       ha='center', fontsize=FONT_SIZE_ANNOTATION,
+                       bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
+                                alpha=0.8, edgecolor='none'))
         
         plt.tight_layout()
+        # Adjust bottom margin for annotations
+        plt.subplots_adjust(bottom=0.18)
         self._save_figure(fig, 'u0_dependency')
         plt.close()
         
@@ -2710,6 +2848,8 @@ class RomanEvaluator:
         
         Compares t0 distributions of correct vs incorrect predictions
         to detect temporal bias in classification performance.
+        
+        v3.0.1 FIX: Repositioned text box and legend to prevent overlap.
         
         Output
         ------
@@ -2753,31 +2893,47 @@ class RomanEvaluator:
         # Get correct vs incorrect predictions
         correct = (self.preds == self.y)
         
+        # Make sure we have matching lengths
+        n_params = len(t0_all)
+        correct_subset = correct[:n_params]
+        
         # KS test
-        ks_stat, p_value = ks_2samp(t0_all[correct[:len(t0_all)]], 
-                                     t0_all[~correct[:len(t0_all)]])
+        t0_correct = t0_all[correct_subset]
+        t0_incorrect = t0_all[~correct_subset]
         
-        # Plot
-        fig, ax = plt.subplots(figsize=FIG_SINGLE_COL)
+        if len(t0_correct) == 0 or len(t0_incorrect) == 0:
+            self.logger.warning("Insufficient data for temporal bias check")
+            return
         
-        ax.hist(t0_all[correct[:len(t0_all)]], bins=DEFAULT_HIST_BINS, alpha=0.7,
-               color='green', label='Correct', density=True, edgecolor='black')
-        ax.hist(t0_all[~correct[:len(t0_all)]], bins=DEFAULT_HIST_BINS, alpha=0.7,
-               color='red', label='Incorrect', density=True, edgecolor='black')
+        ks_stat, p_value = ks_2samp(t0_correct, t0_incorrect)
         
-        ax.set_xlabel(r'Peak Time $t_0$ (days)', fontweight='bold')
-        ax.set_ylabel('Normalized Count', fontweight='bold')
-        ax.set_title('Temporal Bias Check', fontweight='bold')
+        # v3.0.1: Use adjusted figure size
+        fig, ax = plt.subplots(figsize=FIG_TEMPORAL_BIAS)
         
-        # KS test result
+        ax.hist(t0_correct, bins=DEFAULT_HIST_BINS, alpha=0.7,
+               color='green', label=f'Correct (n={len(t0_correct):,})', 
+               density=True, edgecolor='black')
+        ax.hist(t0_incorrect, bins=DEFAULT_HIST_BINS, alpha=0.7,
+               color='red', label=f'Incorrect (n={len(t0_incorrect):,})', 
+               density=True, edgecolor='black')
+        
+        ax.set_xlabel(r'Peak Time $t_0$ (days)', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('Normalized Density', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('Temporal Bias Check', fontweight='bold', fontsize=FONT_SIZE_TITLE)
+        ax.tick_params(labelsize=FONT_SIZE_TICK)
+        
+        # KS test result - v3.0.1: Position in upper left, away from legend
         result = "BIAS DETECTED" if p_value < 0.05 else "NO BIAS"
-        ax.text(0.98, 0.97, 
-               f'KS: D={ks_stat:.3f}, p={p_value:.2f}\n{result}',
-               transform=ax.transAxes, fontsize=8,
-               verticalalignment='top', horizontalalignment='right',
-               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        result_color = 'red' if p_value < 0.05 else 'green'
+        ax.text(0.02, 0.98, 
+               f'KS statistic: D={ks_stat:.3f}\np-value: {p_value:.3f}\nResult: {result}',
+               transform=ax.transAxes, fontsize=FONT_SIZE_LEGEND,
+               verticalalignment='top', horizontalalignment='left',
+               bbox=dict(boxstyle='round,pad=0.4', facecolor='wheat', 
+                        alpha=0.9, edgecolor=result_color, linewidth=2))
         
-        ax.legend(fontsize=8)
+        # v3.0.1: Position legend in upper right
+        ax.legend(fontsize=FONT_SIZE_LEGEND, loc='upper right', framealpha=0.9)
         
         plt.tight_layout()
         self._save_figure(fig, 'temporal_bias_check')
@@ -2795,6 +2951,8 @@ class RomanEvaluator:
         1. Light curve with observation completeness
         2. Class probability evolution over time
         3. Prediction confidence evolution
+        
+        v3.0.1 FIX: Increased panel spacing to prevent y-label overlap.
         
         Parameters
         ----------
@@ -2930,17 +3088,18 @@ class RomanEvaluator:
         mag_plot = magnification_to_mag(flux_plot, m_base)
         
         # =========================================================================
-        # Plot
+        # Plot - v3.0.1: Improved spacing
         # =========================================================================
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=FIG_EVOLUTION, sharex=True)
         
         # Panel 1: Light curve in AB magnitudes
-        ax1.scatter(times_plot, mag_plot, s=5)
+        ax1.scatter(times_plot, mag_plot, s=5, alpha=0.7)
         ax1.invert_yaxis()
-        ax1.set_ylabel('AB Magnitude', fontsize=11)
-        ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
-                     fontsize=12, fontweight='bold')
+        ax1.set_ylabel('AB Magnitude', fontsize=FONT_SIZE_LABEL, fontweight='bold')
+        ax1.set_title(f'Probability Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
+                     fontsize=FONT_SIZE_TITLE, fontweight='bold')
         ax1.grid(alpha=0.2)
+        ax1.tick_params(labelsize=FONT_SIZE_TICK)
         
         # Panel 2: Probability evolution
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
@@ -2948,10 +3107,11 @@ class RomanEvaluator:
                     'o-', color=color, label=name, linewidth=2, markersize=4)
         
         ax2.axhline(RANDOM_CLASSIFIER_PROB, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-        ax2.set_ylabel('Class Probability', fontsize=11)
+        ax2.set_ylabel('Class Probability', fontsize=FONT_SIZE_LABEL, fontweight='bold')
         ax2.set_ylim([0, 1.05])
-        ax2.legend(fontsize=9, loc='best', framealpha=0.9)
+        ax2.legend(fontsize=FONT_SIZE_LEGEND, loc='best', framealpha=0.9, ncol=3)
         ax2.grid(alpha=0.2)
+        ax2.tick_params(labelsize=FONT_SIZE_TICK)
         
         # Panel 3: Confidence
         confidence = probs_evolution.max(axis=1)
@@ -2961,15 +3121,16 @@ class RomanEvaluator:
                 linewidth=2, markersize=4, label='Confidence')
         ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
         
-        ax3.set_xlabel('Time (days)', fontsize=11)
-        ax3.set_ylabel('Max Probability', fontsize=11)
+        ax3.set_xlabel('Time (days)', fontsize=FONT_SIZE_LABEL, fontweight='bold')
+        ax3.set_ylabel('Max Probability', fontsize=FONT_SIZE_LABEL, fontweight='bold')
         ax3.set_ylim([0, 1.05])
         ax3.set_xlim([times_plot.min(), times_plot.max()])
-        ax3.legend(fontsize=9, framealpha=0.9)
+        ax3.legend(fontsize=FONT_SIZE_LEGEND, framealpha=0.9)
         ax3.grid(alpha=0.2)
+        ax3.tick_params(labelsize=FONT_SIZE_TICK)
         
-        # Improve spacing
-        plt.subplots_adjust(hspace=0.25)
+        # v3.0.1: Increase spacing between panels
+        plt.subplots_adjust(hspace=0.30)
         plt.tight_layout()
         self._save_figure(fig, f'evolution_{class_name}_{sample_idx}')
         plt.close()
@@ -3100,13 +3261,14 @@ class RomanEvaluator:
                label='F1 (macro)', color=self.colors[2], 
                linewidth=1.5, markersize=5)
         
-        ax.set_xlabel('Sequence Completeness (%)', fontweight='bold')
-        ax.set_ylabel('Score', fontweight='bold')
-        ax.set_title('Early Detection Performance', fontweight='bold')
+        ax.set_xlabel('Sequence Completeness (%)', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('Score', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('Early Detection Performance', fontweight='bold', fontsize=FONT_SIZE_TITLE)
         ax.set_ylim(0.0, 1.05)
         ax.set_xlim(5, 105)
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=FONT_SIZE_LEGEND, loc='lower right')
         ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=FONT_SIZE_TICK)
         
         plt.tight_layout()
         self._save_figure(fig, 'early_detection_curve')
