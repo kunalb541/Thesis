@@ -340,9 +340,8 @@ python evaluate.py \
     --colorblind-safe
 ```
 
-**Important:** The `--experiment-name` must match the directory name in `../results/`. 
+**Important:** Train.py auto-generates names like `baseline_20241216_143022`. You can find the name by:
 
-Train.py auto-generates names like `baseline_20241216_143022`. You can find the name by:
 ```bash
 ls ../results/
 ```
