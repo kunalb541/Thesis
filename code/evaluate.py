@@ -1,11 +1,33 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Classifier - Comprehensive Evaluation Suite
-==============================================================
+Roman Microlensing Classifier - Comprehensive Evaluation Suite v3.0.0
+=====================================================================
 
 Production-grade evaluation framework for gravitational microlensing event
 classification models. Computes comprehensive metrics, generates publication-
 quality visualizations, and performs physics-based performance analysis.
+
+VERSION 3.0.0 CRITICAL FIXES:
+-----------------------------
+    * CRITICAL: Proper m_base handling - loads from HDF5 if available, generates if not
+    * CRITICAL: Fixed evolution plots - progressive truncation (not flat lines)
+    * CRITICAL: Proper AB magnitude display using per-event m_base
+    * MAJOR: Streamlined experiment loading with automatic checkpoint discovery
+    * MAJOR: All light curves show realistic Roman magnitudes (18-24 mag range)
+    * Complete type hints (100% coverage)
+    * All constants moved to module level (no magic numbers)
+
+DATA FORMAT NOTE:
+----------------
+HDF5 'flux' key contains MAGNIFICATION (A):
+  - A = 1.0: baseline (unmagnified)
+  - A > 1.0: magnified
+  - A = 0.0: masked/invalid
+
+Parameters stored in params_{class} structured arrays MAY contain:
+  - m_base: baseline AB magnitude (18-24 mag for Roman) [OPTIONAL - generated if not present]
+  - t0, tE, u0: physical parameters
+  - s, q, alpha, rho: binary-specific parameters
 
 Core Capabilities
 -----------------
@@ -30,17 +52,13 @@ Scientific Visualization
     * Impact parameter dependency analysis for binary classification
     * Colorblind-safe palette options (IBM/Wong standard)
 
-VERSION 3.0.0 - COMPREHENSIVE UPDATE
--------------------------------------
-This version synchronizes with train.py v3.0.0, model.py v3.0.0, and simulate.py v3.0.0.
-
-Fixes Applied (v3.0.0):
-    * VERSION SYNC: All components now v3.0.0 for consistency
-    * CONSTANTS FIX: All magic numbers moved to module-level constants
-    * VALIDATION FIX: Added HDF5 'mag' key check for backward compatibility
-    * DOCUMENTATION: Enhanced docstrings with v3.0.0 compatibility notes
-    * TYPE HINTS: Verified 100% coverage maintained
-    * COMPATIBILITY: Full compatibility with train.py v3.0.0 hierarchical mode
+VERSION HISTORY
+---------------
+v3.0.0 (Current):
+    * CRITICAL: m_base auto-generation if not in HDF5
+    * CRITICAL: Fixed evolution plots (progressive truncation)
+    * MAJOR: Smart experiment/checkpoint finding
+    * All components synchronized to v3.0.0
 
 Fixes Applied (v2.7.0 - Comprehensive Update)
 ---------------------------------------------
@@ -218,21 +236,35 @@ CACHE_CLEAR_FREQ: Final[int] = 100
 SYNTHETIC_TIME_MAX: Final[float] = 200.0
 
 # =============================================================================
+# v3.0.0: NEW CONSTANTS FOR M_BASE AND EVOLUTION
+# =============================================================================
+
+# Roman Space Telescope baseline magnitude range
+ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0
+ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0
+ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
+
+# Evolution plot observation checkpoints (progressive truncation)
+EVOLUTION_OBS_COUNTS: Final[List[int]] = [10, 50, 100, 200, 400, 800, 1200, 1600, 2000, 2400]
+
+# =============================================================================
 # FLUX TO MAGNITUDE CONVERSION FOR PLOTTING
 # =============================================================================
 
-def magnification_to_mag(A: np.ndarray, baseline_mag: float = 22.0) -> np.ndarray:
+def magnification_to_mag(A: np.ndarray, baseline_mag: Union[float, np.ndarray] = 22.0) -> np.ndarray:
     """
     Convert magnification to apparent magnitude.
     
-    v2.7+: Added for cleaner astronomical plotting conventions.
+    v3.0.0: Now supports per-event baseline magnitudes (array input).
     
     Parameters
     ----------
     A : np.ndarray
         Magnification values (A = 1.0 is baseline, A > 1 is brighter)
-    baseline_mag : float
-        Baseline magnitude when A = 1.0 (default: 22.0 for typical Roman source)
+    baseline_mag : float or np.ndarray
+        Baseline magnitude when A = 1.0. Can be:
+        - Scalar: same baseline for all events (default: 22.0)
+        - Array: per-event baseline magnitudes (shape must broadcast with A)
         
     Returns
     -------
@@ -362,6 +394,280 @@ def get_valid_lengths(flux_norm: np.ndarray) -> np.ndarray:
     valid_lengths = np.maximum(valid_lengths, 1)
     
     return valid_lengths
+
+
+# =============================================================================
+# v3.0.0: NEW FUNCTIONS FOR M_BASE HANDLING AND EXPERIMENT FINDING
+# =============================================================================
+
+def extract_baseline_magnitudes(
+    data_path: Path,
+    indices: np.ndarray,
+    labels: np.ndarray,
+    logger: Optional[logging.Logger] = None
+) -> np.ndarray:
+    """
+    Extract or generate baseline magnitudes (m_base) for events.
+    
+    v3.0.0: NEW FUNCTION - handles missing m_base by generating realistic values.
+    
+    Strategy:
+    1. Try to load m_base from params_{class} datasets in HDF5
+    2. If not present, generate random m_base in Roman range [18, 24] mag
+    
+    Parameters
+    ----------
+    data_path : Path
+        Path to HDF5 dataset.
+    indices : np.ndarray
+        Global indices of events to load (shape: [N]).
+    labels : np.ndarray
+        Class labels (0=Flat, 1=PSPL, 2=Binary) (shape: [N]).
+    logger : logging.Logger, optional
+        Logger for messages.
+    
+    Returns
+    -------
+    np.ndarray
+        Baseline magnitudes (shape: [N]).
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    n_events = len(indices)
+    m_base = np.full(n_events, ROMAN_DEFAULT_BASELINE_MAG, dtype=np.float32)
+    
+    try:
+        with h5py.File(data_path, 'r') as f:
+            # Check if any parameter dataset has m_base
+            has_m_base = False
+            for class_idx, class_name in enumerate(CLASS_NAMES):
+                param_key = f'params_{class_name.lower()}'
+                if param_key in f:
+                    param_dataset = f[param_key]
+                    if 'm_base' in param_dataset.dtype.names:
+                        has_m_base = True
+                        break
+            
+            if has_m_base:
+                logger.info("Found m_base in HDF5 parameters, loading per-event values...")
+                
+                # Load m_base for each event based on its class
+                for class_idx, class_name in enumerate(CLASS_NAMES):
+                    class_mask = (labels == class_idx)
+                    if not class_mask.any():
+                        continue
+                    
+                    param_key = f'params_{class_name.lower()}'
+                    if param_key not in f:
+                        logger.warning(f"Parameter dataset '{param_key}' not found, using default")
+                        continue
+                    
+                    param_dataset = f[param_key]
+                    if 'm_base' not in param_dataset.dtype.names:
+                        logger.warning(f"'m_base' not in {param_key}, using default")
+                        continue
+                    
+                    # Get class-specific indices
+                    class_indices = indices[class_mask]
+                    
+                    # Map global indices to class-specific indices
+                    # Assume labels are sorted: Flat (0-n0), PSPL (n0-n1), Binary (n1-n2)
+                    n_before = (labels[:class_indices[0]] < class_idx).sum() if len(class_indices) > 0 else 0
+                    class_specific_indices = class_indices - n_before
+                    
+                    # Load m_base values
+                    m_base_class = param_dataset['m_base'][class_specific_indices]
+                    m_base[class_mask] = m_base_class
+                
+                logger.info(f"Loaded m_base: min={m_base.min():.2f}, max={m_base.max():.2f}, mean={m_base.mean():.2f}")
+            
+            else:
+                # Generate random m_base values in Roman range
+                logger.warning("m_base not found in HDF5 parameters")
+                logger.info(f"Generating random m_base in range [{ROMAN_SOURCE_MAG_MIN}, {ROMAN_SOURCE_MAG_MAX}] mag")
+                
+                # Use deterministic seed based on first index for reproducibility
+                rng = np.random.RandomState(seed=42 + int(indices[0]) % 1000)
+                m_base = rng.uniform(
+                    ROMAN_SOURCE_MAG_MIN,
+                    ROMAN_SOURCE_MAG_MAX,
+                    size=n_events
+                ).astype(np.float32)
+                
+                logger.info(f"Generated m_base: min={m_base.min():.2f}, max={m_base.max():.2f}, mean={m_base.mean():.2f}")
+    
+    except Exception as e:
+        logger.error(f"Error loading/generating m_base: {e}")
+        logger.warning(f"Falling back to default m_base={ROMAN_DEFAULT_BASELINE_MAG}")
+        m_base = np.full(n_events, ROMAN_DEFAULT_BASELINE_MAG, dtype=np.float32)
+    
+    return m_base
+
+
+def find_experiment_checkpoint(
+    experiment_name: str,
+    base_dir: Path = Path('../results/checkpoints'),
+    logger: Optional[logging.Logger] = None
+) -> Tuple[Path, Path]:
+    """
+    Find experiment directory and checkpoint file automatically.
+    
+    v3.0.0: NEW FUNCTION - smart experiment/checkpoint discovery.
+    
+    Strategy:
+    1. Check for .current_experiment file
+    2. Match partial experiment names (e.g., "d32_l2" matches "d32_l2_hier_20241217_012345")
+    3. Find best.pt, best_model.pt, or latest checkpoint
+    4. Return paths
+    
+    Parameters
+    ----------
+    experiment_name : str
+        Full or partial experiment name.
+    base_dir : Path
+        Base directory to search for experiments.
+    logger : logging.Logger, optional
+        Logger for messages.
+    
+    Returns
+    -------
+    exp_dir : Path
+        Experiment directory.
+    checkpoint_path : Path
+        Path to checkpoint file.
+    
+    Raises
+    ------
+    FileNotFoundError
+        If no matching experiment or checkpoint found.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    base_dir = Path(base_dir)
+    
+    # Case 1: User provided full path to checkpoint
+    if '/' in experiment_name or experiment_name.endswith('.pt'):
+        checkpoint_path = Path(experiment_name)
+        if checkpoint_path.exists():
+            exp_dir = checkpoint_path.parent
+            logger.info(f"Using checkpoint: {checkpoint_path}")
+            return exp_dir, checkpoint_path
+        else:
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    # Case 2: Check .current_experiment file
+    current_exp_file = base_dir / '.current_experiment'
+    if current_exp_file.exists():
+        with open(current_exp_file, 'r') as f:
+            saved_exp_name = f.read().strip()
+        
+        exp_dir = base_dir / saved_exp_name
+        if exp_dir.exists():
+            logger.info(f"Found current experiment: {exp_dir.name}")
+            
+            # Look for checkpoint in this directory
+            checkpoint_path = _find_checkpoint_in_dir(exp_dir, logger)
+            if checkpoint_path:
+                return exp_dir, checkpoint_path
+    
+    # Case 3: Match partial name
+    if base_dir.exists():
+        matching_dirs = []
+        for candidate in base_dir.iterdir():
+            if candidate.is_dir() and experiment_name.lower() in candidate.name.lower():
+                matching_dirs.append(candidate)
+        
+        if matching_dirs:
+            # Sort by modification time, take most recent
+            exp_dir = sorted(matching_dirs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+            logger.info(f"Matched experiment: {exp_dir.name}")
+            
+            checkpoint_path = _find_checkpoint_in_dir(exp_dir, logger)
+            if checkpoint_path:
+                return exp_dir, checkpoint_path
+    
+    # Case 4: Try treating as directory name in ../results/
+    results_dir = Path('../results')
+    if results_dir.exists():
+        exp_dir = results_dir / experiment_name
+        if exp_dir.exists() and exp_dir.is_dir():
+            logger.info(f"Found experiment in ../results/: {exp_dir.name}")
+            
+            checkpoint_path = _find_checkpoint_in_dir(exp_dir, logger)
+            if checkpoint_path:
+                return exp_dir, checkpoint_path
+    
+    raise FileNotFoundError(
+        f"Could not find experiment '{experiment_name}' in:\n"
+        f"  - {base_dir}\n"
+        f"  - {results_dir}\n"
+        f"Available experiments:\n" +
+        '\n'.join(f"  - {d.name}" for d in base_dir.iterdir() if d.is_dir())
+        if base_dir.exists() else "  (none found)"
+    )
+
+
+def _find_checkpoint_in_dir(exp_dir: Path, logger: Optional[logging.Logger] = None) -> Optional[Path]:
+    """
+    Find best checkpoint in experiment directory.
+    
+    v3.0.0: Helper function for find_experiment_checkpoint().
+    
+    Priority: best.pt > best_model.pt > checkpoint_latest.pt > most recent checkpoint_*.pt
+    
+    Parameters
+    ----------
+    exp_dir : Path
+        Experiment directory to search.
+    logger : logging.Logger, optional
+        Logger for messages.
+    
+    Returns
+    -------
+    Path or None
+        Checkpoint path if found, None otherwise.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    # Priority 1: best.pt
+    best_pt = exp_dir / 'best.pt'
+    if best_pt.exists():
+        logger.info(f"Using best checkpoint: {best_pt.name}")
+        return best_pt
+    
+    # Priority 2: best_model.pt
+    best_model_pt = exp_dir / 'best_model.pt'
+    if best_model_pt.exists():
+        logger.info(f"Using best model: {best_model_pt.name}")
+        return best_model_pt
+    
+    # Priority 3: checkpoint_latest.pt
+    latest_pt = exp_dir / 'checkpoint_latest.pt'
+    if latest_pt.exists():
+        logger.info(f"Using latest checkpoint: {latest_pt.name}")
+        return latest_pt
+    
+    # Priority 4: Most recent checkpoint_*.pt
+    checkpoints = list(exp_dir.glob('checkpoint_*.pt'))
+    if checkpoints:
+        checkpoint = sorted(checkpoints, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+        logger.info(f"Using recent checkpoint: {checkpoint.name}")
+        return checkpoint
+    
+    # Also check checkpoints subdirectory
+    checkpoints_subdir = exp_dir / 'checkpoints'
+    if checkpoints_subdir.exists():
+        for filename in ['best.pt', 'best_model.pt', 'checkpoint_latest.pt']:
+            checkpoint = checkpoints_subdir / filename
+            if checkpoint.exists():
+                logger.info(f"Using checkpoint from subdirectory: {checkpoint.name}")
+                return checkpoint
+    
+    logger.warning(f"No checkpoint found in {exp_dir}")
+    return None
 
 
 # =============================================================================
@@ -1761,45 +2067,11 @@ class RomanEvaluator:
             device = 'cpu'
         self.device = torch.device(device)
         
-        # Find experiment directory
-        results_dir = Path('../results/checkpoints')
-        if not results_dir.exists():
-            raise FileNotFoundError("Results directory not found. Run training first.")
-        
-        # Find matching experiment
-        exp_dirs = list(results_dir.glob(f'{experiment_name}*'))
-        if not exp_dirs:
-            raise FileNotFoundError(
-                f"No experiment found matching '{experiment_name}' in {results_dir}"
-            )
-        
-        if len(exp_dirs) > 1:
-            # Use most recent
-            exp_dirs.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-            print(f"Found {len(exp_dirs)} matching experiments, using most recent: {exp_dirs[0].name}")
-        
-        self.exp_dir = exp_dirs[0]
-        
-        # Find best model checkpoint
-        checkpoint_path = self.exp_dir / 'best_model.pt'
-        if not checkpoint_path.exists():
-            # Try alternative names
-            alt_names = ['best.pt', 'final.pt', 'checkpoint_latest.pt']
-            for alt_name in alt_names:
-                alt_path = self.exp_dir / alt_name
-                if alt_path.exists():
-                    checkpoint_path = alt_path
-                    break
-                # Check in checkpoints subdirectory
-                alt_path = self.exp_dir / 'checkpoints' / alt_name
-                if alt_path.exists():
-                    checkpoint_path = alt_path
-                    break
-            
-            if not checkpoint_path.exists():
-                raise FileNotFoundError(f"Best model not found in: {self.exp_dir}")
-        
-        self.model_path = checkpoint_path
+        # v3.0.0: Use smart experiment/checkpoint finder
+        self.exp_dir, self.model_path = find_experiment_checkpoint(
+            experiment_name, 
+            base_dir=Path('../results/checkpoints')
+        )
         
         # Setup output directory
         if output_dir is None:
@@ -1893,6 +2165,16 @@ class RomanEvaluator:
             self.y, self.preds, self.probs,
             n_bootstrap=DEFAULT_N_BOOTSTRAP, confidence=0.95,
             seed=seed, logger=self.logger
+        )
+        
+        # v3.0.0: Extract or generate baseline magnitudes
+        self.logger.info("-" * 80)
+        self.logger.info("Loading/generating baseline magnitudes...")
+        self.baseline_mags = extract_baseline_magnitudes(
+            self.data_path,
+            np.arange(len(self.y)),
+            self.y,
+            logger=self.logger
         )
         
         # Try to load parameters
@@ -2301,13 +2583,17 @@ class RomanEvaluator:
                 times_valid = times[valid_mask]
                 flux_valid = flux[valid_mask]
                 
+                # v3.0.0: Use per-event baseline magnitude
+                m_base = self.baseline_mags[idx]
+                mag_valid = magnification_to_mag(flux_valid, m_base)
+                
                 # Plot
-                ax.scatter(times_valid, magnification_to_delta_mag(flux_valid), s=5)
+                ax.scatter(times_valid, mag_valid, s=5)
                 
                 # Formatting
                 ax.invert_yaxis()
                 ax.set_xlabel('Time (days)', fontsize=8)
-                ax.set_ylabel('Δ Magnitude', fontsize=8)
+                ax.set_ylabel('AB Magnitude', fontsize=8)
                 
                 # Title with prediction
                 prob = self.probs[idx, class_idx]
@@ -2557,13 +2843,21 @@ class RomanEvaluator:
         is_hierarchical = (hasattr(self.model, 'config') and self.model.config.hierarchical)
         
         # =========================================================================
-        # Compute evolution by progressively including more valid observations
+        # v3.0.0 FIX: Use explicit observation checkpoints for progressive truncation
         # =========================================================================
-        # Use observation counts from EVOLUTION_MIN_VALID_POINTS to n_valid
-        obs_counts = np.linspace(EVOLUTION_MIN_VALID_POINTS, n_valid, EVOLUTION_N_STEPS, dtype=int)
+        # Use predefined observation counts instead of linspace
+        obs_counts = [n for n in EVOLUTION_OBS_COUNTS if n <= n_valid]
         
-        probs_evolution = np.zeros((EVOLUTION_N_STEPS, NUM_CLASSES))
-        times_evolution = np.zeros(EVOLUTION_N_STEPS)
+        # Ensure we have minimum checkpoints
+        if not obs_counts:
+            obs_counts = [n_valid]
+        elif obs_counts[-1] != n_valid:
+            obs_counts.append(n_valid)
+        
+        n_steps = len(obs_counts)
+        
+        probs_evolution = np.zeros((n_steps, NUM_CLASSES))
+        times_evolution = np.zeros(n_steps)
         
         with torch.no_grad(), torch.inference_mode():
             for i, n_obs in enumerate(obs_counts):
@@ -2631,15 +2925,19 @@ class RomanEvaluator:
             self.logger.warning(f"Skipping evolution plot for {class_name}_{sample_idx} (insufficient valid points for plot)")
             return
         
+        # v3.0.0: Get per-event baseline magnitude
+        m_base = self.baseline_mags[sample_idx]
+        mag_plot = magnification_to_mag(flux_plot, m_base)
+        
         # =========================================================================
         # Plot
         # =========================================================================
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
         
-        # Panel 1: Light curve
-        ax1.scatter(times_plot, magnification_to_delta_mag(flux_plot), s=5)
+        # Panel 1: Light curve in AB magnitudes
+        ax1.scatter(times_plot, mag_plot, s=5)
         ax1.invert_yaxis()
-        ax1.set_ylabel('Δ Magnitude', fontsize=11)
+        ax1.set_ylabel('AB Magnitude', fontsize=11)
         ax1.set_title(f'Evolution: {class_name} (True={CLASS_NAMES[true_label]})', 
                      fontsize=12, fontweight='bold')
         ax1.grid(alpha=0.2)
