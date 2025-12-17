@@ -603,7 +603,7 @@ Thesis/
 | Impact parameter (u₀) | 0.001-1.0 | Closest approach |
 | Binary separation (s) | 0.1-3.0 | Einstein radii |
 | Mass ratio (q) | 10⁻⁴ - 1.0 | Secondary/primary mass |
-| Source radius (ρ) | 10⁻³ - 0.1 | Einstein radii |
+| Source radius (ρ) | 10⁻³ - 0.05 | Einstein radii |
 
 ---
 
