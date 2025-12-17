@@ -381,7 +381,7 @@ python evaluate.py \
 | `classification_report.txt` | Detailed per-class metrics |
 
 **Metrics Computed:**
-- Overall: accuracy, precision, recall, F1-score (with 95% CI)
+- Overall: accuracy, precision, recall, F1-score 
 - Per-class: precision, recall, F1 for Flat, PSPL, Binary
 - AUROC: macro and weighted averages
 - Calibration reliability
@@ -420,7 +420,7 @@ sbatch submit.sbatch
 
 6. On completion:
    ├─ Cancel continuation job
-   └─ Submit evaluation job (1 GPU, 2 hours)
+   └─ Submit evaluation job 
 ```
 
 **Configuration (edit in submit.sbatch):**
