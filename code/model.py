@@ -682,8 +682,7 @@ class FlashAttentionPooling(nn.Module):
     Multi-head attention pooling with flash attention optimization.
 
     Uses a learnable query vector to aggregate variable-length sequences
-    into fixed-size representations. Flash attention provides 2-3x speedup
-    over standard attention implementation.
+    into fixed-size representations. 
 
     The attention mechanism computes weighted averages where weights are
     learned based on sequence content and a global query vector.
