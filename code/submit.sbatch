@@ -183,7 +183,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         echo "Generating training data..."
         FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
         srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
-            --n_flat 100000 --n_pspl 500000 --n_binary 5000000 \
+            --n_flat 100000 --n_pspl 500000 --n_binary 1000000 \
             --output ${SOURCE_FILE} --num_workers 100 --seed 42 --oversample 1.3
     fi
 
