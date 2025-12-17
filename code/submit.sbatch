@@ -9,6 +9,9 @@
 #SBATCH --job-name=microlens_v3
 #SBATCH --exclusive
 #SBATCH --signal=B:USR1@120
+#SBATCH --mail-user=kunal29bhatia@gmail.com
+#SBATCH --mail-type=ALL
+
 
 # =============================================================================
 # ROMAN MICROLENSING - v3.0.0 TRAINING PIPELINE
@@ -277,6 +280,8 @@ if [ $EXIT_CODE -eq 0 ]; then
 #SBATCH -t 03:00:00
 #SBATCH -o logs/eval_${EXP_NAME}.out
 #SBATCH --job-name=eval_v3
+#SBATCH --mail-user=kunal29bhatia@gmail.com
+#SBATCH --mail-type=ALL
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate microlens
