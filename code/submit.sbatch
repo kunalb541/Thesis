@@ -158,7 +158,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         echo "${CONT_JOB}" > "${CONTINUATION_JOB_FILE}"
         echo "Continuation job submitted: ${CONT_JOB}"
     else
-        echo "⚠ Warning: Failed to submit continuation job"
+        echo "Warning: Failed to submit continuation job"
     fi
 fi
 
