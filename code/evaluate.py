@@ -2102,7 +2102,7 @@ class RomanEvaluator:
         self.logger.info("=" * 80)
         self.logger.info(f"Evaluator version: {__version__}")
         self.logger.info(f"Experiment: {self.exp_dir.name}")
-        self.logger.info(f"Checkpoint: {checkpoint_path.name}")
+        self.logger.info(f"Checkpoint: {self.model_path.name}")
         self.logger.info(f"Data: {data_path}")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Output: {self.output_dir}")
