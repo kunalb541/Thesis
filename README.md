@@ -1,6 +1,6 @@
 # Gravitational Microlensing Event Classification
 
-**MSc Thesis Project** | University of Heidelberg | Prof. Dr. Joachim Wambsganß
+**MSc Thesis Project** | University of Heidelberg | Prof. Dr. Joachim Wambsganß | Dr. Yiannis Tsapras
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![PyTorch 2.2+](https://img.shields.io/badge/pytorch-2.2+-orange.svg)](https://pytorch.org/)
@@ -635,7 +635,8 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- Prof. Dr. Joachim Wambsganß (Thesis Advisor)
+- Prof. Dr. Joachim Wambsganß
+- Dr. Yiannis Tsapras
 - bwForCluster HPC resources
 
 ---
