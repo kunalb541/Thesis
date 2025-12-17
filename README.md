@@ -521,8 +521,10 @@ Thesis/
 │   ├── raw/
 │   └── test/
 │
-results/
-│
+├── results/
+│   └── checkpoints/
+│ 
+├── .gitignore
 ├── environment.yml
 ├── README.md
 └── LICENSE
