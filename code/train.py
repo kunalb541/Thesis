@@ -6,26 +6,7 @@ Roman Microlensing Classifier Training Engine v3.0.0
 Distributed training pipeline with RAM-based data loading for
 classifying Nancy Grace Roman Space Telescope gravitational microlensing light
 curves into Flat, PSPL (Point Source Point Lens), and Binary classes.
-
-OPTIMIZATION STRATEGY
----------------------
-This is an optimized version of the production training script with
-RAM-based dataset loading for speedup over disk-based loading.
-
-All architectural features, bug fixes, and training logic are preserved exactly.
-
-KEY MODIFICATION: RAM LOADING
-------------------------------
-**RAMLensingDataset**:
-    - Loads entire HDF5/NPZ dataset into RAM at initialization (~30 seconds)
-    - Zero disk I/O during training (pure in-memory access)
-    - Eliminates HDF5 global lock contention
-    - Eliminates network filesystem latency
-    - Supports both HDF5 (.h5, .hdf5) and NPZ (.npz) formats with auto-detection
-    - Memory requirement: ~29 GB per GPU process, ~116 GB per 4-GPU node
-    - A100 nodes (256-512 GB RAM): 25-50% utilization (plenty of headroom)
-    - Explicit __del__ cleanup to prevent memory leaks
-
+    
 CRITICAL FIX v3.0.0 - COMPREHENSIVE UPDATE
 -------------------------------------------
 **All fixes from v2.9 preserved plus:**
