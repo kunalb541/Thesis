@@ -11,7 +11,7 @@
 #SBATCH --signal=B:USR1@120
 
 # =============================================================================
-# ROMAN MICROLENSING - v3.0.0 ROBUST PIPELINE
+# ROMAN MICROLENSING - v3.0.0 TRAINING PIPELINE
 # =============================================================================
 
 set -e
@@ -175,7 +175,7 @@ trap 'handle_timeout' USR1
 # ============================================================================
 
 if [ "$SKIP_TRAINING" != "true" ]; then
-    # Generate Train Data (Using SAFE worker count 32)
+    # Generate Train Data (Using 100 workers)
     if [ ! -f "${SOURCE_FILE}" ]; then
         echo "Generating training data..."
         FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
