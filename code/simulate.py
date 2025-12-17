@@ -18,13 +18,6 @@ Key Technical Features
     * Unified interface producing mag, delta_t, labels, timestamps, and metadata
     * HDF5 output with compressed datasets for large-volume workflows
 
-Performance Characteristics
----------------------------
-    - Numba-accelerated PSPL magnification up to 50x faster than pure Python
-    - Photon-noise computation fused into low-level kernels
-    - Multiprocessing using `spawn` for safe VBBinaryLensing usage
-    - Memory-contiguous outputs ideal for PyTorch / JAX ingestion
-
 VERSION 3.0.0 - COMPREHENSIVE UPDATE
 -------------------------------------
 This version synchronizes with train.py v3.0.0 and model.py v3.0.0.
