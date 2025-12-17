@@ -41,7 +41,7 @@ CONTINUATION_JOB_FILE="${OUTPUT_DIR}/.continuation_job_id"
 BATCH_SIZE=256
 NUM_WORKERS=0 # Must be 0 for RAMLensingDataset
 ACCUMULATION_STEPS=2
-MAX_EPOCHS=30
+MAX_EPOCHS=300
 
 # Model architecture
 D_MODEL=128
@@ -180,8 +180,8 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         echo "Generating training data..."
         FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
         srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
-            --n_flat 100000 --n_pspl 50000 --n_binary 50000 \
-            --output ${SOURCE_FILE} --num_workers 32 --seed 42 --oversample 1.3
+            --n_flat 100000 --n_pspl 500000 --n_binary 50000 \
+            --output ${SOURCE_FILE} --num_workers 100 --seed 42 --oversample 1.3
     fi
 
     # Copy to Local /tmp
@@ -196,8 +196,8 @@ if [ ! -f "${TEST_FILE}" ]; then
     FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
     srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
         --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --binary_preset baseline \
-        --output ${TEST_FILE} --num_workers 32 --seed 999 --oversample 1.3
+        --binary_preset distinct \
+        --output ${TEST_FILE} --num_workers 100 --seed 999 --oversample 1.3
 fi
 
 # ============================================================================
@@ -232,7 +232,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         --hierarchical \
         --use-aux-head \
         --attention-pooling \
-        --save-every 2 \
+        --save-every 5 \
         ${RESUME_FLAG}
         
     EXIT_CODE=$?
@@ -286,7 +286,6 @@ python evaluate.py \\
     --experiment-name  "${EXP_NAME}" \\
     --data "${TEST_FILE}" \\
     --batch-size ${EVAL_BATCH_SIZE} \\
-    --early-detection \\
     --n-evolution-per-type 5 \\
     --save-formats png
 EVALEOF
