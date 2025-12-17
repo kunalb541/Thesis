@@ -670,7 +670,7 @@ class BinaryPresets:
             # Some stellar binaries are smooth (no caustic crossing)
             's_range': (0.3, 3.0),          # Wide range of separations
             'q_range': (0.1, 1.0),          # FIX v2.8.1: was (0.3, 3), convention q ≤ 1
-            'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),
+            'u0_range': (SHARED_U0_MIN, 0.5),
             'rho_range': (1e-3, 5e-2),      # Larger sources for stellar
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
