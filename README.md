@@ -319,7 +319,7 @@ python train.py \
     --resume ../results/experiment_20241216/checkpoint_epoch_50.pt
 ```
 
-**Training Outputs** (saved in `results/<timestamp>/`):
+**Training Outputs** (saved in `results/`):
 
 | File | Description |
 |------|-------------|
