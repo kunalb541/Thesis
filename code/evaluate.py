@@ -15,8 +15,15 @@ VERSION 3.0.2 CRITICAL FIXES:
       - Fixed valid_indices detection to use self.valid_lengths
     * CRITICAL FIX: run_early_detection_analysis padding bug
       - Same issue: was using 0.0, now uses correct normalized padding
-    * These bugs caused evolution plots to show incorrect predictions
-      (model interpreted zeros as baseline magnification instead of padding)
+    * CRITICAL FIX: get_valid_lengths() was broken for normalized data
+      - It checked flux_norm != 0.0, but after normalization padding ≠ 0.0
+      - Now load_and_prepare_data() returns valid_lengths computed from raw data
+      - Deprecated get_valid_lengths() with warning
+    * CRITICAL FIX: run_inference() was not using masked pooling
+      - Training uses lengths for masked pooling (only valid positions)
+      - Evaluation was using lengths=None (averaged over padding too!)
+      - Now run_inference() accepts valid_lengths and passes to model
+    * These bugs caused evaluation to differ from training behavior
 
 VERSION 3.0.1 COSMETIC FIXES:
 -----------------------------
@@ -398,10 +405,19 @@ def get_valid_lengths(flux_norm: np.ndarray) -> np.ndarray:
     """
     Compute valid sequence lengths from normalized flux array.
 
+    .. deprecated:: 3.0.2
+        This function is BROKEN for normalized data because it checks for != 0.0,
+        but after normalization, padding = -flux_mean/flux_std != 0.0.
+        Use the valid_lengths returned from load_and_prepare_data() instead.
+
     After compaction, valid observations form a contiguous prefix [0, n_valid).
     This function counts non-zero values assuming compaction has been applied.
 
     v2.7.0 FIX: This function was missing, causing NameError during evaluation.
+
+    WARNING (v3.0.2): This function only works correctly on RAW (unnormalized) data!
+    After normalization, padding values become -flux_mean/flux_std, NOT 0.0.
+    For normalized data, use valid_lengths from load_and_prepare_data() instead.
 
     Parameters
     ----------
@@ -427,6 +443,8 @@ def get_valid_lengths(flux_norm: np.ndarray) -> np.ndarray:
     If data is NOT compacted (zeros scattered throughout), this function
     will still work but may overcount valid observations.
 
+    WARNING: This function is deprecated. After normalization, padding != 0.0!
+
     Examples
     --------
     >>> flux = np.array([[1.0, 2.0, 0.0, 0.0],
@@ -436,8 +454,17 @@ def get_valid_lengths(flux_norm: np.ndarray) -> np.ndarray:
     """
     n_samples, seq_len = flux_norm.shape
 
+    # v3.0.2: Add runtime deprecation warning
+    import warnings
+    warnings.warn(
+        "get_valid_lengths() is DEPRECATED: it doesn't work on normalized data. "
+        "Use valid_lengths from load_and_prepare_data() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
     # Fast vectorized version: count non-zeros per row
-    # This works because compaction puts all valid values at the start
+    # WARNING: This is WRONG for normalized data where padding = -mean/std != 0.0!
     valid_lengths = np.sum(flux_norm != 0.0, axis=1).astype(np.int32)
 
     # Ensure at least 1 valid observation (edge case protection)
@@ -1239,7 +1266,7 @@ def load_and_prepare_data(
     n_samples: Optional[int] = None,
     seed: int = 42,
     logger: Optional[logging.Logger] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     """
     Load and normalize data from HDF5 or NPZ file WITH SEQUENCE COMPACTION.
 
@@ -1248,6 +1275,10 @@ def load_and_prepare_data(
 
     Compaction moves all valid (non-zero) observations to a contiguous prefix
     [0, n_valid), matching what the model was trained on.
+
+    v3.0.2 FIX: Now returns valid_lengths computed from RAW data (before normalization).
+    Previously, get_valid_lengths() was called on normalized data which was WRONG
+    because after normalization, padding = -flux_mean/flux_std != 0.0.
 
     Parameters
     ----------
@@ -1274,6 +1305,8 @@ def load_and_prepare_data(
         COMPACTED observation timestamps, shape (n_samples, seq_len).
     data_format : str
         Format of loaded data ('hdf5' or 'npz').
+    valid_lengths : np.ndarray
+        Valid sequence lengths (computed from raw data), shape (n_samples,).
 
     Notes
     -----
@@ -1490,7 +1523,7 @@ def load_and_prepare_data(
         for cls, cnt in zip(unique, counts):
             logger.info(f" Class {CLASS_NAMES[cls]}: {cnt} ({100*cnt/len(labels):.1f}%)")
 
-    return flux_norm, delta_t_norm, labels, timestamps_compacted, data_format
+    return flux_norm, delta_t_norm, labels, timestamps_compacted, valid_lengths, data_format
 # =============================================================================
 # INFERENCE
 # =============================================================================
@@ -1500,6 +1533,7 @@ def run_inference(
     flux: np.ndarray,
     delta_t: np.ndarray,
     device: torch.device,
+    valid_lengths: Optional[np.ndarray] = None,
     batch_size: int = 128,
     logger: Optional[logging.Logger] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1519,6 +1553,11 @@ def run_inference(
         Normalized delta_t array, shape (n_samples, seq_len).
     device : torch.device
         Device for computation.
+    valid_lengths : np.ndarray, optional
+        Valid sequence lengths for each sample, shape (n_samples,).
+        If provided, model uses masked pooling (only valid positions).
+        If None, model averages over all positions (may include padding).
+        v3.0.2: Added to match training behavior (masked pooling).
     batch_size : int, optional
         Batch size for inference. Default is 128.
     logger : logging.Logger, optional
@@ -1579,8 +1618,15 @@ def run_inference(
             flux_batch = torch.from_numpy(flux[i:end_idx]).to(device)
             delta_t_batch = torch.from_numpy(delta_t[i:end_idx]).to(device)
 
+            # v3.0.2 FIX: Pass valid_lengths to model for masked pooling
+            # This matches training behavior where model only pools over valid positions
+            if valid_lengths is not None:
+                lengths_batch = torch.from_numpy(valid_lengths[i:end_idx]).to(device)
+            else:
+                lengths_batch = None
+
             # Forward pass
-            logits = model(flux_batch, delta_t_batch, lengths=None)
+            logits = model(flux_batch, delta_t_batch, lengths=lengths_batch)
 
             # v2.6 FIX (S0-2): Correct probability computation for hierarchical mode
             # Check if model is in hierarchical mode
@@ -2166,20 +2212,23 @@ class RomanEvaluator:
         self.logger.info("-" * 80)
         self.data_path = Path(data_path)
 
-        self.flux_norm, self.delta_t_norm, self.y, self.timestamps, self.data_format = \
+        # v3.0.2 FIX: valid_lengths is now returned from load_and_prepare_data
+        # (computed from raw data BEFORE normalization).
+        # The old get_valid_lengths() was WRONG because it checked flux_norm != 0.0,
+        # but after normalization, padding = -flux_mean/flux_std ≠ 0.0!
+        self.flux_norm, self.delta_t_norm, self.y, self.timestamps, self.valid_lengths, self.data_format = \
             load_and_prepare_data(
                 self.data_path, stats, n_samples=n_samples,
                 seed=seed, logger=self.logger
             )
 
-        # v2.7.0 FIX: Use the now-defined get_valid_lengths function
-        self.valid_lengths = get_valid_lengths(self.flux_norm)
-
         # Run inference
+        # v3.0.2 FIX: Pass valid_lengths for proper masked pooling (matches training)
         self.logger.info("-" * 80)
         self.preds, self.probs, self.confs, self.logits = run_inference(
             self.model, self.flux_norm, self.delta_t_norm,
-            self.device, batch_size=batch_size, logger=self.logger
+            self.device, valid_lengths=self.valid_lengths,
+            batch_size=batch_size, logger=self.logger
         )
 
         # Compute metrics
@@ -3025,10 +3074,12 @@ class RomanEvaluator:
                 delta_t_padded[:n_obs] = delta_t_subset
 
                 # Inference
+                # v3.0.2 FIX: Pass lengths for proper masked pooling
                 flux_tensor = torch.from_numpy(flux_padded[None, :]).to(self.device)
                 delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
+                lengths_tensor = torch.tensor([n_obs], dtype=torch.long, device=self.device)
 
-                logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
+                logits = self.model(flux_tensor, delta_t_tensor, lengths=lengths_tensor)
 
                 if is_hierarchical:
                     probs = torch.exp(logits)
@@ -3182,10 +3233,12 @@ class RomanEvaluator:
                     delta_t_padded[:n_use] = delta_t_trunc
 
                     # Inference
+                    # v3.0.2 FIX: Pass lengths for proper masked pooling
                     flux_tensor = torch.from_numpy(flux_padded[None, :]).to(self.device)
                     delta_t_tensor = torch.from_numpy(delta_t_padded[None, :]).to(self.device)
+                    lengths_tensor = torch.tensor([n_use], dtype=torch.long, device=self.device)
 
-                    logits = self.model(flux_tensor, delta_t_tensor, lengths=None)
+                    logits = self.model(flux_tensor, delta_t_tensor, lengths=lengths_tensor)
                     pred = logits.argmax(dim=-1).cpu().item()
 
                     predictions_trunc.append(pred)
