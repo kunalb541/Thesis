@@ -58,7 +58,7 @@ CLIP_NORM=1.0
 # v3.0.0: Hierarchical loss weights
 STAGE1_WEIGHT=1.0
 STAGE2_WEIGHT=1.0
-AUX_WEIGHT=1..0
+AUX_WEIGHT=1.0
 STAGE2_TEMPERATURE=1.0
 
 # Evaluation settings
