@@ -138,7 +138,7 @@ __all__ = [
 
 def _configure_environment() -> None:
     """
-    Ultra-optimized environment configuration for distributed training.
+    Environment configuration for distributed training.
 
     Sets NCCL, CUDA, and PyTorch environment variables for optimal
     performance on multi-GPU clusters.
