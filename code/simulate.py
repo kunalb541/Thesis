@@ -1442,10 +1442,10 @@ def main() -> None:
             final_results.extend(available)
             shortfall = target - len(available)
             shortfalls[event_type] = shortfall
-            print(f" {event_type}: {len(available)} available, {shortfall} short ⚠")
+            print(f" {event_type}: {len(available)} available, {shortfall} short")
 
     if shortfalls:
-        print(f"\n⚠ Warning: Some classes have fewer events than requested.")
+        print(f"\n Warning: Some classes have fewer events than requested.")
         print(f" Consider increasing --oversample (currently {OVERSAMPLE_FACTOR})")
         print(f" or adjusting acceptance criteria in simulate.py")
 
