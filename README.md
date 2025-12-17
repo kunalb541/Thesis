@@ -191,6 +191,7 @@ python simulate.py \
 
 **Data Format Note:**
 - `flux` contains **magnifications** (A), not Jansky flux
+- Current implementation applies uniform noise to magnification curves, independent of baseline source brightness. This simplification assumes a fixed characteristic magnitude. Future work should implement flux-dependent photon noise.
 - A = 1.0 is baseline (no magnification)
 - A > 1.0 means brighter (magnified)
 
