@@ -126,7 +126,7 @@ if [ -f "${LATEST_EXP_FILE}" ]; then
         CURRENT_EPOCH=$(get_checkpoint_epoch "${RESUME_CHECKPOINT}")
         
         if [ "${CURRENT_EPOCH}" -ge "${MAX_EPOCHS}" ]; then
-            echo "✓ Training already complete (${CURRENT_EPOCH}/${MAX_EPOCHS} epochs)"
+            echo "Training already complete (${CURRENT_EPOCH}/${MAX_EPOCHS} epochs)"
             SKIP_TRAINING=true
         else
             echo "Resuming from epoch ${CURRENT_EPOCH}"
@@ -156,7 +156,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
 
     if [ -n "${CONT_JOB}" ]; then
         echo "${CONT_JOB}" > "${CONTINUATION_JOB_FILE}"
-        echo "✓ Continuation job submitted: ${CONT_JOB}"
+        echo "Continuation job submitted: ${CONT_JOB}"
     else
         echo "⚠ Warning: Failed to submit continuation job"
     fi
@@ -165,7 +165,7 @@ fi
 # Signal Handler
 handle_timeout() {
     echo ""
-    echo "⚠️ TIMEOUT WARNING: Job will be killed soon."
+    echo "TIMEOUT WARNING: Job will be killed soon."
     echo "Continuation job ${CONT_JOB} will take over."
 }
 trap 'handle_timeout' USR1
@@ -257,7 +257,7 @@ if [ $EXIT_CODE -eq 0 ]; then
         if [ "${FINAL_EPOCH}" -ge "${MAX_EPOCHS}" ]; then
             echo ""
             echo "================================================================================"
-            echo "✓ TRAINING COMPLETE (${FINAL_EPOCH}/${MAX_EPOCHS})"
+            echo "TRAINING COMPLETE (${FINAL_EPOCH}/${MAX_EPOCHS})"
             echo "================================================================================"
             
             # 1. Cancel continuation job (so it doesn't restart us)
@@ -290,7 +290,7 @@ python evaluate.py \\
     --early-detection  \\
     --save-formats png
 EVALEOF
-            echo "✓ Evaluation job submitted for ${EXP_NAME}"
+            echo "Evaluation job submitted for ${EXP_NAME}"
         else
             echo "Training incomplete (${FINAL_EPOCH}/${MAX_EPOCHS}). Continuation job will resume."
         fi
