@@ -10,7 +10,7 @@ ARCHITECTURE DESIGN:
     - Strictly causal convolutions with left-padding only
     - Depthwise separable convolutions for efficiency
     - Multi-layer GRU with optional gradient checkpointing
-    - Flash attention pooling for sequence aggregation (2-3x faster)
+    - Flash attention pooling for sequence aggregation 
     - Hierarchical classification with proper probability computation
     - Residual connections and layer normalization
 
@@ -62,14 +62,6 @@ FIXES APPLIED (v2.5):
     * MODERATE FIX: Added __all__ exports (S2-2)
     * MODERATE FIX: Removed unsupported 'mlp' feature extraction option (S2-3)
     * Added MIN_SEQ_LENGTH constant to prevent zero-length edge cases
-
-PERFORMANCE CHARACTERISTICS:
-    - 30-50% faster training from eliminating graph breaks
-    - 15-20% speedup from flash attention
-    - Sub-millisecond inference (1000x faster than chi-squared fitting)
-    - Efficient parameter count (~50-200K depending on config)
-    - Excellent GPU utilization with DDP (>85%)
-    - Memory-efficient with gradient checkpointing enabled
 
 IMPORTANT ASSUMPTION:
     The `lengths` parameter represents CONTIGUOUS valid prefixes, not scattered
