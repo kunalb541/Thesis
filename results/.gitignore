@@ -1,7 +1,0 @@
-# Ignore all training outputs
-*
-!.gitignore
-!.gitkeep
-results/*
-!results/checkpoints/
-!results/checkpoints/**
