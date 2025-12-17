@@ -637,8 +637,8 @@ class BinaryPresets:
     SHARED_T0_MAX: float = 0.9 * SimConfig.TIME_MAX
     SHARED_TE_MIN: float = 5.0
     SHARED_TE_MAX: float = 30.0
-    SHARED_U0_MIN: float = 0.01   # Matches PSPL to prevent bias
-    SHARED_U0_MAX: float = 0.5    # Matches PSPL to prevent bias
+    SHARED_U0_MIN: float = 0.001   # Matches PSPL to prevent bias
+    SHARED_U0_MAX: float = 1.0    # Matches PSPL to prevent bias
 
     PRESETS: Dict[str, Dict[str, Any]] = {
         'distinct': {
