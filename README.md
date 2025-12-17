@@ -45,6 +45,9 @@ python -c "from flash_attn import flash_attn_func; print('Flash Attention: OK')"
 
 ### Flash Attention Installation
 
+**Note**: Flash Attention is optional. The model automatically falls back to PyTorch's `F.scaled_dot_product_attention` if Flash Attention is not available. Performance impact: ~2-3x slower attention pooling only (minimal overall impact).
+
+
 Flash Attention for attention pooling. Installation requires:
 - NVIDIA GPU with compute capability >= 7.0 (V100, A100, H100, RTX 3090/4090)
 - CUDA 11.6+ 
@@ -144,7 +147,7 @@ python evaluate.py --experiment-name d32_l2_hier --data test.h5
 ls ../results/checkpoints/
 
 # Example output:
-#   d32_l2_baseline_20241215_120000
+#   d32_l2_d32_l2_hier
 #   d32_l2_hier_20241217_143022
 #   d64_l4_baseline_20241218_093045
 
@@ -528,6 +531,19 @@ results/
 ---
 
 ## Version History
+
+### v3.0.1 (Current) - December 2024
+
+**Cosmetic Fixes in evaluate.py:**
+- Fixed confusion matrix text sizing and overlap
+- ROC curves legend moved outside plot area
+- u0 dependency plot count annotations repositioned
+- Temporal bias check legend/text overlap resolved
+- Calibration curve legend positioning improved
+- Per-class metrics bar chart label overlap prevented
+- Evolution plots panel spacing increased
+- Example light curves grid spacing improved
+
 
 ### v3.0.0 (Current) - December 2024
 
