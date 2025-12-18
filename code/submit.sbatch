@@ -273,11 +273,11 @@ if [ $EXIT_CODE -eq 0 ]; then
             echo "Submitting evaluation job..."
             sbatch << EVALEOF
 #!/bin/bash
-#SBATCH -p gpu_h100_il
+#SBATCH -p gpu_a100_short
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:4
-#SBATCH -t 05:00:00
+#SBATCH -t 00:30:00
 #SBATCH -o logs/eval_${EXP_NAME}.out
 #SBATCH --job-name=eval_v3
 #SBATCH --mail-user=kunal29bhatia@gmail.com
