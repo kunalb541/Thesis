@@ -181,8 +181,8 @@ python simulate.py \
 
 | Preset | Mass Ratio (q) | Separation (s) | Impact (u₀) | Caustic Required | Description |
 |--------|----------------|----------------|-------------|:----------------:|-------------|
-| `distinct` | 0.1 - 1.0 | 0.8 - 1.2 | 0.001 - 0.3 | Yes | Forced caustics for clear signals |
-| `planetary` | 10⁻⁴ - 10⁻² | 0.6 - 1.6 | 0.001 - 0.3 | ✗ | Exoplanet detection regime |
+| `distinct` | 0.1 - 1.0 | 0.8 - 1.2 | 0.001 - 0.3 | Yes | Forced caustics |
+| `planetary` | 10⁻⁴ - 10⁻² | 0.6 - 1.6 | 0.001 - 0.3 | ✗ | Exoplanet  regime |
 | `stellar` | 0.1 - 1.0 | 0.3 - 3.0 | 0.001 - 0.5 | ✗ | Binary star systems |
 | `baseline` | 10⁻⁴ - 1.0 | 0.3 - 3.0 | 0.001 - 1.0 | ✗ | Full parameter space |
 
