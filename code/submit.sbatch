@@ -199,7 +199,7 @@ if [ ! -f "${TEST_FILE}" ]; then
     FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
     srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
         --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --binary_preset distinct \
+        --binary_preset baseline \
         --output ${TEST_FILE} --num_workers 100 --seed 999 --oversample 1.3
 fi
 
