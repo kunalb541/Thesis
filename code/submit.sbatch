@@ -292,7 +292,6 @@ python evaluate.py \\
     --data "${TEST_FILE}" \\
     --batch-size ${EVAL_BATCH_SIZE} \\
     --n-evolution-per-type 10 \\
-    --early-detection  \\
     --save-formats png
 EVALEOF
             echo "Evaluation job submitted for ${EXP_NAME}"
