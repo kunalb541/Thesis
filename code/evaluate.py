@@ -245,7 +245,7 @@ MIN_SAMPLES_FOR_BOOTSTRAP: Final[int] = 100
 
 # Evolution plot settings
 EVOLUTION_N_STEPS: Final[int] = 20
-EVOLUTION_MIN_VALID_POINTS: Final[int] = 10
+EVOLUTION_MIN_VALID_POINTS: Final[int] = 100
 
 # Early detection settings
 EARLY_DETECTION_MIN_REQUIRED: Final[int] = 10
