@@ -199,7 +199,7 @@ if [ ! -f "${TEST_FILE}" ]; then
     FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
     srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
         --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --binary_preset baseline \
+        --binary_preset distinct \
         --output ${TEST_FILE} --num_workers 100 --seed 999 --oversample 1.3
 fi
 
@@ -273,11 +273,11 @@ if [ $EXIT_CODE -eq 0 ]; then
             echo "Submitting evaluation job..."
             sbatch << EVALEOF
 #!/bin/bash
-#SBATCH -p gpu_a100_short
+#SBATCH -p gpu_h100_il
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:4
-#SBATCH -t 00:30:00
+#SBATCH -t 05:00:00
 #SBATCH -o logs/eval_${EXP_NAME}.out
 #SBATCH --job-name=eval_v3
 #SBATCH --mail-user=kunal29bhatia@gmail.com
