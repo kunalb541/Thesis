@@ -44,10 +44,10 @@ CONTINUATION_JOB_FILE="${OUTPUT_DIR}/.continuation_job_id"
 BATCH_SIZE=256
 NUM_WORKERS=0 # Must be 0 for RAMLensingDataset
 ACCUMULATION_STEPS=2
-MAX_EPOCHS=100
+MAX_EPOCHS=50
 
 # Model architecture
-D_MODEL=128
+D_MODEL=64
 N_LAYERS=6
 DROPOUT=0.3
 WINDOW_SIZE=7
@@ -183,7 +183,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         echo "Generating training data..."
         FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
         srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
-            --n_flat 100000 --n_pspl 500000 --n_binary 1000000 \
+            --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
              --binary_preset distinct \
             --output ${SOURCE_FILE} --num_workers 100 --seed 42 --oversample 1.3
     fi
@@ -200,7 +200,7 @@ if [ ! -f "${TEST_FILE}" ]; then
     FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
     srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
         --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --binary_preset baseline \
+        --binary_preset distinct \
         --output ${TEST_FILE} --num_workers 100 --seed 999 --oversample 1.3
 fi
 
