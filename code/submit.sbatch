@@ -41,14 +41,14 @@ LATEST_EXP_FILE="${OUTPUT_DIR}/.current_experiment"
 CONTINUATION_JOB_FILE="${OUTPUT_DIR}/.continuation_job_id"
 
 # Training hyperparameters
-BATCH_SIZE=256
+BATCH_SIZE=512
 NUM_WORKERS=0 # Must be 0 for RAMLensingDataset
-ACCUMULATION_STEPS=2
+ACCUMULATION_STEPS=3
 MAX_EPOCHS=50
 
 # Model architecture
-D_MODEL=64
-N_LAYERS=6
+D_MODEL=16
+N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=7
 
@@ -65,7 +65,7 @@ AUX_WEIGHT=1.0
 STAGE2_TEMPERATURE=1.0
 
 # Evaluation settings
-EVAL_BATCH_SIZE=512
+EVAL_BATCH_SIZE=1024
 EVAL_DEVICE="cuda"
 
 # ============================================================================
