@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 10
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
@@ -90,9 +90,9 @@ EVAL_DEVICE="cuda"
 
 # Dataset sizes (adjust based on memory/compute)
 # With 6912 points per event (3x more than before), reduce counts if needed
-N_FLAT_TRAIN=1000000
-N_PSPL_TRAIN=500000
-N_BINARY_TRAIN=500000
+N_FLAT_TRAIN=500000
+N_PSPL_TRAIN=250000
+N_BINARY_TRAIN=250000
 
 N_FLAT_TEST=50000
 N_PSPL_TEST=50000
@@ -224,8 +224,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
             --binary_preset ${BINARY_PRESET} \
             --output ${SOURCE_FILE} \
             --num_workers 100 \
-            --seed 42 \
-            --oversample 1.3
+            --seed 42 
     fi
 
     # Copy to Local /tmp
@@ -247,8 +246,7 @@ if [ ! -f "${TEST_FILE}" ]; then
         --binary_preset ${BINARY_PRESET} \
         --output ${TEST_FILE} \
         --num_workers 100 \
-        --seed 999 \
-        --oversample 1.3
+        --seed 999 
 fi
 
 # ============================================================================
