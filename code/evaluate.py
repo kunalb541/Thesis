@@ -288,7 +288,7 @@ ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0
 ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
 
 # Evolution plot observation checkpoints (progressive truncation)
-EVOLUTION_OBS_COUNTS: Final[List[int]] = [10, 50, 100, 200, 400, 800, 1200, 1600, 2000, 2400]
+EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(10, 2410, 50)) 
 
 # =============================================================================
 # v3.0.1: COSMETIC CONSTANTS
