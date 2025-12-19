@@ -90,9 +90,9 @@ EVAL_DEVICE="cuda"
 
 # Dataset sizes (adjust based on memory/compute)
 # With 6912 points per event (3x more than before), reduce counts if needed
-N_FLAT_TRAIN=500000
-N_PSPL_TRAIN=250000
-N_BINARY_TRAIN=250000
+N_FLAT_TRAIN=250000
+N_PSPL_TRAIN=125000
+N_BINARY_TRAIN=125000
 
 N_FLAT_TEST=50000
 N_PSPL_TEST=50000

@@ -241,8 +241,8 @@ MIN_U0_OFFSET: Final[float] = 0.01
 CAUSTIC_U0_MULTIPLIER: Final[float] = 2.0
 
 # HDF5 compression settings
-HDF5_COMPRESSION: Final[str] = 'gzip'
-HDF5_COMPRESSION_LEVEL: Final[int] = 4
+HDF5_COMPRESSION: Final[str] = 'lzf'
+HDF5_COMPRESSION_LEVEL: Final[int] = None  # lzf doesn't use levels
 
 # Multiprocessing chunk size
 MP_CHUNK_SIZE: Final[int] = 1000
@@ -1527,7 +1527,11 @@ def main() -> None:
 
     # Save to HDF5
     print(f"Saving to {out_path}...")
-    comp_args = {'compression': HDF5_COMPRESSION, 'compression_opts': HDF5_COMPRESSION_LEVEL}
+    # v3.1.1: lzf doesn't use compression_opts
+    if HDF5_COMPRESSION_LEVEL is not None:
+        comp_args = {'compression': HDF5_COMPRESSION, 'compression_opts': HDF5_COMPRESSION_LEVEL}
+    else:
+        comp_args = {'compression': HDF5_COMPRESSION}
 
     with h5py.File(out_path, 'w') as f:
         # Core datasets
