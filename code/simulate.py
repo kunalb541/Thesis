@@ -633,8 +633,8 @@ class BinaryPresets:
     Gould & Loeb (1992): ApJ 396, 104 (snow line argument)
     Chung et al. (2005): ApJ 630, 535 (caustic size formulas)
     """
-    SHARED_T0_MIN: float = 0.1 * SimConfig.TIME_MAX
-    SHARED_T0_MAX: float = 0.9 * SimConfig.TIME_MAX
+    SHARED_T0_MIN: float = 0.3 * SimConfig.TIME_MAX
+    SHARED_T0_MAX: float = 0.7 * SimConfig.TIME_MAX
     SHARED_TE_MIN: float = 5.0
     SHARED_TE_MAX: float = 30.0
     SHARED_U0_MIN: float = 0.001   # Matches PSPL to prevent bias
