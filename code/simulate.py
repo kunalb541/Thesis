@@ -18,6 +18,16 @@ Key Technical Features
     * Unified interface producing mag, delta_t, labels, timestamps, and metadata
     * HDF5 output with compressed datasets for large-volume workflows
 
+VERSION 3.1.0 - REALISTIC ROMAN SEASON UPDATE
+----------------------------------------------
+This version updates to realistic Roman observing parameters:
+
+    * CRITICAL: Changed to 72-day Roman Galactic Bulge observing season
+    * CRITICAL: Exact 15-minute cadence (6912 observations per season)
+    * CRITICAL: Global m_base array saved in HDF5 (aligned with shuffled data)
+    * CRITICAL: t0/tE constraints ensure complete events within season
+    * Backward compatible: params_{class} arrays still saved
+
 VERSION 3.0.0 - COMPREHENSIVE UPDATE
 -------------------------------------
 This version synchronizes with train.py v3.0.0 and model.py v3.0.0.
@@ -98,7 +108,7 @@ instability due to tiny numerical values.
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 3.0.0
+Version: 3.1.0
 Date: December 2024
 """
 from __future__ import annotations
@@ -118,7 +128,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "3.0.0"
+__version__: Final[str] = "3.1.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -154,8 +164,23 @@ ROMAN_LIMITING_MAG_AB: Final[float] = 27.5 # 5-sigma point source detection limi
 ROMAN_SKY_MAG_AB: Final[float] = 22.0       # Typical sky background in F146
 ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0   # Bright limit (saturation)
 ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0   # Faint limit for good S/N
-ROMAN_CADENCE_MINUTES: Final[float] = 12.1 # Nominal observation cadence
-ROMAN_MISSION_DURATION_DAYS: Final[float] = 200.0 # POC mission duration
+ROMAN_CADENCE_MINUTES: Final[float] = 15.0  # v3.1.0: Exact Roman cadence
+
+# =============================================================================
+# v3.1.0: ROMAN GALACTIC BULGE TIME DOMAIN SURVEY PARAMETERS
+# Reference: Penny et al. (2019), ApJS, 241, 3
+# =============================================================================
+
+# Roman can only observe the Galactic bulge for ~72 days per season
+# due to Sun angle constraints. 6 seasons over 5-year mission.
+ROMAN_SEASON_DURATION_DAYS: Final[float] = 72.0
+
+# Number of observations per season at 15-minute cadence
+# 72 days × 24 hours × 4 observations/hour = 6912
+ROMAN_SEASON_N_POINTS: Final[int] = int(ROMAN_SEASON_DURATION_DAYS * 24 * 60 / ROMAN_CADENCE_MINUTES)
+
+# Legacy constant - now points to season duration for single-season simulation
+ROMAN_MISSION_DURATION_DAYS: Final[float] = ROMAN_SEASON_DURATION_DAYS
 ROMAN_LIMITING_SNR: Final[float] = 5.0      # Detection threshold
 
 # =============================================================================
@@ -558,14 +583,19 @@ class SimConfig:
     Defines the observational setup for Roman Space Telescope
     microlensing survey simulations.
 
+    v3.1.0 UPDATE: Now uses realistic Roman season parameters:
+    - 72-day observing window (single Roman season)
+    - 15-minute cadence (6912 observations)
+    - Event parameters constrained to ensure complete rise-peak-fall
+
     Attributes
     ----------
     TIME_MIN : float
         Start time of observations (days).
     TIME_MAX : float
-        End time of observations (days).
+        End time of observations (days). Set to 72 days for one Roman season.
     N_POINTS : int
-        Number of observation points.
+        Number of observation points. 6912 for 15-min cadence over 72 days.
     VBM_TOLERANCE : float
         VBBinaryLensing precision tolerance.
     CADENCE_MASK_PROB : float
@@ -578,8 +608,8 @@ class SimConfig:
         Value used for masked/missing observations.
     """
     TIME_MIN: float = 0.0
-    TIME_MAX: float = ROMAN_MISSION_DURATION_DAYS
-    N_POINTS: int = 2400
+    TIME_MAX: float = ROMAN_SEASON_DURATION_DAYS  # v3.1.0: 72 days
+    N_POINTS: int = ROMAN_SEASON_N_POINTS  # v3.1.0: 6912 points at 15-min cadence
     VBM_TOLERANCE: float = 1e-3
     CADENCE_MASK_PROB: float = 0.05
     BASELINE_MIN: float = ROMAN_SOURCE_MAG_MIN
@@ -592,16 +622,19 @@ class BinaryPresets:
     Provides scientifically motivated parameter ranges for simulating
     different types of binary microlensing events.
 
+    v3.1.0 UPDATE: t0 and tE ranges adjusted for 72-day season to ensure
+    complete event morphology (full rise-peak-fall within observing window).
+
     Attributes
     ----------
     SHARED_T0_MIN : float
-        Minimum peak time (10% of mission duration).
+        Minimum peak time (25% of season). Ensures event starts within window.
     SHARED_T0_MAX : float
-        Maximum peak time (90% of mission duration).
+        Maximum peak time (75% of season). Ensures event ends within window.
     SHARED_TE_MIN : float
-        Minimum Einstein crossing time (5 days).
+        Minimum Einstein crossing time (3 days).
     SHARED_TE_MAX : float
-        Maximum Einstein crossing time (30 days).
+        Maximum Einstein crossing time (18 days). Ensures completion within 72 days.
     SHARED_U0_MIN : float
         Minimum impact parameter (Einstein radii). v2.8+: Shared with PSPL to prevent bias.
     SHARED_U0_MAX : float
@@ -615,6 +648,10 @@ class BinaryPresets:
     - Mao & Paczynski (1991) for binary lens geometry
     - Gaudi (2012) review for planetary microlensing
     - OGLE and MOA survey statistics for observed events
+
+    v3.1.0: t_E max reduced to 18 days to ensure events complete within
+    72-day window. An event needs ~2×t_E for full rise-peak-fall, so
+    t_E <= 18 days ensures completion even for events peaking at t0_max.
 
     v2.8 BIAS FIX: Extended t0 range to 10%-90% to include edge cases (partial events).
     v2.8 BIAS FIX: All presets now use SHARED_U0 range identical to PSPLParams to prevent
@@ -633,10 +670,12 @@ class BinaryPresets:
     Gould & Loeb (1992): ApJ 396, 104 (snow line argument)
     Chung et al. (2005): ApJ 630, 535 (caustic size formulas)
     """
-    SHARED_T0_MIN: float = 0.3 * SimConfig.TIME_MAX
-    SHARED_T0_MAX: float = 0.7 * SimConfig.TIME_MAX
-    SHARED_TE_MIN: float = 5.0
-    SHARED_TE_MAX: float = 30.0
+    # v3.1.0: Adjusted for 72-day season with complete events
+    # t0 in middle 50% of season ensures event fully observed
+    SHARED_T0_MIN: float = 0.25 * SimConfig.TIME_MAX  # 18 days
+    SHARED_T0_MAX: float = 0.75 * SimConfig.TIME_MAX  # 54 days
+    SHARED_TE_MIN: float = 3.0   # days
+    SHARED_TE_MAX: float = 18.0  # days (ensures completion: 2×18 = 36 days < 72-18=54)
     SHARED_U0_MIN: float = 0.001   # Matches PSPL to prevent bias
     SHARED_U0_MAX: float = 1.0    # Matches PSPL to prevent bias
 
@@ -1358,12 +1397,23 @@ def main() -> None:
     tasks.extend([{'type': 'binary', **base_params} for _ in range(n_binary_gen)])
 
     total_gen = len(tasks)
-    print(f"Generating {total_gen} events (oversampled {OVERSAMPLE_FACTOR}x for failures)")
-    print(f" Targets: Flat={args.n_flat}, PSPL={args.n_pspl}, Binary={args.n_binary}")
-    print(f" Generating: Flat={n_flat_gen}, PSPL={n_pspl_gen}, Binary={n_binary_gen}")
-    print(f" Preset: {args.binary_preset}")
+    print("=" * 60)
+    print("Roman Microlensing Event Simulator v3.1.0")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Season duration: {SimConfig.TIME_MAX:.1f} days")
+    print(f"  Cadence: {ROMAN_CADENCE_MINUTES:.1f} minutes")
+    print(f"  Observations per season: {SimConfig.N_POINTS}")
+    print(f"  Flat events: {args.n_flat} (generating {n_flat_gen})")
+    print(f"  PSPL events: {args.n_pspl} (generating {n_pspl_gen})")
+    print(f"  Binary events: {args.n_binary} (generating {n_binary_gen})")
+    print(f"  Binary preset: {args.binary_preset}")
     print(f"    require_caustic: {BinaryPresets.PRESETS[args.binary_preset].get('require_caustic', False)}")
-    print(f"Numba acceleration: {'ENABLED' if HAS_NUMBA else 'DISABLED'}")
+    print(f"  Oversample factor: {OVERSAMPLE_FACTOR}")
+    print(f"  Output: {out_path}")
+    print(f"  Seed: {args.seed}")
+    print(f"  Numba acceleration: {'ENABLED' if HAS_NUMBA else 'DISABLED'}")
+    print("=" * 60)
 
     # Shuffle tasks for balanced workload
     np.random.seed(args.seed)
@@ -1453,7 +1503,10 @@ def main() -> None:
     lbl = np.zeros(n_res, dtype=np.int32)
     ts = np.tile(time_grid.astype(np.float32), (n_res, 1))
 
-    # Collect parameters by class for structured storage
+    # v3.1.0 FIX: Create global m_base array aligned with shuffled data
+    m_base_global = np.zeros(n_res, dtype=np.float32)
+
+    # Collect parameters by class for structured storage (backward compatibility)
     params_by_class: Dict[str, List[Dict[str, Any]]] = {
         'flat': [], 'pspl': [], 'binary': []
     }
@@ -1462,6 +1515,7 @@ def main() -> None:
         flux[i] = r['flux']
         dt[i] = r['delta_t']
         lbl[i] = r['label']
+        m_base_global[i] = r['params']['m_base']  # v3.1.0: Store in global array
         params_by_class[r['params']['type']].append(r['params'])
 
     # Count final class distribution
@@ -1483,7 +1537,10 @@ def main() -> None:
         f.create_dataset('labels', data=lbl)
         f.create_dataset('timestamps', data=ts, **comp_args)
 
-        # Save parameters as structured arrays for each class
+        # v3.1.0 FIX: Save global m_base array aligned with shuffled data
+        f.create_dataset('m_base', data=m_base_global, **comp_args)
+
+        # Save parameters as structured arrays for each class (backward compatibility)
         for class_name, class_params in params_by_class.items():
             if not class_params:
                 continue
@@ -1524,19 +1581,22 @@ def main() -> None:
             'require_caustic': BinaryPresets.PRESETS[args.binary_preset].get('require_caustic', False),
             'seed': int(args.seed),
             'oversample_factor': float(OVERSAMPLE_FACTOR),
-            'mission_duration_days': float(ROMAN_MISSION_DURATION_DAYS),
+            'season_duration_days': float(ROMAN_SEASON_DURATION_DAYS),
+            'mission_duration_days': float(ROMAN_MISSION_DURATION_DAYS),  # Legacy alias
             'n_points': int(SimConfig.N_POINTS),
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'v3.0.0: flux contains NORMALIZED MAGNIFICATION (baseline=1.0), all components synced to v3.0.0'
+            'note': 'v3.1.0: 72-day Roman season, 15-min cadence, global m_base array'
         }
         f.attrs.update(metadata)
 
     print(f"\n{'='*60}")
     print(f" Successfully saved {n_res} events to {out_path}")
-    print(f"Class distribution: Flat={final_counts['flat']}, "
+    print(f" Class distribution: Flat={final_counts['flat']}, "
           f"PSPL={final_counts['pspl']}, Binary={final_counts['binary']}")
+    print(f" Season: {SimConfig.TIME_MAX:.1f} days, {SimConfig.N_POINTS} observations")
+    print(f" m_base range: [{m_base_global.min():.2f}, {m_base_global.max():.2f}] mag")
     print(f"{'='*60}")
 if __name__ == '__main__':
     # v3.0.0 FIX: Moved set_start_method inside main guard
