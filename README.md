@@ -599,7 +599,7 @@ Thesis/
 | Parameter | Range | Description |
 |-----------|-------|-------------|
 | Einstein timescale (t_E) | 5-30 days | Event duration |
-| Peak time (t₀) | 20-180 days | 10%-90% of mission |
+| Peak time (t₀) | 60-140 days | 30%-70% of mission |
 | Impact parameter (u₀) | 0.001-1.0 | Closest approach |
 | Binary separation (s) | 0.1-3.0 | Einstein radii |
 | Mass ratio (q) | 10⁻⁴ - 1.0 | Secondary/primary mass |
