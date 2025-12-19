@@ -7,6 +7,15 @@ Production-grade evaluation framework for gravitational microlensing event
 classification models. Computes comprehensive metrics, generates publication-
 quality visualizations, and performs physics-based performance analysis.
 
+VERSION 3.1.0 CRITICAL FIXES:
+-----------------------------
+    * CRITICAL FIX: m_base loading from global array
+      - simulate.py v3.1.0 now saves global m_base dataset aligned with shuffled data
+      - extract_baseline_magnitudes() now checks for global 'm_base' dataset FIRST
+      - Falls back to params_{class} only for older data files
+      - This fixes the bug where all events showed m_base=22.0 in plots
+    * SYNC: Compatible with simulate.py v3.1.0 (72-day season, 15-min cadence)
+
 VERSION 3.0.2 CRITICAL FIXES:
 -----------------------------
     * CRITICAL FIX: plot_evolution_for_class padding bug
@@ -192,7 +201,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "3.0.2"
+__version__: Final[str] = "3.1.0"
 
 # =============================================================================
 # CONSTANTS
@@ -276,7 +285,8 @@ MIN_VALID_POINTS_PLOT: Final[int] = 3
 CACHE_CLEAR_FREQ: Final[int] = 100
 
 # Synthetic timestamps (days)
-SYNTHETIC_TIME_MAX: Final[float] = 200.0
+# v3.1.0: Updated for 72-day Roman season
+SYNTHETIC_TIME_MAX: Final[float] = 72.0
 
 # =============================================================================
 # v3.0.0: NEW CONSTANTS FOR M_BASE AND EVOLUTION
@@ -288,7 +298,8 @@ ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0
 ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
 
 # Evolution plot observation checkpoints (progressive truncation)
-EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(10, 2410, 10)) 
+# v3.1.0: Updated for 72-day season with 6912 observations
+EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(100, 6920, 100)) 
 
 # =============================================================================
 # v3.0.1: COSMETIC CONSTANTS
@@ -484,13 +495,14 @@ def extract_baseline_magnitudes(
     """
     Extract or generate baseline magnitudes (m_base) for events.
 
-    v3.0.3 FIX: Corrected index mapping logic. Now loads file_labels from HDF5
-    to compute true class boundaries, instead of using input labels which may
-    be subsampled/reordered.
+    v3.1.0 FIX: Now checks for global 'm_base' dataset FIRST. This dataset
+    is aligned with the shuffled data order (saved by simulate.py v3.1.0+).
+    Falls back to per-class params_{class} arrays only for older data files.
 
-    Strategy:
-    1. Try to load m_base from params_{class} datasets in HDF5
-    2. If not present, generate random m_base in Roman range [18, 24] mag
+    Strategy (in order):
+    1. Try to load from global 'm_base' dataset (v3.1.0+ format)
+    2. Try to load from params_{class} structured arrays (legacy format)
+    3. Generate random m_base in Roman range [18, 24] mag as last resort
 
     Parameters
     ----------
@@ -526,6 +538,36 @@ def extract_baseline_magnitudes(
 
     try:
         with h5py.File(data_path, 'r') as f:
+            # =================================================================
+            # v3.1.0 FIX: Check for global m_base dataset FIRST
+            # This is aligned with the shuffled data order
+            # =================================================================
+            if 'm_base' in f:
+                logger.info("Found global m_base dataset (v3.1.0+ format), loading directly...")
+                global_m_base = f['m_base'][:]
+                
+                # Validate indices are within bounds
+                valid_mask = (indices >= 0) & (indices < len(global_m_base))
+                
+                if valid_mask.all():
+                    m_base = global_m_base[indices].astype(np.float32)
+                    logger.info(f"Loaded m_base: min={m_base.min():.2f}, max={m_base.max():.2f}, mean={m_base.mean():.2f}")
+                    return m_base
+                else:
+                    n_invalid = (~valid_mask).sum()
+                    logger.warning(f"{n_invalid}/{len(indices)} indices out of bounds for global m_base")
+                    # Load valid ones, keep default for invalid
+                    m_base[valid_mask] = global_m_base[indices[valid_mask]].astype(np.float32)
+                    logger.info(f"Loaded m_base (partial): min={m_base.min():.2f}, max={m_base.max():.2f}")
+                    return m_base
+
+            # =================================================================
+            # LEGACY: Fall back to params_{class} arrays
+            # This path is for older data files without global m_base
+            # WARNING: This may not work correctly if data is shuffled!
+            # =================================================================
+            logger.warning("Global m_base dataset not found, falling back to params_{class} arrays (legacy)")
+            
             # Check if any parameter dataset has m_base
             has_m_base = False
             for class_idx, class_name in enumerate(CLASS_NAMES):
@@ -550,6 +592,9 @@ def extract_baseline_magnitudes(
                 #
                 # To map a global file index to a class-specific param index:
                 #   class_specific_idx = global_file_idx - class_offset
+                #
+                # WARNING: This logic assumes data is NOT shuffled, which may
+                # not be true for simulate.py v2.8+. Use global m_base instead!
                 # =============================================================
 
                 file_labels = f['labels'][:]
@@ -3181,7 +3226,7 @@ class RomanEvaluator:
         # Panel 2: Probability evolution
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
             ax2.plot(times_evolution, probs_evolution[:, i],
-                    'o-', color=color, label=name, linewidth=0.5, markersize=1)
+                    'o-', color=color, label=name, linewidth=0.5, markersize=0.5)
 
         ax2.axhline(RANDOM_CLASSIFIER_PROB, color='gray', linestyle='--', linewidth=1, alpha=0.5)
         ax2.set_ylabel('Class Probability', fontsize=FONT_SIZE_LABEL, fontweight='bold')
