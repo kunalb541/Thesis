@@ -299,7 +299,7 @@ ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
 
 # Evolution plot observation checkpoints (progressive truncation)
 # v3.1.0: Updated for 72-day season with 6912 observations
-EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(100, 6920, 100)) 
+EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(100, 6920, 5)) 
 
 # =============================================================================
 # v3.0.1: COSMETIC CONSTANTS
@@ -3226,7 +3226,7 @@ class RomanEvaluator:
         # Panel 2: Probability evolution
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
             ax2.plot(times_evolution, probs_evolution[:, i],
-                    'o-', color=color, label=name, linewidth=0.5, markersize=1)
+                    'o-', color=color, label=name, linewidth=1, markersize=0.1)
 
         ax2.axhline(RANDOM_CLASSIFIER_PROB, color='gray', linestyle='--', linewidth=1, alpha=0.5)
         ax2.set_ylabel('Class Probability', fontsize=FONT_SIZE_LABEL, fontweight='bold')
