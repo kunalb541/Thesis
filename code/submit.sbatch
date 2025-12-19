@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 12
+#SBATCH -N 10
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
@@ -47,7 +47,7 @@ LATEST_EXP_FILE="${OUTPUT_DIR}/.current_experiment"
 CONTINUATION_JOB_FILE="${OUTPUT_DIR}/.continuation_job_id"
 
 # Training hyperparameters
-BATCH_SIZE=512
+BATCH_SIZE=1024
 NUM_WORKERS=0 # Must be 0 for RAMLensingDataset
 ACCUMULATION_STEPS=3
 MAX_EPOCHS=50
