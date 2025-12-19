@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 10
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 30:00
 #SBATCH -o logs/train_complete_%j.out
 #SBATCH -e logs/train_complete_%j.err
-#SBATCH --job-name=microlens_v3
+#SBATCH --job-name=microlens_v31
 #SBATCH --exclusive
 #SBATCH --signal=B:USR1@120
 #SBATCH --mail-user=kunal29bhatia@gmail.com
@@ -14,7 +14,13 @@
 
 
 # =============================================================================
-# ROMAN MICROLENSING - v3.0.0 TRAINING PIPELINE
+# ROMAN MICROLENSING - v3.1.0 TRAINING PIPELINE
+# =============================================================================
+# v3.1.0 UPDATES:
+#   - 72-day Roman season (was 200 days)
+#   - 15-minute cadence = 6912 observations (was 2400)
+#   - Added --no-class-weights option for realistic distribution
+#   - Global m_base array in HDF5 for correct magnitude display
 # =============================================================================
 
 set -e
@@ -47,7 +53,7 @@ ACCUMULATION_STEPS=3
 MAX_EPOCHS=50
 
 # Model architecture
-D_MODEL=16
+D_MODEL=64
 N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=7
@@ -64,9 +70,36 @@ STAGE2_WEIGHT=1.0
 AUX_WEIGHT=1.0
 STAGE2_TEMPERATURE=1.0
 
+# v3.1.0: Class weights option
+# Set to "true" to use inverse-frequency class weights (balanced training)
+# Set to "false" for no class weights (realistic distribution: more flats)
+USE_CLASS_WEIGHTS="false"
+
 # Evaluation settings
 EVAL_BATCH_SIZE=1024
 EVAL_DEVICE="cuda"
+
+# ============================================================================
+# v3.1.0: SIMULATION PARAMETERS (72-day Roman season)
+# ============================================================================
+# Single Roman observing season parameters:
+#   - 72 days (Sun angle constraints limit Galactic bulge visibility)
+#   - 15-minute cadence = 6912 observations per season
+#   - Events constrained to complete rise-peak-fall within window
+# ============================================================================
+
+# Dataset sizes (adjust based on memory/compute)
+# With 6912 points per event (3x more than before), reduce counts if needed
+N_FLAT_TRAIN=1000000
+N_PSPL_TRAIN=500000
+N_BINARY_TRAIN=500000
+
+N_FLAT_TEST=50000
+N_PSPL_TEST=50000
+N_BINARY_TEST=50000
+
+# Binary preset (distinct/baseline/planetary/stellar)
+BINARY_PRESET="baseline"
 
 # ============================================================================
 # CRITICAL: THREAD LIMITS (Prevent Freezing)
@@ -174,18 +207,25 @@ handle_timeout() {
 trap 'handle_timeout' USR1
 
 # ============================================================================
-# STEP 0: DATA GENERATION
+# STEP 0: DATA GENERATION (v3.1.0 - 72-day Roman season)
 # ============================================================================
 
 if [ "$SKIP_TRAINING" != "true" ]; then
     # Generate Train Data (Using 100 workers)
     if [ ! -f "${SOURCE_FILE}" ]; then
-        echo "Generating training data..."
+        echo "================================================================================"
+        echo "GENERATING TRAINING DATA (v3.1.0 - 72-day season, 15-min cadence)"
+        echo "================================================================================"
         FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
         srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
-            --n_flat 100000 --n_pspl 500000 --n_binary 500000 \
-             --binary_preset distinct \
-            --output ${SOURCE_FILE} --num_workers 100 --seed 42 --oversample 1.3
+            --n_flat ${N_FLAT_TRAIN} \
+            --n_pspl ${N_PSPL_TRAIN} \
+            --n_binary ${N_BINARY_TRAIN} \
+            --binary_preset ${BINARY_PRESET} \
+            --output ${SOURCE_FILE} \
+            --num_workers 100 \
+            --seed 42 \
+            --oversample 1.3
     fi
 
     # Copy to Local /tmp
@@ -195,21 +235,38 @@ fi
 
 # Always check Test Data (Needed for evaluation even if training is skipped)
 if [ ! -f "${TEST_FILE}" ]; then
-    echo "Generating test data..."
+    echo "================================================================================"
+    echo "GENERATING TEST DATA (v3.1.0 - 72-day season, 15-min cadence)"
+    echo "================================================================================"
     mkdir -p $(dirname ${TEST_FILE})
     FIRST_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
     srun --nodes=1 --ntasks=1 --nodelist=${FIRST_NODE} python simulate.py \
-        --n_flat 50000 --n_pspl 50000 --n_binary 50000 \
-        --binary_preset distinct \
-        --output ${TEST_FILE} --num_workers 100 --seed 999 --oversample 1.3
+        --n_flat ${N_FLAT_TEST} \
+        --n_pspl ${N_PSPL_TEST} \
+        --n_binary ${N_BINARY_TEST} \
+        --binary_preset ${BINARY_PRESET} \
+        --output ${TEST_FILE} \
+        --num_workers 100 \
+        --seed 999 \
+        --oversample 1.3
 fi
 
 # ============================================================================
-# STEP 1: TRAINING (Updated Flags for v3.0.0)
+# STEP 1: TRAINING (v3.1.0 - with optional class weights)
 # ============================================================================
 
 if [ "$SKIP_TRAINING" != "true" ]; then
-    echo "Starting training..."
+    echo "================================================================================"
+    echo "STARTING TRAINING (v3.1.0)"
+    echo "  Class weights: ${USE_CLASS_WEIGHTS}"
+    echo "  Binary preset: ${BINARY_PRESET}"
+    echo "================================================================================"
+    
+    # Build class weights flag
+    CLASS_WEIGHTS_FLAG=""
+    if [ "${USE_CLASS_WEIGHTS}" = "false" ]; then
+        CLASS_WEIGHTS_FLAG="--no-class-weights"
+    fi
     
     srun torchrun \
         --nnodes=$SLURM_NNODES \
@@ -237,6 +294,7 @@ if [ "$SKIP_TRAINING" != "true" ]; then
         --use-aux-head \
         --attention-pooling \
         --save-every 5 \
+        ${CLASS_WEIGHTS_FLAG} \
         ${RESUME_FLAG}
         
     EXIT_CODE=$?
@@ -280,7 +338,7 @@ if [ $EXIT_CODE -eq 0 ]; then
 #SBATCH --gres=gpu:4
 #SBATCH -t 00:30:00
 #SBATCH -o logs/eval_${EXP_NAME}.out
-#SBATCH --job-name=eval_v3
+#SBATCH --job-name=eval_v31
 #SBATCH --mail-user=kunal29bhatia@gmail.com
 #SBATCH --mail-type=ALL
 
