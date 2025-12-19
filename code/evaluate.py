@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+extract_baseline_magnitudes#!/usr/bin/env python3
 """
 Roman Microlensing Classifier - Comprehensive Evaluation Suite v3.0.1
 =====================================================================
@@ -484,7 +484,9 @@ def extract_baseline_magnitudes(
     """
     Extract or generate baseline magnitudes (m_base) for events.
 
-    v3.0.0: NEW FUNCTION - handles missing m_base by generating realistic values.
+    v3.0.3 FIX: Corrected index mapping logic. Now loads file_labels from HDF5
+    to compute true class boundaries, instead of using input labels which may
+    be subsampled/reordered.
 
     Strategy:
     1. Try to load m_base from params_{class} datasets in HDF5
@@ -497,7 +499,7 @@ def extract_baseline_magnitudes(
     indices : np.ndarray
         Global indices of events to load (shape: [N]).
     labels : np.ndarray
-        Class labels (0=Flat, 1=PSPL, 2=Binary) (shape: [N]).
+        Class labels (0=Flat, 1=PSPL, 2=Binary) for the selected events (shape: [N]).
     logger : logging.Logger, optional
         Logger for messages.
 
@@ -511,6 +513,16 @@ def extract_baseline_magnitudes(
 
     n_events = len(indices)
     m_base = np.full(n_events, ROMAN_DEFAULT_BASELINE_MAG, dtype=np.float32)
+
+    def _generate_random_m_base(n: int, seed_offset: int = 0) -> np.ndarray:
+        """Generate random baseline magnitudes in Roman range."""
+        seed_val = 42 + seed_offset
+        rng = np.random.RandomState(seed=seed_val)
+        return rng.uniform(
+            ROMAN_SOURCE_MAG_MIN,
+            ROMAN_SOURCE_MAG_MAX,
+            size=n
+        ).astype(np.float32)
 
     try:
         with h5py.File(data_path, 'r') as f:
@@ -527,8 +539,33 @@ def extract_baseline_magnitudes(
             if has_m_base:
                 logger.info("Found m_base in HDF5 parameters, loading per-event values...")
 
+                # =============================================================
+                # v3.0.3 FIX: Load FILE labels to compute correct class offsets
+                # =============================================================
+                # HDF5 structure: data is sorted by class
+                #   - Flat events: indices 0 to n_flat-1
+                #   - PSPL events: indices n_flat to n_flat+n_pspl-1
+                #   - Binary events: indices n_flat+n_pspl to end
+                # params_flat, params_pspl, params_binary are 0-indexed within each class
+                #
+                # To map a global file index to a class-specific param index:
+                #   class_specific_idx = global_file_idx - class_offset
+                # =============================================================
+
+                file_labels = f['labels'][:]
+                
+                # Compute class counts and offsets from FILE structure
+                class_counts = [(file_labels == c).sum() for c in range(NUM_CLASSES)]
+                class_offsets = [0]
+                for c in range(NUM_CLASSES - 1):
+                    class_offsets.append(class_offsets[-1] + class_counts[c])
+                
+                logger.debug(f"File class counts: {dict(zip(CLASS_NAMES, class_counts))}")
+                logger.debug(f"File class offsets: {class_offsets}")
+
                 # Load m_base for each event based on its class
                 for class_idx, class_name in enumerate(CLASS_NAMES):
+                    # Find which of our selected events belong to this class
                     class_mask = (labels == class_idx)
                     if not class_mask.any():
                         continue
@@ -543,17 +580,35 @@ def extract_baseline_magnitudes(
                         logger.warning(f"'m_base' not in {param_key}, using default")
                         continue
 
-                    # Get class-specific indices
-                    class_indices = indices[class_mask]
-
-                    # Map global indices to class-specific indices
-                    # Assume labels are sorted: Flat (0-n0), PSPL (n0-n1), Binary (n1-n2)
-                    n_before = (labels[:class_indices[0]] < class_idx).sum() if len(class_indices) > 0 else 0
-                    class_specific_indices = class_indices - n_before
-
-                    # Load m_base values
-                    m_base_class = param_dataset['m_base'][class_specific_indices]
-                    m_base[class_mask] = m_base_class
+                    n_params = len(param_dataset)
+                    
+                    # Get the global file indices for events of this class
+                    file_indices = indices[class_mask]
+                    
+                    # Map global file indices to class-specific parameter indices
+                    # global_file_idx = class_offset + class_specific_idx
+                    # => class_specific_idx = global_file_idx - class_offset
+                    class_specific_indices = file_indices - class_offsets[class_idx]
+                    
+                    # Validate indices are within bounds
+                    valid_mask = (class_specific_indices >= 0) & (class_specific_indices < n_params)
+                    
+                    if not valid_mask.all():
+                        n_invalid = (~valid_mask).sum()
+                        logger.warning(
+                            f"{class_name}: {n_invalid}/{len(file_indices)} indices out of bounds "
+                            f"(range: [{class_specific_indices.min()}, {class_specific_indices.max()}], "
+                            f"n_params: {n_params})"
+                        )
+                    
+                    if valid_mask.any():
+                        # Get positions in output array where we'll store values
+                        output_positions = np.where(class_mask)[0][valid_mask]
+                        valid_class_indices = class_specific_indices[valid_mask]
+                        
+                        # Load m_base values
+                        m_base_values = param_dataset['m_base'][valid_class_indices]
+                        m_base[output_positions] = m_base_values
 
                 logger.info(f"Loaded m_base: min={m_base.min():.2f}, max={m_base.max():.2f}, mean={m_base.mean():.2f}")
 
@@ -562,22 +617,20 @@ def extract_baseline_magnitudes(
                 logger.warning("m_base not found in HDF5 parameters")
                 logger.info(f"Generating random m_base in range [{ROMAN_SOURCE_MAG_MIN}, {ROMAN_SOURCE_MAG_MAX}] mag")
 
-                # Use deterministic seed based on first index for reproducibility
-                rng = np.random.RandomState(seed=42 + int(indices[0]) % 1000)
-                m_base = rng.uniform(
-                    ROMAN_SOURCE_MAG_MIN,
-                    ROMAN_SOURCE_MAG_MAX,
-                    size=n_events
-                ).astype(np.float32)
+                seed_offset = int(indices[0]) % 1000 if len(indices) > 0 else 0
+                m_base = _generate_random_m_base(n_events, seed_offset)
 
                 logger.info(f"Generated m_base: min={m_base.min():.2f}, max={m_base.max():.2f}, mean={m_base.mean():.2f}")
 
     except Exception as e:
         logger.error(f"Error loading/generating m_base: {e}")
-        logger.warning(f"Falling back to default m_base={ROMAN_DEFAULT_BASELINE_MAG}")
-        m_base = np.full(n_events, ROMAN_DEFAULT_BASELINE_MAG, dtype=np.float32)
+        logger.warning(f"Falling back to random m_base generation")
+        
+        seed_offset = int(indices[0]) % 1000 if len(indices) > 0 else 0
+        m_base = _generate_random_m_base(n_events, seed_offset)
 
     return m_base
+
 def find_experiment_checkpoint(
     experiment_name: str,
     base_dir: Path = Path('../results/checkpoints'),
