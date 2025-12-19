@@ -3128,7 +3128,7 @@ class RomanEvaluator:
         # Panel 2: Probability evolution
         for i, (name, color) in enumerate(zip(CLASS_NAMES, self.colors)):
             ax2.plot(times_evolution, probs_evolution[:, i],
-                    'o-', color=color, label=name, linewidth=2, markersize=4)
+                    'o-', color=color, label=name, linewidth=2, markersize=1)
 
         ax2.axhline(RANDOM_CLASSIFIER_PROB, color='gray', linestyle='--', linewidth=1, alpha=0.5)
         ax2.set_ylabel('Class Probability', fontsize=FONT_SIZE_LABEL, fontweight='bold')
