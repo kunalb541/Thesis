@@ -99,7 +99,7 @@ N_PSPL_TEST=50000
 N_BINARY_TEST=50000
 
 # Binary preset (distinct/baseline/planetary/stellar)
-BINARY_PRESET="baseline"
+BINARY_PRESET="distinct"
 
 # ============================================================================
 # CRITICAL: THREAD LIMITS (Prevent Freezing)
