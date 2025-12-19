@@ -1,4 +1,4 @@
-extract_baseline_magnitudes#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Roman Microlensing Classifier - Comprehensive Evaluation Suite v3.0.1
 =====================================================================
