@@ -630,21 +630,10 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## References
 
-**Key Publications:**
-
-1. Bozza, V. (2010). "VBBinaryLensing: A C++ library for microlensing." MNRAS, 408, 2188-2196.
-2. Zhu, W., et al. (2017). "Mass Measurements from Space-based Microlensing." ApJ, 849, L31.
-3. Johnson, S. A., et al. (2020). "Nancy Grace Roman Space Telescope Predictions." AJ, 160, 123.
-4. Gaudi, B. S. (2012). "Microlensing Surveys for Exoplanets." ARA&A, 50, 411-453.
-
 **Survey Resources:**
 - OGLE: http://ogle.astrouw.edu.pl/
 - MOA: https://www.massey.ac.nz/~iabond/moa/
 - Nancy Grace Roman: https://roman.gsfc.nasa.gov/
-
-**Machine Learning in Microlensing:**
-- Lam et al. (2020): ML classification of OGLE events
-- Godines et al. (2019): CNN-based microlensing detection
 
 ---
 
