@@ -3240,7 +3240,7 @@ class RomanEvaluator:
         predicted_class = probs_evolution.argmax(axis=1)
 
         ax3.plot(times_evolution, confidence, 'o-', color='black',
-                linewidth=2, markersize=4, label='Confidence')
+                linewidth=1, markersize=1, label='Confidence')
         ax3.fill_between(times_evolution, 0, confidence, alpha=0.3, color='gray')
 
         ax3.set_xlabel('Time (days)', fontsize=FONT_SIZE_LABEL, fontweight='bold')
