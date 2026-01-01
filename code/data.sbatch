@@ -12,7 +12,7 @@
 #SBATCH --mail-type=ALL
 
 # =============================================================================
-# ROMAN MICROLENSING - DATA GENERATION v4.o
+# ROMAN MICROLENSING - DATA GENERATION v4.0
 # =============================================================================
 
 set -e
@@ -21,15 +21,11 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate microlens
 cd ~/Thesis/code
 
-# ============================================================================
-# CRITICAL: THREAD LIMITS (Prevent Freezing)
-# ============================================================================
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMBA_NUM_THREADS=1
 
-# PYTHONUNBUFFERED=1 ensures you see simulation progress bars in real-time
 export PYTHONUNBUFFERED=1
 export PYTHONWARNINGS="ignore"
 
