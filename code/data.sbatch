@@ -7,15 +7,12 @@
 #SBATCH -t 12:00:00
 #SBATCH -o logs/datagen_%j.out
 #SBATCH -e logs/datagen_%j.err
-#SBATCH --job-name=datagen_v31
+#SBATCH --job-name=datagen
 #SBATCH --mail-user=kunal29bhatia@gmail.com
 #SBATCH --mail-type=ALL
 
 # =============================================================================
-# ROMAN MICROLENSING - DATA GENERATION v3.1.0
-# =============================================================================
-# PROVEN APPROACH: Sequential generation with 10 workers
-# Takes ~8-10 hours but WORKS RELIABLY
+# ROMAN MICROLENSING - DATA GENERATION v4.o
 # =============================================================================
 
 set -e
@@ -56,7 +53,7 @@ N_TEST_BINARY=50000
 
 # Simulation parameters
 OVERSAMPLE=1.3
-N_WORKERS=10  # PROVEN to work without hanging
+N_WORKERS=10  
 
 # Seeds
 SEED_BASELINE_TRAIN=42
@@ -69,7 +66,7 @@ SEED_DISTINCT_TEST=7331
 # ============================================================================
 
 echo "================================================================================"
-echo "Roman Microlensing Data Generation v3.1.0"
+echo "Roman Microlensing Data Generation v4.0"
 echo "================================================================================"
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Started: $(date)"
@@ -77,7 +74,6 @@ echo "Node: $(hostname)"
 echo "CPUs: $(nproc)"
 echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
 echo "Workers: ${N_WORKERS}"
-echo "Strategy: Sequential (proven reliable approach)"
 echo "================================================================================"
 
 # ============================================================================
@@ -232,7 +228,6 @@ echo "Total disk usage: $(du -sh "${DATA_DIR}" | cut -f1)"
 echo ""
 echo "================================================================================"
 echo "READY FOR TRAINING!"
-echo "  Next: sbatch pipeline_complete.sbatch"
 echo "================================================================================"
 
 exit 0
