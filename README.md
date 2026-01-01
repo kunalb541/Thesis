@@ -377,7 +377,7 @@ Output: Log-Probabilities [B, 3]
 | `n_layers` | 4 | GRU layers |
 | `dropout` | 0.3 | Dropout rate |
 | `window_size` | 5 | Conv kernel size |
-| `max_seq_len` | 2400 | Maximum sequence length |
+| `max_seq_len` | 7000 | Maximum sequence length |
 | `n_classes` | 3 | Output classes |
 | `hierarchical` | True | Two-stage classification |
 | `attention_pooling` | True | Multi-head attention pooling |
