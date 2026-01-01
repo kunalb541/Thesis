@@ -71,13 +71,13 @@ PROGRESS_FILE="${OUTPUT_BASE}/.pipeline_progress"
 CONTINUATION_JOB_FILE="${OUTPUT_BASE}/.continuation_job_id"
 
 # Training hyperparameters (OPTIMIZED for 40 GPUs)
-BATCH_SIZE=512               # Per-GPU batch
+BATCH_SIZE=64                # Per-GPU batch
 NUM_WORKERS=0                # Pure RAM loading via /dev/shm
 ACCUMULATION_STEPS=2         # Effective batch = 1024 per GPU
 MAX_EPOCHS=300
 
 # Model architecture
-D_MODEL=64
+D_MODEL=32
 N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=5
@@ -94,10 +94,10 @@ STAGE2_WEIGHT=1.0
 AUX_WEIGHT=0.5
 STAGE2_TEMPERATURE=1.0
 
-USE_CLASS_WEIGHTS="true"
+USE_CLASS_WEIGHTS="false"
 
 # Evaluation settings
-EVAL_BATCH_SIZE=1024
+EVAL_BATCH_SIZE=64
 N_EVOLUTION_SAMPLES=10
 SAVE_FORMATS="png"
 
