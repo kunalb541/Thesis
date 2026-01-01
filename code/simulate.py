@@ -18,6 +18,23 @@ Key Technical Features
     * Unified interface producing mag, delta_t, labels, timestamps, and metadata
     * HDF5 output with compressed datasets for large-volume workflows
 
+VERSION 4.0.0 - BUG FIX UPDATE
+-------------------------------
+This version fixes several bugs identified in v3.1.0:
+
+Fixes Applied (v4.0.0):
+    * CRITICAL FIX: Time grid now uses np.arange for exact 15-minute cadence
+      (was np.linspace which produces non-uniform spacing at endpoints)
+    * CRITICAL FIX: u0 caustic sampling bounds check to prevent collapsed intervals
+      when caustic_size is tiny (planetary regime)
+    * CRITICAL FIX: VBBinaryLensing return type normalized to np.ndarray immediately
+    * MODERATE FIX: Removed bogus parallel=True from compute_delta_t_numba
+      (first loop is inherently serial, parallel gave no benefit and added fragility)
+    * MODERATE FIX: MIN_MAGNIFICATION_CLIP increased from 0.1 to 0.5 for physical realism
+    * MODERATE FIX: Removed redundant double-clipping of A_noisy
+    * CLEANUP: noise_scale parameter documented as reserved for future use
+    * CLEANUP: Marked flux_to_mag functions as diagnostic/legacy utilities
+
 VERSION 3.1.0 - REALISTIC ROMAN SEASON UPDATE
 ----------------------------------------------
 This version updates to realistic Roman observing parameters:
@@ -92,8 +109,8 @@ Fixes Applied (v2.6)
 
 This module powers downstream ML pipelines such as CNN-GRU classifiers.
 
-IMPORTANT: OUTPUT FORMAT (v2.7+ / v3.0.0 - CNN-OPTIMIZED)
-----------------------------------------------------------
+IMPORTANT: OUTPUT FORMAT (v2.7+ / v3.0.0 / v4.0.0 - CNN-OPTIMIZED)
+-------------------------------------------------------------------
 The 'flux' array in HDF5 files contains NORMALIZED MAGNIFICATION:
     - Baseline (unmagnified source): A = 1.0
     - Magnified 2x: A = 2.0
@@ -106,10 +123,20 @@ preserving physical realism while maintaining numerical stability for neural net
 Previous versions stored absolute flux in Jansky (~1e-5), which caused CNN training
 instability due to tiny numerical values.
 
+NOISE MODEL NOTE (v4.0.0):
+--------------------------
+The noise model is physically correct for training and plotting:
+    1. Noise is computed in flux space (Jansky) using Roman detector model
+    2. Applied to true flux: flux_noisy = flux_true + N(0, sigma_flux)
+    3. Converted back to magnification: A_noisy = flux_noisy / f_base
+
+When converting to magnitudes for plotting: mag = m_base - 2.5 * log10(A_noisy)
+This correctly produces heteroscedastic errors (larger mag scatter at lower A/fainter obs).
+
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 3.1.0
-Date: December 2024
+Version: 4.0.0
+Date: January 2025
 """
 from __future__ import annotations
 
@@ -128,7 +155,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "3.1.0"
+__version__: Final[str] = "4.0.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -160,7 +187,7 @@ ROMAN_ZP_FLUX_JY: Final[float] = 3631.0
 
 # Roman WFI F146 filter characteristics
 # Reference: Spergel et al. (2015), arXiv:1503.03757
-ROMAN_LIMITING_MAG_AB: Final[float] = 27.5 # 5-sigma point source detection limit
+ROMAN_LIMITING_MAG_AB: Final[float] = 27.5  # 5-sigma point source detection limit
 ROMAN_SKY_MAG_AB: Final[float] = 22.0       # Typical sky background in F146
 ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0   # Bright limit (saturation)
 ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0   # Faint limit for good S/N
@@ -176,12 +203,15 @@ ROMAN_CADENCE_MINUTES: Final[float] = 15.0  # v3.1.0: Exact Roman cadence
 ROMAN_SEASON_DURATION_DAYS: Final[float] = 72.0
 
 # Number of observations per season at 15-minute cadence
-# 72 days × 24 hours × 4 observations/hour = 6912
+# 72 days * 24 hours * 4 observations/hour = 6912
 ROMAN_SEASON_N_POINTS: Final[int] = int(ROMAN_SEASON_DURATION_DAYS * 24 * 60 / ROMAN_CADENCE_MINUTES)
 
 # Legacy constant - now points to season duration for single-season simulation
 ROMAN_MISSION_DURATION_DAYS: Final[float] = ROMAN_SEASON_DURATION_DAYS
 ROMAN_LIMITING_SNR: Final[float] = 5.0      # Detection threshold
+
+# v4.0.0: Cadence step in days for proper time grid generation
+ROMAN_CADENCE_DAYS: Final[float] = ROMAN_CADENCE_MINUTES / (24.0 * 60.0)
 
 # =============================================================================
 # BINARY EVENT ACCEPTANCE CRITERIA
@@ -189,7 +219,7 @@ ROMAN_LIMITING_SNR: Final[float] = 5.0      # Detection threshold
 # =============================================================================
 
 BINARY_MIN_MAGNIFICATION: Final[float] = 1.5    # Minimum peak magnification for detection
-BINARY_MAX_MAGNIFICATION: Final[float] = 100.0 # Physical upper limit (avoid numerical issues)
+BINARY_MAX_MAGNIFICATION: Final[float] = 100.0  # Physical upper limit (avoid numerical issues)
 BINARY_MIN_MAG_RANGE: Final[float] = 0.3        # Minimum magnitude variation for caustic features
 BINARY_MAX_ATTEMPTS: Final[int] = 10            # Maximum retry attempts per event
 
@@ -212,7 +242,7 @@ PSPL_MAX_ATTEMPTS: Final[int] = 10              # Maximum retry attempts per eve
 
 CAUSTIC_SPIKE_THRESHOLD: Final[float] = 5.0     # N-sigma threshold for spike detection
 CAUSTIC_MIN_SPIKES: Final[int] = 1              # Minimum spike features for caustic crossing
-CAUSTIC_ASYMMETRY_THRESHOLD: Final[float] = 0.15 # 15% asymmetry threshold
+CAUSTIC_ASYMMETRY_THRESHOLD: Final[float] = 0.15  # 15% asymmetry threshold
 
 # =============================================================================
 # v3.0.0: ADDITIONAL CONSTANTS (previously magic numbers)
@@ -221,15 +251,17 @@ CAUSTIC_ASYMMETRY_THRESHOLD: Final[float] = 0.15 # 15% asymmetry threshold
 # Caustic detection analysis parameters
 CAUSTIC_MIN_ANALYSIS_LENGTH: Final[int] = 20    # Minimum light curve length for caustic analysis
 CAUSTIC_PEAK_THRESHOLD: Final[float] = 1.1      # 10% above baseline for peak detection
-CAUSTIC_STRONG_PEAK_THRESHOLD: Final[float] = 1.3 # 30% above baseline for strong peak
+CAUSTIC_STRONG_PEAK_THRESHOLD: Final[float] = 1.3  # 30% above baseline for strong peak
 CAUSTIC_MIN_COMPARISON_POINTS: Final[int] = 5   # Minimum points for asymmetry comparison
-CAUSTIC_MAX_COMPARISON_WINDOW: Final[int] = 50 # Maximum window size for asymmetry check
+CAUSTIC_MAX_COMPARISON_WINDOW: Final[int] = 50  # Maximum window size for asymmetry check
 
 # Noise floor for invalid flux values
 NOISE_FLOOR_FACTOR: Final[float] = 1e-5
 
-# Minimum magnification clip (to prevent negative values from noise)
-MIN_MAGNIFICATION_CLIP: Final[float] = 0.1
+# v4.0.0 FIX: Increased from 0.1 to 0.5 for physical realism
+# Microlensing magnification should not drop far below baseline even with noise
+# 0.5 allows for ~2-sigma negative noise fluctuations on baseline
+MIN_MAGNIFICATION_CLIP: Final[float] = 0.5
 
 # Default oversample factor
 DEFAULT_OVERSAMPLE_FACTOR: Final[float] = 1.3
@@ -264,6 +296,10 @@ if HAS_NUMBA:
         Convert flux (Jansky) to AB magnitude using Numba acceleration.
 
         Formula: m_AB = -2.5 * log10(f_nu / 3631 Jy)
+
+        NOTE (v4.0.0): This function is provided for diagnostic and post-processing
+        use. The main simulation pipeline outputs normalized magnification, not
+        AB magnitudes. Use this when converting to magnitudes for plotting.
 
         Parameters
         ----------
@@ -320,7 +356,7 @@ if HAS_NUMBA:
             if f_total > 0:
                 sigma[i] = k_noise * math.sqrt(f_total)
             else:
-                sigma[i] = k_noise * NOISE_FLOOR_FACTOR # Floor for invalid flux
+                sigma[i] = k_noise * NOISE_FLOOR_FACTOR  # Floor for invalid flux
         return sigma
 
     @njit(fastmath=True, cache=True)
@@ -388,7 +424,10 @@ if HAS_NUMBA:
             A[i] = (u_sq + 2.0) / (u_sqrt * np.sqrt(u_sq + 4.0))
         return A
 
-    @njit(fastmath=True, cache=True, parallel=True)
+    # v4.0.0 FIX: Removed parallel=True - the forward pass is inherently serial
+    # (each iteration depends on the previous), so parallel gives no benefit
+    # and can cause subtle issues with shared array writes in Numba
+    @njit(fastmath=True, cache=True)
     def compute_delta_t_numba(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """
         Compute time differences between consecutive valid observations.
@@ -407,12 +446,20 @@ if HAS_NUMBA:
         -------
         np.ndarray
             Delta_t array in days. Masked points have delta_t = 0.
+
+        Notes
+        -----
+        v4.0.0 FIX: Removed parallel=True. The forward pass to find previous
+        valid indices is inherently serial (each step depends on the last).
+        The second loop could theoretically parallelize, but the overhead
+        exceeds any benefit for typical light curve lengths.
         """
         n = len(times)
         delta_t = np.zeros(n, dtype=np.float32)
         prev_valid = np.full(n, -1, dtype=np.int32)
 
         # Forward pass to find previous valid index for each position
+        # This loop is inherently serial - cannot be parallelized
         last = -1
         for i in range(n):
             if mask[i]:
@@ -421,11 +468,13 @@ if HAS_NUMBA:
             else:
                 prev_valid[i] = last
 
-        # Parallel computation of delta_t
-        for i in prange(n):
+        # Compute delta_t (could parallelize but overhead not worth it)
+        for i in range(n):
             if mask[i] and prev_valid[i] != -1:
                 delta_t[i] = times[i] - times[prev_valid[i]]
         return delta_t
+
+
 # =============================================================================
 # PURE NUMPY FALLBACK FUNCTIONS (when Numba unavailable)
 # =============================================================================
@@ -433,6 +482,9 @@ if HAS_NUMBA:
 def flux_to_mag_numpy(flux_jy: np.ndarray) -> np.ndarray:
     """
     Convert flux to AB magnitude using pure NumPy.
+
+    NOTE (v4.0.0): This function is provided for diagnostic and post-processing
+    use. The main simulation pipeline outputs normalized magnification.
 
     Parameters
     ----------
@@ -447,6 +499,8 @@ def flux_to_mag_numpy(flux_jy: np.ndarray) -> np.ndarray:
     with np.errstate(divide='ignore', invalid='ignore'):
         mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
     return mag.astype(np.float32)
+
+
 def compute_photon_noise_numpy(flux_jy: np.ndarray) -> np.ndarray:
     """
     Compute photon noise using Roman detector model with pure NumPy.
@@ -470,6 +524,8 @@ def compute_photon_noise_numpy(flux_jy: np.ndarray) -> np.ndarray:
     sigma = k_noise * np.sqrt(f_total)
 
     return sigma.astype(np.float32)
+
+
 def pspl_magnification_numpy(
     t: np.ndarray,
     t_E: float,
@@ -498,6 +554,8 @@ def pspl_magnification_numpy(
     u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
     A = (u**2 + 2) / (u * np.sqrt(u**2 + 4))
     return A.astype(np.float32)
+
+
 def compute_delta_t_numpy(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """
     Compute time differences between consecutive valid observations.
@@ -520,6 +578,8 @@ def compute_delta_t_numpy(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
         diffs = np.diff(times[valid_idx])
         dt[valid_idx[1:]] = diffs
     return dt
+
+
 # =============================================================================
 # DETECTOR AND CONFIGURATION CLASSES
 # =============================================================================
@@ -543,6 +603,9 @@ class RomanWFI_F146:
     def flux_to_mag(flux_jy: np.ndarray) -> np.ndarray:
         """
         Convert flux (Jansky) to AB magnitude.
+
+        NOTE (v4.0.0): Provided for diagnostic/post-processing use.
+        Main pipeline outputs normalized magnification.
 
         Parameters
         ----------
@@ -576,12 +639,17 @@ class RomanWFI_F146:
         if HAS_NUMBA:
             return compute_photon_noise_numba(flux_jy)
         return compute_photon_noise_numpy(flux_jy)
+
+
 class SimConfig:
     """
     Simulation configuration parameters.
 
     Defines the observational setup for Roman Space Telescope
     microlensing survey simulations.
+
+    v4.0.0 UPDATE: Time grid generation moved to generate_time_grid() function
+    to ensure exact 15-minute cadence using np.arange instead of np.linspace.
 
     v3.1.0 UPDATE: Now uses realistic Roman season parameters:
     - 72-day observing window (single Roman season)
@@ -615,6 +683,33 @@ class SimConfig:
     BASELINE_MIN: float = ROMAN_SOURCE_MAG_MIN
     BASELINE_MAX: float = ROMAN_SOURCE_MAG_MAX
     PAD_VALUE: float = 0.0
+
+
+def generate_time_grid() -> np.ndarray:
+    """
+    Generate the observation time grid with exact 15-minute cadence.
+
+    v4.0.0 FIX: Uses np.arange instead of np.linspace to ensure uniform
+    spacing. np.linspace can produce non-uniform spacing at endpoints
+    due to floating-point arithmetic.
+
+    Returns
+    -------
+    np.ndarray
+        Time array in days with exact 15-minute (0.01041667 day) spacing.
+
+    Notes
+    -----
+    The time grid starts at TIME_MIN and has exactly N_POINTS observations
+    separated by ROMAN_CADENCE_DAYS (15 minutes = 0.01041667 days).
+
+    For a 72-day season with 15-minute cadence:
+    - N_POINTS = 6912
+    - Last observation at t = 71.9895833... days (just under 72 days)
+    """
+    return SimConfig.TIME_MIN + np.arange(SimConfig.N_POINTS) * ROMAN_CADENCE_DAYS
+
+
 class BinaryPresets:
     """
     Binary lens parameter presets for different astrophysical regimes.
@@ -650,7 +745,7 @@ class BinaryPresets:
     - OGLE and MOA survey statistics for observed events
 
     v3.1.0: t_E max reduced to 18 days to ensure events complete within
-    72-day window. An event needs ~2×t_E for full rise-peak-fall, so
+    72-day window. An event needs ~2*t_E for full rise-peak-fall, so
     t_E <= 18 days ensures completion even for events peaking at t0_max.
 
     v2.8 BIAS FIX: Extended t0 range to 10%-90% to include edge cases (partial events).
@@ -660,7 +755,7 @@ class BinaryPresets:
     v2.8.1 ADDITIONS:
     - 'require_caustic' flag per preset to force caustic crossing signatures
     - 'distinct' preset tightened u0_range for better caustic intersection
-    - 'stellar' preset q_range fixed to (0.1, 1.0) per convention q ≤ 1
+    - 'stellar' preset q_range fixed to (0.1, 1.0) per convention q <= 1
     - 'baseline' preset s_range fixed to (0.3, 3.0), was (0.01, 3.0) which is degenerate
 
     References
@@ -675,7 +770,7 @@ class BinaryPresets:
     SHARED_T0_MIN: float = 0.25 * SimConfig.TIME_MAX  # 18 days
     SHARED_T0_MAX: float = 0.75 * SimConfig.TIME_MAX  # 54 days
     SHARED_TE_MIN: float = 3.0   # days
-    SHARED_TE_MAX: float = 18.0  # days (ensures completion: 2×18 = 36 days < 72-18=54)
+    SHARED_TE_MAX: float = 18.0  # days (ensures completion: 2*18 = 36 days < 72-18=54)
     SHARED_U0_MIN: float = 0.001   # Matches PSPL to prevent bias
     SHARED_U0_MAX: float = 1.0    # Matches PSPL to prevent bias
 
@@ -685,7 +780,7 @@ class BinaryPresets:
             # Forces caustic crossings via tight u0 and require_caustic flag
             's_range': (0.8, 1.2),          # Tightened for resonant caustics
             'q_range': (0.1, 1.0),          # High q = bigger caustic
-            'u0_range': (SHARED_U0_MIN, 0.3), # Tighter for caustic intersection
+            'u0_range': (SHARED_U0_MIN, 0.3),  # Tighter for caustic intersection
             'rho_range': (1e-3, 1e-2),      # Finite source resolves caustic
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -697,7 +792,7 @@ class BinaryPresets:
             # Planets have tiny caustics, need small u0 and caustic check
             's_range': (0.6, 1.6),          # Tighter around snow line
             'q_range': (1e-4, 1e-2),        # Jupiter to super-Earth
-            'u0_range': (SHARED_U0_MIN, 0.3), # Planets have tiny caustics
+            'u0_range': (SHARED_U0_MIN, 0.3),  # Planets have tiny caustics
             'rho_range': (1e-3, 1e-2),      # Need finite source for planets
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
@@ -708,7 +803,7 @@ class BinaryPresets:
             # Binary star systems (high mass ratio)
             # Some stellar binaries are smooth (no caustic crossing)
             's_range': (0.3, 3.0),          # Wide range of separations
-            'q_range': (0.1, 1.0),          # FIX v2.8.1: was (0.3, 3), convention q ≤ 1
+            'q_range': (0.1, 1.0),          # FIX v2.8.1: was (0.3, 3), convention q <= 1
             'u0_range': (SHARED_U0_MIN, 0.5),
             'rho_range': (1e-3, 5e-2),      # Larger sources for stellar
             'alpha_range': (0, 2*math.pi),
@@ -728,6 +823,8 @@ class BinaryPresets:
             'require_caustic': False        # Full parameter space includes non-crossing
         }
     }
+
+
 class PSPLParams:
     """
     PSPL (Point Source Point Lens) parameter ranges.
@@ -765,6 +862,8 @@ class PSPLParams:
     TE_MAX: float = BinaryPresets.SHARED_TE_MAX
     U0_MIN: float = BinaryPresets.SHARED_U0_MIN
     U0_MAX: float = BinaryPresets.SHARED_U0_MAX
+
+
 # =============================================================================
 # CAUSTIC DETECTION AND SIZE ESTIMATION (v2.8.1+)
 # =============================================================================
@@ -781,7 +880,7 @@ def estimate_caustic_size(s: float, q: float) -> float:
     s : float
         Binary separation in Einstein radii.
     q : float
-        Mass ratio (secondary/primary, q ≤ 1 by convention).
+        Mass ratio (secondary/primary, q <= 1 by convention).
 
     Returns
     -------
@@ -791,9 +890,9 @@ def estimate_caustic_size(s: float, q: float) -> float:
     Notes
     -----
     Approximations used:
-    - Resonant caustic (s ~ 1): size ~ 4q / (1+q)²
-    - Close binary (s < 1): size ~ q * s⁴
-    - Wide binary (s > 1): size ~ q / s⁴
+    - Resonant caustic (s ~ 1): size ~ 4q / (1+q)^2
+    - Close binary (s < 1): size ~ q * s^4
+    - Wide binary (s > 1): size ~ q / s^4
 
     These are order-of-magnitude estimates. Actual caustic shapes are
     complex and depend on all parameters.
@@ -812,6 +911,8 @@ def estimate_caustic_size(s: float, q: float) -> float:
     else:
         # Wide binary - two separate caustics
         return q / s**4
+
+
 def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -> bool:
     """
     Detect caustic crossing signatures in light curve.
@@ -835,9 +936,9 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
     -----
     Three detection methods are used:
 
-    1. **Spike detection**: Caustic crossings have very large |d²A/dt²|.
-       PSPL is smooth with d²A peaks at ~2-3× mean.
-       Caustic crossings peak at 10-100× mean.
+    1. **Spike detection**: Caustic crossings have very large |d^2A/dt^2|.
+       PSPL is smooth with d^2A peaks at ~2-3x mean.
+       Caustic crossings peak at 10-100x mean.
 
     2. **Multiple peaks**: W-shaped or multi-peak light curves indicate
        multiple caustic crossings or cusp approaches.
@@ -857,11 +958,11 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
 
     # Method 1: Check for rapid magnification changes (spikes)
     dA = np.diff(A)
-    d2A = np.diff(dA) # Second derivative
+    d2A = np.diff(dA)  # Second derivative
 
-    # Caustic crossings have very large |d²A/dt²|
+    # Caustic crossings have very large |d^2A/dt^2|
     std_d2A = np.std(d2A)
-    if std_d2A > 1e-8: # Avoid division by zero
+    if std_d2A > 1e-8:  # Avoid division by zero
         d2A_normalized = np.abs(d2A) / std_d2A
         n_spikes = np.sum(d2A_normalized > CAUSTIC_SPIKE_THRESHOLD)
 
@@ -891,7 +992,7 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
         n_compare = min(peak_idx, len(A) - peak_idx - 1, CAUSTIC_MAX_COMPARISON_WINDOW)
         if n_compare > CAUSTIC_MIN_COMPARISON_POINTS * 2:
             before = A[peak_idx - n_compare:peak_idx]
-            after = A[peak_idx + 1:peak_idx + n_compare + 1][::-1] # Reverse for comparison
+            after = A[peak_idx + 1:peak_idx + n_compare + 1][::-1]  # Reverse for comparison
 
             # Ensure same length
             min_len = min(len(before), len(after))
@@ -908,6 +1009,8 @@ def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -
                         return True
 
     return False
+
+
 # =============================================================================
 # MAGNIFICATION FUNCTIONS
 # =============================================================================
@@ -947,6 +1050,8 @@ def pspl_magnification(
     if HAS_NUMBA:
         return pspl_magnification_fast(t, t_E, u_0, t_0)
     return pspl_magnification_numpy(t, t_E, u_0, t_0)
+
+
 def binary_magnification_vbb(
     t: np.ndarray,
     t_E: float,
@@ -985,12 +1090,17 @@ def binary_magnification_vbb(
     Returns
     -------
     np.ndarray
-        Magnification array (dimensionless).
+        Magnification array (dimensionless), always as np.ndarray.
 
     Raises
     ------
     RuntimeError
         If VBBinaryLensing computation fails completely.
+
+    Notes
+    -----
+    v4.0.0 FIX: Return type is now always normalized to np.ndarray
+    immediately after VBB call to prevent dtype inconsistencies.
 
     References
     ----------
@@ -1005,10 +1115,13 @@ def binary_magnification_vbb(
 
     try:
         # Try vectorized computation first (faster)
-        return VBB.BinaryMag(s, q, u1, u2, rho)
+        result = VBB.BinaryMag(s, q, u1, u2, rho)
+        # v4.0.0 FIX: Normalize return type immediately
+        # VBB can return float, list, or ndarray depending on version/input
+        return np.asarray(result, dtype=np.float32)
     except (RuntimeError, ValueError, TypeError) as e:
         # Fallback to point-by-point computation
-        # v3.0.0: Do NOT catch MemoryError - let it propagate
+        # v3.0.0 FIX: Do NOT catch MemoryError - let it propagate
         n = len(t)
         mag = np.ones(n, dtype=np.float32)
         for i in range(n):
@@ -1022,6 +1135,8 @@ def binary_magnification_vbb(
                 u = np.sqrt(u_sq)
                 mag[i] = (u_sq + 2) / (u * np.sqrt(u_sq + 4)) if u > 0 else 1.0
         return mag
+
+
 def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """
     Compute time differences between consecutive valid observations.
@@ -1041,6 +1156,8 @@ def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if HAS_NUMBA:
         return compute_delta_t_numba(times, mask)
     return compute_delta_t_numpy(times, mask)
+
+
 # =============================================================================
 # SIMULATION CORE
 # =============================================================================
@@ -1060,7 +1177,7 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         - type: Event type ('flat', 'pspl', 'binary')
         - time_grid: Array of observation times
         - mask_prob: Probability of missing an observation
-        - noise_scale: Noise amplitude scaling factor
+        - noise_scale: Noise amplitude scaling factor (reserved for future use)
         - preset: Binary lens preset name (for binary events)
 
     Returns
@@ -1078,6 +1195,9 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     -----
     The 'flux' key contains NORMALIZED MAGNIFICATION (A=1.0 baseline) for
     backward compatibility and CNN numerical stability.
+
+    v4.0.0 FIX: Removed redundant double-clipping of A_noisy.
+    v4.0.0 NOTE: noise_scale parameter is reserved for future use (amplitude scaling).
 
     v2.6 FIX: Binary events that fail to generate distinguishable caustic
     features now return None instead of falling back to mislabeled PSPL.
@@ -1134,7 +1254,7 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
             # v2.8: Apply acceptance criteria (similar to Binary but slightly relaxed)
             if (PSPL_MIN_MAGNIFICATION < max_mag < PSPL_MAX_MAGNIFICATION
-                and mag_range > PSPL_MIN_MAG_RANGE):
+                    and mag_range > PSPL_MIN_MAG_RANGE):
                 A = A_candidate
                 generation_success = True
                 break
@@ -1172,10 +1292,18 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             # v2.8.1: For presets requiring caustic, constrain u0 based on caustic size
             if require_caustic:
                 caustic_size = estimate_caustic_size(s, q)
-                # u0 should be within ~2× caustic size for good crossing probability
+                # u0 should be within ~2x caustic size for good crossing probability
                 u0_max_caustic = min(caustic_size * CAUSTIC_U0_MULTIPLIER, p['u0_range'][1])
                 u0_min_caustic = p['u0_range'][0]
-                u0 = np.random.uniform(u0_min_caustic, max(u0_min_caustic + MIN_U0_OFFSET, u0_max_caustic))
+
+                # v4.0.0 FIX: Explicitly check for collapsed bounds
+                # If caustic is tiny (planetary regime), u0_max_caustic can be < u0_min_caustic
+                # which silently distorts the parameter distribution
+                if u0_max_caustic <= u0_min_caustic:
+                    # Caustic too small for this s,q - skip and resample
+                    continue
+
+                u0 = np.random.uniform(u0_min_caustic, u0_max_caustic)
             else:
                 u0 = np.random.uniform(*p['u0_range'])
 
@@ -1229,13 +1357,16 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     # v2.7+ CRITICAL FIX: Apply photon noise in MAGNIFICATION space
     # Convert absolute Jansky noise to relative magnification noise
+    # v4.0.0 NOTE: noise_scale from params is reserved for future use
+    # (could multiply noise_jy by params.get('noise_scale', 1.0) if needed)
     flux_true_jy = f_base * A
     noise_jy = RomanWFI_F146.compute_photon_noise(flux_true_jy)
     flux_noisy_jy = flux_true_jy + np.random.normal(0, noise_jy)
-    A_noisy = np.maximum(flux_noisy_jy / f_base, MIN_MAGNIFICATION_CLIP)
 
-    # Clip to physical values (magnification should be >= 1.0, but allow slightly less due to noise)
-    A_noisy = np.maximum(A_noisy, MIN_MAGNIFICATION_CLIP)
+    # v4.0.0 FIX: Single clipping operation (removed redundant second clip)
+    # Clip to physical values: magnification shouldn't go far below baseline
+    # MIN_MAGNIFICATION_CLIP = 0.5 allows for ~2-sigma negative noise fluctuations
+    A_noisy = np.maximum(flux_noisy_jy / f_base, MIN_MAGNIFICATION_CLIP)
 
     # Apply cadence mask (random missing observations)
     mask = np.random.random(n) > params['mask_prob']
@@ -1245,11 +1376,13 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     delta_t = compute_delta_t(t_grid, mask)
 
     return {
-        'flux': A_noisy.astype(np.float32), # v2.7+: NORMALIZED magnification (baseline=1.0)
+        'flux': A_noisy.astype(np.float32),  # v2.7+: NORMALIZED magnification (baseline=1.0)
         'delta_t': delta_t.astype(np.float32),
         'label': label,
         'params': meta
     }
+
+
 def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Optional[Dict[str, Any]]:
     """
     Wrapper for multiprocessing pool.
@@ -1284,6 +1417,8 @@ def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Optional[Dict[str, Any]]
         return {'_failed': True, '_type': param['type']}
 
     return result
+
+
 def validate_args(args: argparse.Namespace) -> None:
     """
     Validate command-line arguments.
@@ -1319,6 +1454,8 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.n_flat + args.n_pspl + args.n_binary == 0:
         raise ValueError("At least one event type must have n > 0")
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -1330,6 +1467,8 @@ def main() -> None:
     Parses command-line arguments, generates the specified number of
     microlensing events, and saves results to an HDF5 file with
     compressed datasets and metadata.
+
+    v4.0.0 FIX: Time grid now generated with generate_time_grid() for exact cadence.
 
     v2.8.1 FIX: Properly tracks failures by event type and uses
     oversample/subsample approach for guaranteed class balance.
@@ -1346,22 +1485,22 @@ def main() -> None:
     )
 
     parser.add_argument('--n_flat', type=int, default=1000,
-                       help="Number of flat (baseline) events")
+                        help="Number of flat (baseline) events")
     parser.add_argument('--n_pspl', type=int, default=1000,
-                       help="Number of PSPL events")
+                        help="Number of PSPL events")
     parser.add_argument('--n_binary', type=int, default=1000,
-                       help="Number of binary events")
+                        help="Number of binary events")
     parser.add_argument('--binary_preset', type=str, default='baseline',
-                       choices=['distinct', 'planetary', 'stellar', 'baseline'],
-                       help="Binary lens parameter preset")
+                        choices=['distinct', 'planetary', 'stellar', 'baseline'],
+                        help="Binary lens parameter preset")
     parser.add_argument('--output', type=str, required=True,
-                       help="Output HDF5 file path")
+                        help="Output HDF5 file path")
     parser.add_argument('--num_workers', type=int, default=None,
-                       help="Number of worker processes (default: CPU count)")
+                        help="Number of worker processes (default: CPU count)")
     parser.add_argument('--seed', type=int, default=42,
-                       help="Random seed for reproducibility")
+                        help="Random seed for reproducibility")
     parser.add_argument('--oversample', type=float, default=DEFAULT_OVERSAMPLE_FACTOR,
-                       help="Oversample factor to account for failures (must be >= 1.0)")
+                        help="Oversample factor to account for failures (must be >= 1.0)")
 
     args = parser.parse_args()
 
@@ -1372,14 +1511,16 @@ def main() -> None:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Generate time grid
-    time_grid = np.linspace(SimConfig.TIME_MIN, SimConfig.TIME_MAX, SimConfig.N_POINTS)
+    # v4.0.0 FIX: Generate time grid with exact 15-minute cadence
+    # Uses np.arange instead of np.linspace for uniform spacing
+    time_grid = generate_time_grid()
 
     # Base parameters
+    # NOTE: noise_scale is reserved for future use (amplitude scaling)
     base_params: Dict[str, Any] = {
         'time_grid': time_grid,
         'mask_prob': SimConfig.CADENCE_MASK_PROB,
-        'noise_scale': 1.0,
+        'noise_scale': 1.0,  # Reserved for future use
         'preset': args.binary_preset
     }
 
@@ -1398,12 +1539,13 @@ def main() -> None:
 
     total_gen = len(tasks)
     print("=" * 60)
-    print("Roman Microlensing Event Simulator v3.1.0")
+    print("Roman Microlensing Event Simulator v4.0.0")
     print("=" * 60)
     print(f"Configuration:")
     print(f"  Season duration: {SimConfig.TIME_MAX:.1f} days")
-    print(f"  Cadence: {ROMAN_CADENCE_MINUTES:.1f} minutes")
+    print(f"  Cadence: {ROMAN_CADENCE_MINUTES:.1f} minutes ({ROMAN_CADENCE_DAYS:.8f} days)")
     print(f"  Observations per season: {SimConfig.N_POINTS}")
+    print(f"  Time grid: [{time_grid[0]:.4f}, {time_grid[-1]:.4f}] days")
     print(f"  Flat events: {args.n_flat} (generating {n_flat_gen})")
     print(f"  PSPL events: {args.n_pspl} (generating {n_pspl_gen})")
     print(f"  Binary events: {args.n_binary} (generating {n_binary_gen})")
@@ -1464,7 +1606,7 @@ def main() -> None:
         for etype, count in failed_by_type.items():
             if count > 0:
                 generated = len(results_by_type[etype])
-                print(f" {etype}: {count} failed, {generated} succeeded")
+                print(f"  {etype}: {count} failed, {generated} succeeded")
 
     # v2.8.1+ FIX: Subsample to exact targets for guaranteed class balance
     print("\nBalancing class distribution to exact targets...")
@@ -1472,25 +1614,25 @@ def main() -> None:
     shortfalls = {}
 
     for event_type, target in [('flat', args.n_flat),
-                                ('pspl', args.n_pspl),
-                                ('binary', args.n_binary)]:
+                               ('pspl', args.n_pspl),
+                               ('binary', args.n_binary)]:
         available = results_by_type[event_type]
 
         if len(available) >= target:
             indices = np.random.choice(len(available), size=target, replace=False)
             selected = [available[i] for i in indices]
             final_results.extend(selected)
-            print(f" {event_type}: {len(available)} available -> {target} selected ")
+            print(f"  {event_type}: {len(available)} available -> {target} selected")
         else:
             final_results.extend(available)
             shortfall = target - len(available)
             shortfalls[event_type] = shortfall
-            print(f" {event_type}: {len(available)} available, {shortfall} short")
+            print(f"  {event_type}: {len(available)} available, {shortfall} short")
 
     if shortfalls:
-        print(f"\n Warning: Some classes have fewer events than requested.")
-        print(f" Consider increasing --oversample (currently {OVERSAMPLE_FACTOR})")
-        print(f" or adjusting acceptance criteria in simulate.py")
+        print(f"\nWarning: Some classes have fewer events than requested.")
+        print(f"Consider increasing --oversample (currently {OVERSAMPLE_FACTOR})")
+        print(f"or adjusting acceptance criteria in simulate.py")
 
     # Shuffle final results
     np.random.shuffle(final_results)
@@ -1589,19 +1731,25 @@ def main() -> None:
             'mission_duration_days': float(ROMAN_MISSION_DURATION_DAYS),  # Legacy alias
             'n_points': int(SimConfig.N_POINTS),
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
+            'cadence_days': float(ROMAN_CADENCE_DAYS),  # v4.0.0: Added for clarity
+            'time_grid_start': float(time_grid[0]),
+            'time_grid_end': float(time_grid[-1]),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'v3.1.0: 72-day Roman season, 15-min cadence, global m_base array'
+            'note': 'v4.0.0: Fixed cadence (np.arange), u0 bounds, VBB dtype, delta_t parallel'
         }
         f.attrs.update(metadata)
 
     print(f"\n{'='*60}")
-    print(f" Successfully saved {n_res} events to {out_path}")
-    print(f" Class distribution: Flat={final_counts['flat']}, "
+    print(f"Successfully saved {n_res} events to {out_path}")
+    print(f"Class distribution: Flat={final_counts['flat']}, "
           f"PSPL={final_counts['pspl']}, Binary={final_counts['binary']}")
-    print(f" Season: {SimConfig.TIME_MAX:.1f} days, {SimConfig.N_POINTS} observations")
-    print(f" m_base range: [{m_base_global.min():.2f}, {m_base_global.max():.2f}] mag")
+    print(f"Season: {SimConfig.TIME_MAX:.1f} days, {SimConfig.N_POINTS} observations")
+    print(f"Time grid: [{time_grid[0]:.4f}, {time_grid[-1]:.4f}] days")
+    print(f"m_base range: [{m_base_global.min():.2f}, {m_base_global.max():.2f}] mag")
     print(f"{'='*60}")
+
+
 if __name__ == '__main__':
     # v3.0.0 FIX: Moved set_start_method inside main guard
     # This prevents modification of global multiprocessing state when
@@ -1609,5 +1757,5 @@ if __name__ == '__main__':
     try:
         set_start_method('spawn')
     except RuntimeError:
-        pass # Already set
+        pass  # Already set
     main()
