@@ -6,46 +6,22 @@
 #SBATCH -t 00:30:00
 #SBATCH -o logs/pipeline_%j.out
 #SBATCH -e logs/pipeline_%j.err
-#SBATCH --job-name=ml_pipeline_v4.1
+#SBATCH --job-name=ml_pipeline_v5
 #SBATCH --exclusive
 #SBATCH --signal=B:USR1@120
 #SBATCH --mail-user=kunal29bhatia@gmail.com
 #SBATCH --mail-type=ALL
 
 # =============================================================================
-# OPTIMIZED ML PIPELINE v4.1.0 - CRITICAL FIXES + BROADCAST OPTIMIZATION
+# ML PIPELINE v5.0 - COMPLETE REWRITE WITH WORKING RESUME
 # =============================================================================
-# 
-# v4.1.0 FIXES FROM v3.2.0:
-# -------------------------
-# - Fixed /dev/shm cleanup race condition (barrier before delete)
-# - Fixed stats/indices broadcast (rank0 computes, others receive)
-# - Fixed /dev/shm path collision (was using PID, now uses SLURM_JOB_ID)
-# - Fixed file suffix preservation (.npz/.h5 now preserved)
-# - Fixed model API calls (lengths=keyword, tensor on device)
-# - Fixed torch.load compatibility for older PyTorch versions
-# 
-# WHAT /dev/shm ACTUALLY PROVIDES (corrected from v3.2.0):
-# --------------------------------------------------------
-# - Fast RAM-backed filesystem reads (no disk I/O after copy)
-# - Linux page cache sharing at OS level (reduces disk reads)
-# - Each process still allocates own numpy arrays after load
-# - NOT true shared memory (would need multiprocessing.shared_memory)
-# 
-# RESOURCE ALLOCATION:
-# --------------------
-# - 10 nodes x 4 GPUs = 40 GPUs total
-# - RAM per node: ~14 GB per process (page cache shared, arrays duplicated)
-# - Batch size: 512 per GPU
-# - Accumulation: 2 (effective batch = 1024 per GPU)
-# 
-# EXPECTED PERFORMANCE:
-# --------------------
-# - Data loading: ~3-4 min (fast RAM reads from /dev/shm)
-# - Throughput: 4x faster than single-GPU baseline
-# - ~8-12 epochs per 30-min job
-# - ~25-30 jobs to 300 epochs
-# 
+#
+# FIXES:
+# - Proper resume logic using .exp_baseline and .exp_distinct tracking files
+# - Experiment directories named with preset: baseline_model, distinct_model
+# - Correct batch size (64 not 512)
+# - max_seq_len not hardcoded (uses data length)
+#
 # =============================================================================
 
 set -e
@@ -68,12 +44,11 @@ OUTPUT_BASE="../results/checkpoints"
 mkdir -p logs "${OUTPUT_BASE}"
 
 PROGRESS_FILE="${OUTPUT_BASE}/.pipeline_progress"
-CONTINUATION_JOB_FILE="${OUTPUT_BASE}/.continuation_job_id"
 
-# Training hyperparameters (OPTIMIZED for 40 GPUs)
-BATCH_SIZE=64                # Per-GPU batch
+# Training hyperparameters
+BATCH_SIZE=64                # Per-GPU batch (NOT 512!)
 NUM_WORKERS=0                # Pure RAM loading via /dev/shm
-ACCUMULATION_STEPS=2         # Effective batch = 1024 per GPU
+ACCUMULATION_STEPS=2         # Effective batch = 128 per GPU
 MAX_EPOCHS=300
 
 # Model architecture
@@ -96,11 +71,6 @@ STAGE2_TEMPERATURE=1.0
 
 USE_CLASS_WEIGHTS="false"
 
-# Evaluation settings
-EVAL_BATCH_SIZE=64
-N_EVOLUTION_SAMPLES=10
-SAVE_FORMATS="png"
-
 # =============================================================================
 # ENVIRONMENT
 # =============================================================================
@@ -120,7 +90,6 @@ export NCCL_DEBUG=WARN
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=3
 
-# v4.1.0: Export LOCAL_WORLD_SIZE for accurate node_id calculation
 export LOCAL_WORLD_SIZE=4
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
@@ -146,7 +115,7 @@ import torch
 try:
     ckpt = torch.load('${checkpoint_path}', map_location='cpu', weights_only=False)
     print(ckpt.get('epoch', 0))
-except Exception:
+except Exception as e:
     print(0)
 " 2>/dev/null || echo "0"
     else
@@ -169,97 +138,111 @@ is_stage_complete() {
 }
 
 # =============================================================================
-# v4.1.0 TRAINING FUNCTION WITH CRITICAL FIXES
+# TRAINING FUNCTION v5.0 - FIXED RESUME LOGIC
 # =============================================================================
 
 train_model() {
     local train_data="$1"
     local preset_name="$2"
     
-    log_info "Starting training: ${preset_name} (v4.1.0 - cleanup race fix + broadcast optimization)"
+    log_info "========================================"
+    log_info "Training: ${preset_name}"
+    log_info "========================================"
     
     # =========================================================================
-    # SMART DATA CACHING (same as before)
+    # DATA CACHING TO /tmp
     # =========================================================================
     
     local local_train="/tmp/train_${preset_name}_${USER}.h5"
     
     if [ -f "${local_train}" ]; then
-        log_info "Found cached data in /tmp, verifying..."
-        
-        local source_size=$(stat -c%s "${train_data}" 2>/dev/null || stat -f%z "${train_data}" 2>/dev/null || echo "0")
-        local cached_size=$(stat -c%s "${local_train}" 2>/dev/null || stat -f%z "${local_train}" 2>/dev/null || echo "0")
+        log_info "Found cached data in /tmp"
+        local source_size=$(stat -c%s "${train_data}" 2>/dev/null || echo "0")
+        local cached_size=$(stat -c%s "${local_train}" 2>/dev/null || echo "0")
         
         if [ "$source_size" = "$cached_size" ] && [ "$source_size" != "0" ]; then
-            log_info "Cache valid (${cached_size} bytes), skipping copy! [SAVED ~3 min]"
+            log_info "Cache valid, skipping copy"
         else
-            log_info "Cache size mismatch, re-copying..."
+            log_info "Cache invalid, re-copying..."
             srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 cp -f "${train_data}" "${local_train}"
         fi
     else
-        log_info "No cache found, copying training data to /tmp..."
+        log_info "Copying training data to /tmp..."
         srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 cp -f "${train_data}" "${local_train}"
     fi
     
-    # Check for existing experiment
+    # =========================================================================
+    # RESUME LOGIC - CHECK .exp_${preset_name} FILE
+    # =========================================================================
+    
     local resume_flag=""
     local current_epoch=0
+    local exp_file="${OUTPUT_BASE}/.exp_${preset_name}"
+    local exp_dir="${OUTPUT_BASE}/${preset_name}_model"
     
-    for dir in "${OUTPUT_BASE}"/*${preset_name}*; do
-        if [ -d "$dir" ]; then
-            local latest_ckpt="${dir}/checkpoints/checkpoint_latest.pt"
-            if [ -f "${latest_ckpt}" ]; then
-                current_epoch=$(get_checkpoint_epoch "${latest_ckpt}")
-                if [ ${current_epoch} -ge ${MAX_EPOCHS} ]; then
-                    log_info "Training already complete at epoch ${current_epoch}"
-                    local exp_name=$(basename "$dir")
-                    echo "${exp_name}" > "${OUTPUT_BASE}/.exp_${preset_name}"
-                    return 0
-                else
-                    log_info "Resuming from epoch ${current_epoch}"
-                    resume_flag="--resume ${latest_ckpt}"
-                    local exp_name=$(basename "$dir")
-                    echo "${exp_name}" > "${OUTPUT_BASE}/.exp_${preset_name}"
-                    break
-                fi
-            fi
+    # Check if we have a tracked experiment
+    if [ -f "${exp_file}" ]; then
+        local tracked_dir=$(cat "${exp_file}")
+        exp_dir="${OUTPUT_BASE}/${tracked_dir}"
+        log_info "Found tracked experiment: ${tracked_dir}"
+    fi
+    
+    # Check for checkpoint in experiment directory
+    local latest_ckpt="${exp_dir}/checkpoints/checkpoint_latest.pt"
+    
+    if [ -f "${latest_ckpt}" ]; then
+        current_epoch=$(get_checkpoint_epoch "${latest_ckpt}")
+        log_info "Found checkpoint at epoch ${current_epoch}"
+        
+        if [ ${current_epoch} -ge ${MAX_EPOCHS} ]; then
+            log_info "Training already complete (${current_epoch} >= ${MAX_EPOCHS})"
+            echo "$(basename ${exp_dir})" > "${exp_file}"
+            return 0
+        else
+            log_info "RESUMING from epoch ${current_epoch}"
+            resume_flag="--resume ${latest_ckpt}"
         fi
-    done
+    else
+        log_info "No checkpoint found, starting fresh"
+    fi
     
-    # Build class weights flag
+    # =========================================================================
+    # BUILD COMMAND FLAGS
+    # =========================================================================
+    
     local class_weights_flag=""
     if [ "${USE_CLASS_WEIGHTS}" = "false" ]; then
         class_weights_flag="--no-class-weights"
     fi
     
     # =========================================================================
-    # LAUNCH TRAINING with v4.1.0
-    # CRITICAL: --nproc-per-node=4 (4 GPUs per node)
-    # train.py v4.1.0 includes:
-    #   - Cleanup race fix (barrier before /dev/shm delete)
-    #   - Broadcast optimization (rank0 computes stats, broadcasts to others)
-    #   - Accurate /dev/shm documentation
+    # LAUNCH DISTRIBUTED TRAINING
     # =========================================================================
     
-    log_info "Launching training with train.py v4.1.0..."
-    log_info "  40 GPUs total (10 nodes x 4 GPUs)"
-    log_info "  /dev/shm benefit: Fast RAM reads, page cache shared at OS level"
-    log_info "  v4.1.0 fixes: cleanup race, broadcast optimization, accurate docs"
+    log_info "Launching training..."
+    log_info "  GPUs: $((SLURM_NNODES * 4))"
+    log_info "  Batch size: ${BATCH_SIZE}"
+    log_info "  Resume flag: ${resume_flag:-'(none)'}"
+    log_info "  Output: ${exp_dir}"
     
-    srun torchrun \
+    srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 \
+        torchrun \
         --nnodes=$SLURM_NNODES \
-        --nproc-per-node=4 \
-        --rdzv-backend=c10d \
-        --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-        --rdzv-id="train-${preset_name}-$SLURM_JOB_ID" \
+        --nproc_per_node=4 \
+        --rdzv_id="train-${preset_name}-${SLURM_JOB_ID}" \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
         train.py \
         --data "${local_train}" \
-        --output "${OUTPUT_BASE}" \
+        --output "${exp_dir}" \
         --batch-size ${BATCH_SIZE} \
         --num-workers ${NUM_WORKERS} \
         --accumulation-steps ${ACCUMULATION_STEPS} \
         --epochs ${MAX_EPOCHS} \
         --lr ${LEARNING_RATE} \
+        --weight-decay ${WEIGHT_DECAY} \
+        --warmup-epochs ${WARMUP_EPOCHS} \
+        --clip-norm ${CLIP_NORM} \
         --d-model ${D_MODEL} \
         --n-layers ${N_LAYERS} \
         --dropout ${DROPOUT} \
@@ -277,36 +260,29 @@ train_model() {
     
     local exit_code=$?
     
+    # Save experiment name for tracking
+    echo "$(basename ${exp_dir})" > "${exp_file}"
+    log_info "Saved experiment name to ${exp_file}"
+    
     if [ $exit_code -eq 0 ]; then
-        local exp_name=""
-        if [ -f "${OUTPUT_BASE}/.current_experiment" ]; then
-            exp_name=$(cat "${OUTPUT_BASE}/.current_experiment")
-        fi
+        # Check if training is complete
+        local final_epoch=$(get_checkpoint_epoch "${exp_dir}/checkpoints/checkpoint_latest.pt")
         
-        if [ -n "${exp_name}" ]; then
-            local final_ckpt="${OUTPUT_BASE}/${exp_name}/checkpoints/checkpoint_latest.pt"
-            local final_epoch=$(get_checkpoint_epoch "${final_ckpt}")
-            
-            if [ ${final_epoch} -ge ${MAX_EPOCHS} ]; then
-                log_info "Training complete: ${exp_name} (${final_epoch} epochs)"
-                echo "${exp_name}" > "${OUTPUT_BASE}/.exp_${preset_name}"
-                return 0
-            else
-                log_info "Training in progress: ${final_epoch}/${MAX_EPOCHS} epochs"
-                return 1
-            fi
+        if [ ${final_epoch} -ge ${MAX_EPOCHS} ]; then
+            log_info "Training COMPLETE: ${preset_name} (${final_epoch} epochs)"
+            return 0
         else
-            log_error "Could not find experiment name"
+            log_info "Training incomplete: ${final_epoch}/${MAX_EPOCHS} epochs"
             return 1
         fi
     else
         log_error "Training failed with exit code ${exit_code}"
-        return ${exit_code}
+        return 1
     fi
 }
 
 # =============================================================================
-# SUBMIT EVALUATION JOBS (same as before)
+# EVALUATION SUBMISSION
 # =============================================================================
 
 submit_evaluations() {
@@ -315,6 +291,7 @@ submit_evaluations() {
     
     log_info "Submitting evaluation jobs..."
     
+    # Create evaluation script
     cat > "${OUTPUT_BASE}/eval_job.sh" << 'EVALSCRIPT'
 #!/bin/bash
 #SBATCH -p gpu_a100_short
@@ -332,137 +309,97 @@ EXPERIMENT_NAME="$1"
 TEST_DATA="$2"
 EVAL_NAME="$3"
 
+echo "=========================================="
 echo "Evaluation: ${EVAL_NAME}"
 echo "Experiment: ${EXPERIMENT_NAME}"
 echo "Test data: ${TEST_DATA}"
+echo "=========================================="
 
-EVAL_DIR="../results/checkpoints/${EXPERIMENT_NAME}/eval_$(basename ${TEST_DATA} .h5)_"
-EXISTING=$(ls -d ${EVAL_DIR}* 2>/dev/null | head -1)
-
-if [ -n "${EXISTING}" ] && [ -f "${EXISTING}/evaluation_summary.json" ]; then
-    echo "Already complete: ${EXISTING}"
+# Check if already done
+EVAL_DIR="../results/checkpoints/${EXPERIMENT_NAME}/eval_$(basename ${TEST_DATA} .h5)"
+if [ -d "${EVAL_DIR}" ] && [ -f "${EVAL_DIR}/evaluation_summary.json" ]; then
+    echo "Already complete: ${EVAL_DIR}"
     exit 0
 fi
 
 timeout 28m python evaluate.py \
     --experiment-name "${EXPERIMENT_NAME}" \
     --data "${TEST_DATA}" \
-    --batch-size 1024 \
+    --batch-size 512 \
     --n-evolution-per-type 10 \
     --save-formats png \
     --colorblind-safe \
     --device cuda
 
-EXIT_CODE=$?
-
-if [ ${EXIT_CODE} -eq 0 ]; then
-    echo "Evaluation complete: ${EVAL_NAME}"
-elif [ ${EXIT_CODE} -eq 124 ]; then
-    echo "TIMEOUT"
-    exit 1
-else
-    echo "Failed with exit code ${EXIT_CODE}"
-    exit ${EXIT_CODE}
-fi
+echo "Evaluation complete: ${EVAL_NAME}"
 EVALSCRIPT
 
     chmod +x "${OUTPUT_BASE}/eval_job.sh"
     
-    local eval_jobs=()
-    
+    # Submit 4 evaluation jobs
     JOB1=$(sbatch --parsable --job-name=eval_b2b --output=logs/eval_b2b_%j.out --error=logs/eval_b2b_%j.err \
         "${OUTPUT_BASE}/eval_job.sh" "${baseline_exp}" "${BASELINE_TEST}" "baseline_on_baseline")
-    eval_jobs+=("${JOB1}")
-    log_info "Submitted eval 1/4: ${JOB1}"
+    log_info "Submitted eval 1/4: baseline->baseline (${JOB1})"
     
     JOB2=$(sbatch --parsable --job-name=eval_b2d --output=logs/eval_b2d_%j.out --error=logs/eval_b2d_%j.err \
         "${OUTPUT_BASE}/eval_job.sh" "${baseline_exp}" "${DISTINCT_TEST}" "baseline_on_distinct")
-    eval_jobs+=("${JOB2}")
-    log_info "Submitted eval 2/4: ${JOB2}"
+    log_info "Submitted eval 2/4: baseline->distinct (${JOB2})"
     
     JOB3=$(sbatch --parsable --job-name=eval_d2d --output=logs/eval_d2d_%j.out --error=logs/eval_d2d_%j.err \
         "${OUTPUT_BASE}/eval_job.sh" "${distinct_exp}" "${DISTINCT_TEST}" "distinct_on_distinct")
-    eval_jobs+=("${JOB3}")
-    log_info "Submitted eval 3/4: ${JOB3}"
+    log_info "Submitted eval 3/4: distinct->distinct (${JOB3})"
     
     JOB4=$(sbatch --parsable --job-name=eval_d2b --output=logs/eval_d2b_%j.out --error=logs/eval_d2b_%j.err \
         "${OUTPUT_BASE}/eval_job.sh" "${distinct_exp}" "${BASELINE_TEST}" "distinct_on_baseline")
-    eval_jobs+=("${JOB4}")
-    log_info "Submitted eval 4/4: ${JOB4}"
+    log_info "Submitted eval 4/4: distinct->baseline (${JOB4})"
     
-    local dependency=""
-    for job in "${eval_jobs[@]}"; do
-        if [ -z "${dependency}" ]; then
-            dependency="afterok:${job}"
-        else
-            dependency="${dependency}:${job}"
-        fi
-    done
-    
-    sbatch --dependency=${dependency} --job-name=gen_summary \
+    # Submit summary job after all evals complete
+    sbatch --dependency=afterok:${JOB1}:${JOB2}:${JOB3}:${JOB4} \
+        --job-name=summary \
         --output=logs/summary_%j.out --error=logs/summary_%j.err \
-        --time=00:05:00 --nodes=1 --ntasks=1 \
-        --wrap="cd ~/Thesis/code && bash -c '$(cat << 'SUMSCRIPT'
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate microlens
-
-echo "Generating final summary..."
-python3 << 'PYEOF'
+        --time=00:10:00 -p gpu_a100_short --nodes=1 --ntasks=1 \
+        --wrap="cd ~/Thesis/code && python3 << 'PYEOF'
 import json
 from pathlib import Path
 
-output_base = Path("../results/checkpoints")
-baseline_exp = (output_base / ".exp_baseline").read_text().strip()
-distinct_exp = (output_base / ".exp_distinct").read_text().strip()
+output_base = Path('../results/checkpoints')
+baseline_exp = (output_base / '.exp_baseline').read_text().strip()
+distinct_exp = (output_base / '.exp_distinct').read_text().strip()
 
 evaluations = [
-    (baseline_exp, "baseline_test", "Baseline -> Baseline"),
-    (baseline_exp, "distinct_test", "Baseline -> Distinct"),
-    (distinct_exp, "distinct_test", "Distinct -> Distinct"),
-    (distinct_exp, "baseline_test", "Distinct -> Baseline"),
+    (baseline_exp, 'baseline_test', 'Baseline -> Baseline'),
+    (baseline_exp, 'distinct_test', 'Baseline -> Distinct'),
+    (distinct_exp, 'distinct_test', 'Distinct -> Distinct'),
+    (distinct_exp, 'baseline_test', 'Distinct -> Baseline'),
 ]
 
-print("\n" + "="*80)
-print("PIPELINE COMPLETE - FINAL RESULTS (v4.1.0)")
-print("="*80)
+print()
+print('='*80)
+print('PIPELINE COMPLETE - FINAL RESULTS')
+print('='*80)
 
 for exp, test_set, description in evaluations:
-    pattern = f"eval_{test_set}_*"
-    eval_dirs = list((output_base / exp).glob(pattern))
-    
-    if not eval_dirs:
-        print(f"\n[X] {description}: NOT FOUND")
-        continue
-    
-    eval_dir = sorted(eval_dirs)[-1]
-    summary_file = eval_dir / "evaluation_summary.json"
+    eval_dir = output_base / exp / f'eval_{test_set}'
+    summary_file = eval_dir / 'evaluation_summary.json'
     
     if not summary_file.exists():
-        print(f"\n[X] {description}: INCOMPLETE")
+        print(f'[X] {description}: NOT FOUND')
         continue
     
     with open(summary_file) as f:
         data = json.load(f)
     
-    metrics = data.get("overall_metrics", data.get("metrics", {}))
+    metrics = data.get('overall_metrics', data.get('metrics', {}))
     
-    print(f"\n[OK] {description}")
-    print(f"  Accuracy: {metrics.get('accuracy', 0)*100:.2f}%")
-    print(f"  Recall - Flat: {metrics.get('recall_Flat', 0)*100:.1f}%")
-    print(f"  Recall - PSPL: {metrics.get('recall_PSPL', 0)*100:.1f}%")
-    print(f"  Recall - Binary: {metrics.get('recall_Binary', 0)*100:.1f}%")
-    print(f"  Location: {eval_dir}")
+    print(f'[OK] {description}')
+    print(f'     Accuracy: {metrics.get(\"accuracy\", 0)*100:.2f}%')
+    print(f'     Flat: {metrics.get(\"recall_Flat\", 0)*100:.1f}%  PSPL: {metrics.get(\"recall_PSPL\", 0)*100:.1f}%  Binary: {metrics.get(\"recall_Binary\", 0)*100:.1f}%')
+    print()
 
-print("\n" + "="*80)
-print("v4.1.0: Critical fixes applied (cleanup race, broadcast optimization)")
-print("="*80)
-PYEOF
-
-echo "Summary generation complete!"
-SUMSCRIPT
-)'"
+print('='*80)
+PYEOF"
     
-    log_info "Summary generator will run after evaluations complete"
+    log_info "Summary job submitted (will run after evaluations)"
 }
 
 # =============================================================================
@@ -472,56 +409,46 @@ SUMSCRIPT
 setup_continuation() {
     log_info "Setting up auto-continuation..."
     
-    SCRIPT_PATH="$0"
     CONT_JOB=$(sbatch --parsable \
         --dependency=afterany:${SLURM_JOB_ID} \
         --kill-on-invalid-dep=yes \
-        "${SCRIPT_PATH}")
+        "$0")
     
     if [ -n "${CONT_JOB}" ]; then
-        echo "${CONT_JOB}" > "${CONTINUATION_JOB_FILE}"
-        log_info "Continuation job submitted: ${CONT_JOB}"
-    else
-        log_error "Failed to submit continuation job"
+        echo "${CONT_JOB}" > "${OUTPUT_BASE}/.continuation_job_id"
+        log_info "Continuation job: ${CONT_JOB}"
     fi
 }
 
-handle_timeout() {
-    log_info "TIMEOUT WARNING: Job will be killed soon"
+cancel_continuation() {
+    if [ -f "${OUTPUT_BASE}/.continuation_job_id" ]; then
+        local cont_job=$(cat "${OUTPUT_BASE}/.continuation_job_id")
+        scancel ${cont_job} 2>/dev/null || true
+        rm -f "${OUTPUT_BASE}/.continuation_job_id"
+        log_info "Cancelled continuation job: ${cont_job}"
+    fi
 }
 
-trap 'handle_timeout' USR1
-
 # =============================================================================
-# MAIN PIPELINE LOGIC
+# MAIN PIPELINE
 # =============================================================================
 
-log_info "================================================================================"
-log_info "OPTIMIZED ML PIPELINE v4.1.0 - CRITICAL FIXES APPLIED"
-log_info "================================================================================"
+log_info "========================================"
+log_info "ML PIPELINE v5.0"
+log_info "========================================"
 log_info "Job ID: ${SLURM_JOB_ID}"
-log_info "Configuration:"
-log_info "  Nodes: ${SLURM_NNODES}"
-log_info "  GPUs per node: 4"
-log_info "  Total GPUs: $((SLURM_NNODES * 4))"
-log_info "  Batch size per GPU: ${BATCH_SIZE}"
-log_info "  Accumulation steps: ${ACCUMULATION_STEPS}"
-log_info "  Effective batch per GPU: $((BATCH_SIZE * ACCUMULATION_STEPS))"
-log_info "v4.1.0 fixes:"
-log_info "  - Cleanup race condition (barrier before /dev/shm delete)"
-log_info "  - Broadcast optimization (rank0 computes stats, broadcasts)"
-log_info "  - Deterministic /dev/shm path (uses SLURM_JOB_ID, not PID)"
-log_info "  - Model API compatibility (lengths=keyword, tensor on device)"
-log_info "================================================================================"
+log_info "Nodes: ${SLURM_NNODES}, GPUs: $((SLURM_NNODES * 4))"
+log_info "Batch: ${BATCH_SIZE}, Epochs: ${MAX_EPOCHS}"
+log_info "========================================"
 
+# Determine current phase
 PHASE="unknown"
-
 if ! is_stage_complete "train_baseline"; then
     PHASE="train_baseline"
 elif ! is_stage_complete "train_distinct"; then
     PHASE="train_distinct"
-elif ! is_stage_complete "evaluations_submitted"; then
-    PHASE="submit_evals"
+elif ! is_stage_complete "evaluations"; then
+    PHASE="evaluations"
 else
     PHASE="complete"
 fi
@@ -529,87 +456,71 @@ fi
 log_info "Current phase: ${PHASE}"
 
 # =============================================================================
-# PHASE 1: TRAIN BASELINE
+# PHASE 1: BASELINE TRAINING
 # =============================================================================
 
 if [ "${PHASE}" = "train_baseline" ]; then
-    log_info "================================================================================"
-    log_info "PHASE 1: Training BASELINE model (v4.1.0)"
-    log_info "================================================================================"
+    log_info "========================================"
+    log_info "PHASE 1: BASELINE TRAINING"
+    log_info "========================================"
     
     setup_continuation
     
     if train_model "${BASELINE_TRAIN}" "baseline"; then
         mark_stage_complete "train_baseline"
-        BASELINE_EXP=$(cat "${OUTPUT_BASE}/.exp_baseline")
-        log_info "Baseline training complete: ${BASELINE_EXP}"
+        cancel_continuation
         
-        if [ -f "${CONTINUATION_JOB_FILE}" ]; then
-            scancel $(cat "${CONTINUATION_JOB_FILE}") 2>/dev/null || true
-            rm "${CONTINUATION_JOB_FILE}"
-        fi
-        
-        log_info "Re-submitting for distinct training..."
+        log_info "Baseline complete, submitting for distinct..."
         sbatch "$0"
         exit 0
     else
-        log_info "Baseline training incomplete, continuation will resume"
+        log_info "Baseline incomplete, continuation will resume"
         exit 0
     fi
 fi
 
 # =============================================================================
-# PHASE 2: TRAIN DISTINCT
+# PHASE 2: DISTINCT TRAINING
 # =============================================================================
 
 if [ "${PHASE}" = "train_distinct" ]; then
-    log_info "================================================================================"
-    log_info "PHASE 2: Training DISTINCT model (v4.1.0)"
-    log_info "================================================================================"
+    log_info "========================================"
+    log_info "PHASE 2: DISTINCT TRAINING"
+    log_info "========================================"
     
     setup_continuation
     
     if train_model "${DISTINCT_TRAIN}" "distinct"; then
         mark_stage_complete "train_distinct"
-        DISTINCT_EXP=$(cat "${OUTPUT_BASE}/.exp_distinct")
-        log_info "Distinct training complete: ${DISTINCT_EXP}"
-        
-        if [ -f "${CONTINUATION_JOB_FILE}" ]; then
-            scancel $(cat "${CONTINUATION_JOB_FILE}") 2>/dev/null || true
-            rm "${CONTINUATION_JOB_FILE}"
-        fi
-        
-        PHASE="submit_evals"
+        cancel_continuation
+        PHASE="evaluations"
     else
-        log_info "Distinct training incomplete, continuation will resume"
+        log_info "Distinct incomplete, continuation will resume"
         exit 0
     fi
 fi
 
 # =============================================================================
-# PHASE 3: SUBMIT EVALUATIONS
+# PHASE 3: EVALUATIONS
 # =============================================================================
 
-if [ "${PHASE}" = "submit_evals" ]; then
-    log_info "================================================================================"
-    log_info "PHASE 3: Submitting evaluation jobs"
-    log_info "================================================================================"
+if [ "${PHASE}" = "evaluations" ]; then
+    log_info "========================================"
+    log_info "PHASE 3: EVALUATIONS"
+    log_info "========================================"
     
     BASELINE_EXP=$(cat "${OUTPUT_BASE}/.exp_baseline")
     DISTINCT_EXP=$(cat "${OUTPUT_BASE}/.exp_distinct")
     
-    log_info "Baseline experiment: ${BASELINE_EXP}"
-    log_info "Distinct experiment: ${DISTINCT_EXP}"
+    log_info "Baseline: ${BASELINE_EXP}"
+    log_info "Distinct: ${DISTINCT_EXP}"
     
     submit_evaluations "${BASELINE_EXP}" "${DISTINCT_EXP}"
+    mark_stage_complete "evaluations"
     
-    mark_stage_complete "evaluations_submitted"
-    
-    log_info "================================================================================"
-    log_info "TRAINING COMPLETE - EVALUATIONS SUBMITTED"
-    log_info "================================================================================"
-    log_info "Monitor with: squeue -u \$USER"
-    log_info "================================================================================"
+    log_info "========================================"
+    log_info "PIPELINE SUBMITTED - MONITOR WITH: squeue -u \$USER"
+    log_info "========================================"
     exit 0
 fi
 
@@ -618,13 +529,11 @@ fi
 # =============================================================================
 
 if [ "${PHASE}" = "complete" ]; then
-    log_info "================================================================================"
+    log_info "========================================"
     log_info "PIPELINE ALREADY COMPLETE"
-    log_info "================================================================================"
-    log_info "All training and evaluations finished"
-    log_info "Check results in: ${OUTPUT_BASE}"
-    log_info "================================================================================"
+    log_info "========================================"
     exit 0
 fi
 
 exit 0
+
