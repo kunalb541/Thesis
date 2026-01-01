@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 10
-#SBATCH --ntasks-per-node=4
+#SBATCH -N 8
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 00:30:00
 #SBATCH -o logs/pipeline_%j.out

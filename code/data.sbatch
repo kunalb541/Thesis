@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p cpu_il
+#SBATCH -p cpu
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
