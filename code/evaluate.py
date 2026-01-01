@@ -1885,92 +1885,92 @@ class RomanEvaluator:
 
         self.logger.info("Generated: u0_dependency")
 
-   def plot_temporal_bias_check(self) -> None:
-    """Check for temporal selection bias using Kolmogorov-Smirnov test (correctly aligned)."""
-    if self.params is None:
-        self.logger.info("Skipping temporal bias check (parameters not available)")
-        return
+    def plot_temporal_bias_check(self) -> None:
+        """Check for temporal selection bias using Kolmogorov-Smirnov test (correctly aligned)."""
+        if self.params is None:
+            self.logger.info("Skipping temporal bias check (parameters not available)")
+            return
 
-    correct = (self.preds == self.y)
+        correct = (self.preds == self.y)
 
-    t0_correct_list: List[np.ndarray] = []
-    t0_incorrect_list: List[np.ndarray] = []
+        t0_correct_list: List[np.ndarray] = []
+        t0_incorrect_list: List[np.ndarray] = []
 
-    # Each params[class_key] array is extracted in the same order as samples of that class
-    for class_idx, class_key in enumerate(['flat', 'pspl', 'binary']):
-        if class_key not in self.params:
-            continue
+        # Each params[class_key] array is extracted in the same order as samples of that class
+        for class_idx, class_key in enumerate(['flat', 'pspl', 'binary']):
+            if class_key not in self.params:
+                continue
 
-        p = self.params[class_key]
-        if (not hasattr(p, "dtype")) or (p.dtype.names is None) or ('t0' not in p.dtype.names):
-            self.logger.warning(f"No t0 field found in parameters for class '{class_key}'")
-            continue
+            p = self.params[class_key]
+            if (not hasattr(p, "dtype")) or (p.dtype.names is None) or ('t0' not in p.dtype.names):
+                self.logger.warning(f"No t0 field found in parameters for class '{class_key}'")
+                continue
 
-        # Correctness mask for samples of this class, in dataset sample order
-        class_correct = correct[self.y == class_idx]
+            # Correctness mask for samples of this class, in dataset sample order
+            class_correct = correct[self.y == class_idx]
 
-        # Guard against rare mismatch if extraction dropped invalid indices
-        n = min(len(p), len(class_correct))
-        if n == 0:
-            continue
+            # Guard against rare mismatch if extraction dropped invalid indices
+            n = min(len(p), len(class_correct))
+            if n == 0:
+                continue
 
-        t0 = np.asarray(p['t0'][:n])
-        cc = np.asarray(class_correct[:n], dtype=bool)
+            t0 = np.asarray(p['t0'][:n])
+            cc = np.asarray(class_correct[:n], dtype=bool)
 
-        t0_correct_list.append(t0[cc])
-        t0_incorrect_list.append(t0[~cc])
+            t0_correct_list.append(t0[cc])
+            t0_incorrect_list.append(t0[~cc])
 
-    if not t0_correct_list or not t0_incorrect_list:
-        self.logger.warning("Insufficient t0 data for temporal bias check")
-        return
+        if not t0_correct_list or not t0_incorrect_list:
+            self.logger.warning("Insufficient t0 data for temporal bias check")
+            return
 
-    t0_correct = np.concatenate(t0_correct_list) if t0_correct_list else np.array([])
-    t0_incorrect = np.concatenate(t0_incorrect_list) if t0_incorrect_list else np.array([])
+        t0_correct = np.concatenate(t0_correct_list) if t0_correct_list else np.array([])
+        t0_incorrect = np.concatenate(t0_incorrect_list) if t0_incorrect_list else np.array([])
 
-    if (len(t0_correct) == 0) or (len(t0_incorrect) == 0):
-        self.logger.warning("Insufficient data for temporal bias check (empty correct/incorrect set)")
-        return
+        if (len(t0_correct) == 0) or (len(t0_incorrect) == 0):
+            self.logger.warning("Insufficient data for temporal bias check (empty correct/incorrect set)")
+            return
 
-    ks_stat, p_value = ks_2samp(t0_correct, t0_incorrect)
+        ks_stat, p_value = ks_2samp(t0_correct, t0_incorrect)
 
-    fig, ax = plt.subplots(figsize=FIG_TEMPORAL_BIAS)
+        fig, ax = plt.subplots(figsize=FIG_TEMPORAL_BIAS)
 
-    ax.hist(
-        t0_correct, bins=DEFAULT_HIST_BINS, alpha=0.7,
-        color='green', label=f'Correct (n={len(t0_correct):,})',
-        density=True, edgecolor='black'
-    )
-    ax.hist(
-        t0_incorrect, bins=DEFAULT_HIST_BINS, alpha=0.7,
-        color='red', label=f'Incorrect (n={len(t0_incorrect):,})',
-        density=True, edgecolor='black'
-    )
-
-    ax.set_xlabel(r'Peak Time $t_0$ (days)', fontweight='bold', fontsize=FONT_SIZE_LABEL)
-    ax.set_ylabel('Normalized Density', fontweight='bold', fontsize=FONT_SIZE_LABEL)
-    ax.set_title('Temporal Bias Check', fontweight='bold', fontsize=FONT_SIZE_TITLE)
-    ax.tick_params(labelsize=FONT_SIZE_TICK)
-
-    result = "BIAS DETECTED" if p_value < 0.05 else "NO BIAS"
-    result_color = 'red' if p_value < 0.05 else 'green'
-    ax.text(
-        0.02, 0.98,
-        f'KS statistic: D={ks_stat:.3f}\np-value: {p_value:.3f}\nResult: {result}',
-        transform=ax.transAxes, fontsize=FONT_SIZE_LEGEND,
-        verticalalignment='top', horizontalalignment='left',
-        bbox=dict(
-            boxstyle='round,pad=0.4', facecolor='wheat',
-            alpha=0.9, edgecolor=result_color, linewidth=2
+        ax.hist(
+            t0_correct, bins=DEFAULT_HIST_BINS, alpha=0.7,
+            color='green', label=f'Correct (n={len(t0_correct):,})',
+            density=True, edgecolor='black'
         )
-    )
+        ax.hist(
+            t0_incorrect, bins=DEFAULT_HIST_BINS, alpha=0.7,
+            color='red', label=f'Incorrect (n={len(t0_incorrect):,})',
+            density=True, edgecolor='black'
+        )
 
-    ax.legend(fontsize=FONT_SIZE_LEGEND, loc='upper right')
+        ax.set_xlabel(r'Peak Time $t_0$ (days)', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_ylabel('Normalized Density', fontweight='bold', fontsize=FONT_SIZE_LABEL)
+        ax.set_title('Temporal Bias Check', fontweight='bold', fontsize=FONT_SIZE_TITLE)
+        ax.tick_params(labelsize=FONT_SIZE_TICK)
 
-    plt.tight_layout()
-    self._save_figure(fig, 'temporal_bias_check')
-    plt.close()
+        result = "BIAS DETECTED" if p_value < 0.05 else "NO BIAS"
+        result_color = 'red' if p_value < 0.05 else 'green'
+        ax.text(
+            0.02, 0.98,
+            f'KS statistic: D={ks_stat:.3f}\np-value: {p_value:.3f}\nResult: {result}',
+            transform=ax.transAxes, fontsize=FONT_SIZE_LEGEND,
+            verticalalignment='top', horizontalalignment='left',
+            bbox=dict(
+                boxstyle='round,pad=0.4', facecolor='wheat',
+                alpha=0.9, edgecolor=result_color, linewidth=2
+            )
+        )
 
-    self.logger.info(f"Generated: temporal_bias_check (KS p={p_value:.4f})")
+        ax.legend(fontsize=FONT_SIZE_LEGEND, loc='upper right')
+
+        plt.tight_layout()
+        self._save_figure(fig, 'temporal_bias_check')
+        plt.close()
+
+        self.logger.info(f"Generated: temporal_bias_check (KS p={p_value:.4f})")
       
    
 
