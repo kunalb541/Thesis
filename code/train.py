@@ -15,11 +15,6 @@ MULTI-GPU OPTIMIZATION v4.1.0 - CLEANUP RACE FIX + BROADCAST OPTIMIZATION
 - Each process still allocates its own numpy arrays after load
 - NOT true shared memory across processes (would need multiprocessing.shared_memory)
 
-**Architecture:**
-10 nodes x 4 GPUs = 40 GPUs total
-RAM per node: ~14 GB per process (page cache shared, arrays duplicated)
-Throughput: 4x faster than v3.1.0 due to RAM-backed reads
-
 All v4.0.0, v3.2.0, v3.1.0 and v3.0.0 fixes preserved:
 - Deterministic /dev/shm path (no PID, uses SLURM_JOB_ID)
 - Preserves source file suffix (.npz/.h5)
@@ -77,6 +72,7 @@ __version__: str = "4.1.0"
 __all__ = [
     "SharedRAMLensingDataset",
     "load_data_to_shared_memory",
+    "load_and_split_data",
     "WarmupCosineScheduler",
     "compute_class_weights",
     "compute_hierarchical_loss",
@@ -622,8 +618,6 @@ def compute_robust_statistics(
     }
 
 
-
-
 def load_and_split_data(
     file_path: str,
     val_fraction: float,
@@ -745,100 +739,6 @@ def load_and_split_data(
     return train_idx, val_idx, train_labels, stats
 
 
-
-def load_and_split_data(
-    file_path: str,
-    val_fraction: float,
-    seed: int,
-    rank: int,
-    is_ddp: bool
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
-    """
-    Load data, compute statistics, and split into train/val.
-    
-    v4.1.0: Rank 0 computes everything and broadcasts to avoid redundant file reads.
-    """
-    if is_ddp:
-        if rank == 0:
-            file_path_obj = Path(file_path)
-            
-            if file_path_obj.suffix == '.npz':
-                data = np.load(str(file_path_obj))
-                total_samples = len(data.get('labels', data['y']))
-                all_labels = data.get('labels', data['y'])
-            else:
-                with h5py.File(str(file_path_obj), 'r') as f:
-                    total_samples = len(f['labels'])
-                    all_labels = f['labels'][:]
-            
-            stats = compute_robust_statistics(file_path, rank)
-            
-            indices = np.arange(total_samples)
-            train_idx, val_idx = train_test_split(
-                indices,
-                test_size=val_fraction,
-                stratify=all_labels,
-                random_state=seed
-            )
-            
-            train_labels = all_labels[train_idx]
-            
-            logger.info(f"Dataset: {format_number(total_samples)} samples")
-            logger.info(f"  Train: {format_number(len(train_idx))} samples")
-            logger.info(f"  Val:   {format_number(len(val_idx))} samples")
-            
-            unique, counts = np.unique(train_labels, return_counts=True)
-            logger.info("Class distribution (train):")
-            for cls_idx, count in zip(unique, counts):
-                pct = 100 * count / len(train_labels)
-                logger.info(f"  {CLASS_NAMES[cls_idx]}: {count:,} ({pct:.1f}%)")
-        else:
-            train_idx = None
-            val_idx = None
-            train_labels = None
-            stats = None
-        
-        obj_list = [train_idx, val_idx, train_labels, stats]
-        dist.broadcast_object_list(obj_list, src=0)
-        train_idx, val_idx, train_labels, stats = obj_list
-        
-    else:
-        file_path_obj = Path(file_path)
-        
-        if file_path_obj.suffix == '.npz':
-            data = np.load(str(file_path_obj))
-            total_samples = len(data.get('labels', data['y']))
-            all_labels = data.get('labels', data['y'])
-        else:
-            with h5py.File(str(file_path_obj), 'r') as f:
-                total_samples = len(f['labels'])
-                all_labels = f['labels'][:]
-        
-        stats = compute_robust_statistics(file_path, rank)
-        
-        indices = np.arange(total_samples)
-        train_idx, val_idx = train_test_split(
-            indices,
-            test_size=val_fraction,
-            stratify=all_labels,
-            random_state=seed
-        )
-        
-        train_labels = all_labels[train_idx]
-        
-        if is_main_process(rank):
-            logger.info(f"Dataset: {format_number(total_samples)} samples")
-            logger.info(f"  Train: {format_number(len(train_idx))} samples")
-            logger.info(f"  Val:   {format_number(len(val_idx))} samples")
-            
-            unique, counts = np.unique(train_labels, return_counts=True)
-            logger.info("Class distribution (train):")
-            for cls_idx, count in zip(unique, counts):
-                pct = 100 * count / len(train_labels)
-                logger.info(f"  {CLASS_NAMES[cls_idx]}: {count:,} ({pct:.1f}%)")
-    
-    return train_idx, val_idx, train_labels, stats
-
 def create_dataloaders(
     file_path: str,
     train_idx: np.ndarray,
@@ -870,6 +770,7 @@ def create_dataloaders(
     
     # =========================================================================
     # v3.1.0: Create shared datasets (no train/val double loading)
+    # v4.1.0 FIX: Use correct stats keys (magnification_mean, not flux_mean)
     # =========================================================================
     train_dataset = SharedRAMLensingDataset(
         magnification, delta_t, labels, train_idx,
