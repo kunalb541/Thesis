@@ -1885,7 +1885,7 @@ class RomanEvaluator:
 
         self.logger.info("Generated: u0_dependency")
 
-    def plot_temporal_bias_check(self) -> None:
+   def plot_temporal_bias_check(self) -> None:
     """Check for temporal selection bias using Kolmogorov-Smirnov test (correctly aligned)."""
     if self.params is None:
         self.logger.info("Skipping temporal bias check (parameters not available)")
@@ -1893,8 +1893,8 @@ class RomanEvaluator:
 
     correct = (self.preds == self.y)
 
-    t0_correct_list = []
-    t0_incorrect_list = []
+    t0_correct_list: List[np.ndarray] = []
+    t0_incorrect_list: List[np.ndarray] = []
 
     # Each params[class_key] array is extracted in the same order as samples of that class
     for class_idx, class_key in enumerate(['flat', 'pspl', 'binary']):
@@ -1971,6 +1971,7 @@ class RomanEvaluator:
     plt.close()
 
     self.logger.info(f"Generated: temporal_bias_check (KS p={p_value:.4f})")
+      
    
 
     def plot_evolution_for_class(self, class_idx: int, sample_idx: int) -> None:
@@ -2062,7 +2063,7 @@ class RomanEvaluator:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=FIG_EVOLUTION, sharex=True)
 
         # Panel 1: Light curve
-        ax1.scatter(times_plot, mag_plot, s=5, alpha=0.7)
+        ax1.scatter(times_plot, mag_plot, s=1, alpha=0.7)
         ax1.invert_yaxis()
         ax1.set_ylabel('AB Magnitude', fontsize=FONT_SIZE_LABEL, fontweight='bold')
         ax1.set_title(f'Probability Evolution: {class_name} (True={CLASS_NAMES[true_label]})',
