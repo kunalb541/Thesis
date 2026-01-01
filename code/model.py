@@ -280,7 +280,7 @@ class ModelConfig:
     n_layers: int = DEFAULT_N_LAYERS
     dropout: float = DEFAULT_DROPOUT
     window_size: int = 5
-    max_seq_len: int = 2400
+    max_seq_len: int = 7000
     n_classes: int = DEFAULT_N_CLASSES
     
     # Architecture options
