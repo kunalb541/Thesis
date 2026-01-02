@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-Roman Microlensing Classifier - Evaluation Suite v7.0.0
-=======================================================
-
-Evaluation framework for gravitational microlensing event classification models.
-Computes metrics, generates publication-quality visualizations, and performs
-physics-based performance analysis.
-
-Author: Kunal Bhatia
-Institution: University of Heidelberg
-Date: January 2025
-"""
 from __future__ import annotations
 
 import argparse
@@ -118,7 +105,7 @@ CI_LOWER: Final[float] = 2.5
 CI_UPPER: Final[float] = 97.5
 
 # u0 analysis
-U0_BINS: Final[np.ndarray] = np.linspace(0, 1.0, 21)
+U0_BINS: Final[np.ndarray] = np.linspace(0, 1.0, 50)
 U0_REFERENCE: Final[float] = 0.3
 
 # Random classifier baseline
