@@ -13,25 +13,25 @@
 #SBATCH --mail-type=ALL
 
 # =============================================================================
-# ML TRAINING PIPELINE v4.0
+# ML TRAINING PIPELINE v7.0
 # =============================================================================
-# 
-# Fixed resume logic:
-# - Correctly finds timestamped experiment directories created by train.py
-# - Tracks full experiment path (e.g., baseline/d32_l4_hier_20250101_143022)
-# - Properly passes checkpoint path for resumption
+#
+# FIXES from v6.0:
+# - Resume logic now passes --output-dir to force train.py to use existing dir
+# - Tracking files created immediately after training starts
+# - Evaluation summary job requests GPU
+# - Added cleanup for /tmp and /dev/shm
+# - Better error handling and validation
 #
 # Directory structure:
 #   ../results/checkpoints/
 #   ├── baseline/
 #   │   └── d32_l4_hier_TIMESTAMP/
-#   │       ├── checkpoints/
-#   │       │   └── checkpoint_latest.pt
+#   │       ├── checkpoints/checkpoint_latest.pt
 #   │       ├── best.pt
 #   │       └── config.json
 #   ├── distinct/
 #   │   └── d32_l4_hier_TIMESTAMP/
-#   │       └── ...
 #   ├── .exp_baseline    (contains: d32_l4_hier_TIMESTAMP)
 #   ├── .exp_distinct    (contains: d32_l4_hier_TIMESTAMP)
 #   └── .pipeline_progress
@@ -152,10 +152,39 @@ is_stage_complete() {
 }
 
 # =============================================================================
+# CLEANUP FUNCTIONS
+# =============================================================================
+
+cleanup_tmp() {
+    log_info "Cleaning up /tmp..."
+    srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 bash -c '
+        rm -f /tmp/train_*_'${USER}'.h5 2>/dev/null || true
+        echo "Node $(hostname): /tmp cleaned"
+    '
+}
+
+cleanup_shm() {
+    log_info "Cleaning up /dev/shm..."
+    srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 bash -c '
+        rm -f /dev/shm/*_'${USER}'_*.h5 2>/dev/null || true
+        rm -f /dev/shm/*_job'${SLURM_JOB_ID}'_*.h5 2>/dev/null || true
+        echo "Node $(hostname): /dev/shm cleaned"
+    '
+}
+
+cleanup_all() {
+    log_info "Running full cleanup..."
+    cleanup_tmp
+    cleanup_shm
+    log_info "Cleanup complete"
+}
+
+# Cleanup on exit
+trap cleanup_all EXIT
+
+# =============================================================================
 # FIND LATEST EXPERIMENT DIRECTORY
 # =============================================================================
-# train.py creates timestamped directories like d32_l4_hier_20250101_143022
-# This function finds the most recent one in a given base directory
 
 find_latest_experiment() {
     local base_dir="$1"
@@ -173,6 +202,45 @@ find_latest_experiment() {
     else
         echo ""
     fi
+}
+
+# =============================================================================
+# FIX CHECKPOINT STATS (magnification -> flux)
+# =============================================================================
+
+fix_checkpoint_stats() {
+    local checkpoint_path="$1"
+    
+    if [ ! -f "${checkpoint_path}" ]; then
+        return 1
+    fi
+    
+    python3 << EOF
+import torch
+
+ckpt_path = "${checkpoint_path}"
+ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+
+if 'stats' in ckpt:
+    stats = ckpt['stats']
+    modified = False
+    
+    # Add flux_mean/std as aliases if missing
+    if 'magnification_mean' in stats and 'flux_mean' not in stats:
+        stats['flux_mean'] = stats['magnification_mean']
+        modified = True
+    if 'magnification_std' in stats and 'flux_std' not in stats:
+        stats['flux_std'] = stats['magnification_std']
+        modified = True
+    
+    if modified:
+        torch.save(ckpt, ckpt_path)
+        print(f"Fixed stats in {ckpt_path}")
+    else:
+        print(f"Stats already OK in {ckpt_path}")
+else:
+    print(f"No stats in {ckpt_path}")
+EOF
 }
 
 # =============================================================================
@@ -221,13 +289,16 @@ train_model() {
     # =========================================================================
     
     local resume_flag=""
+    local output_dir_flag=""
     local current_epoch=0
     local exp_name=""
     
     # Check if we have a tracked experiment from previous run
     if [ -f "${exp_file}" ]; then
         exp_name=$(cat "${exp_file}" | tr -d '[:space:]')
-        log_info "Found tracked experiment: ${exp_name}"
+        if [ -n "${exp_name}" ]; then
+            log_info "Found tracked experiment: ${exp_name}"
+        fi
     fi
     
     # If no tracked experiment, look for latest directory
@@ -235,6 +306,8 @@ train_model() {
         exp_name=$(find_latest_experiment "${preset_output}")
         if [ -n "${exp_name}" ]; then
             log_info "Found existing experiment directory: ${exp_name}"
+            # Save it immediately to tracking file
+            echo "${exp_name}" > "${exp_file}"
         fi
     fi
     
@@ -249,14 +322,18 @@ train_model() {
             
             if [ ${current_epoch} -ge ${MAX_EPOCHS} ]; then
                 log_info "Training already complete (${current_epoch} >= ${MAX_EPOCHS})"
-                echo "${exp_name}" > "${exp_file}"
+                # Fix stats before returning
+                fix_checkpoint_stats "${exp_dir}/best.pt"
                 return 0
             else
                 log_info "RESUMING from epoch ${current_epoch}"
                 resume_flag="--resume ${latest_ckpt}"
+                # CRITICAL: Tell train.py to use the SAME output directory
+                output_dir_flag="--output-dir ${exp_dir}"
             fi
         else
-            log_info "No checkpoint found in ${exp_dir}"
+            log_info "No checkpoint found in ${exp_dir}, starting fresh in same dir"
+            output_dir_flag="--output-dir ${exp_dir}"
         fi
     else
         log_info "No existing experiment found, starting fresh"
@@ -279,6 +356,7 @@ train_model() {
     log_info "  GPUs: $((SLURM_NNODES * 4))"
     log_info "  Batch size: ${BATCH_SIZE}"
     log_info "  Output base: ${preset_output}"
+    log_info "  Output dir: ${output_dir_flag:-'(auto)'}"
     log_info "  Resume: ${resume_flag:-'(none)'}"
     
     srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 \
@@ -291,6 +369,7 @@ train_model() {
         train.py \
         --data "${local_train}" \
         --output "${preset_output}" \
+        ${output_dir_flag} \
         --batch-size ${BATCH_SIZE} \
         --num-workers ${NUM_WORKERS} \
         --accumulation-steps ${ACCUMULATION_STEPS} \
@@ -349,6 +428,8 @@ train_model() {
             
             if [ ${final_epoch} -ge ${MAX_EPOCHS} ]; then
                 log_info "Training COMPLETE: ${preset_name} (${final_epoch} epochs)"
+                # Fix stats in best.pt for evaluation compatibility
+                fix_checkpoint_stats "${exp_dir}/best.pt"
                 return 0
             else
                 log_info "Training incomplete: ${final_epoch}/${MAX_EPOCHS} epochs"
@@ -372,6 +453,25 @@ submit_evaluations() {
     log_info "Submitting evaluation jobs..."
     log_info "  Baseline experiment: ${baseline_exp}"
     log_info "  Distinct experiment: ${distinct_exp}"
+    
+    # Full paths to experiment directories
+    local baseline_dir="${OUTPUT_BASE}/baseline/${baseline_exp}"
+    local distinct_dir="${OUTPUT_BASE}/distinct/${distinct_exp}"
+    
+    # Validate directories exist
+    if [ ! -d "${baseline_dir}" ]; then
+        log_error "Baseline directory not found: ${baseline_dir}"
+        return 1
+    fi
+    if [ ! -d "${distinct_dir}" ]; then
+        log_error "Distinct directory not found: ${distinct_dir}"
+        return 1
+    fi
+    
+    # Fix checkpoint stats before evaluation
+    log_info "Fixing checkpoint stats for evaluation compatibility..."
+    fix_checkpoint_stats "${baseline_dir}/best.pt"
+    fix_checkpoint_stats "${distinct_dir}/best.pt"
     
     # Create evaluation script
     cat > "${OUTPUT_BASE}/eval_job.sh" << 'EVALSCRIPT'
@@ -409,17 +509,11 @@ if [ ! -f "${EXPERIMENT_DIR}/best.pt" ]; then
     exit 1
 fi
 
-# Check if evaluation already done
-EVAL_DIR="${EXPERIMENT_DIR}/eval_$(basename ${TEST_DATA} .h5)"
-if [ -d "${EVAL_DIR}" ] && [ -f "${EVAL_DIR}/evaluation_summary.json" ]; then
-    echo "Already complete: ${EVAL_DIR}"
-    exit 0
-fi
-
+# Run evaluation
 timeout 28m python evaluate.py \
     --experiment-name "${EXPERIMENT_DIR}/best.pt" \
     --data "${TEST_DATA}" \
-    --batch-size 512 \
+    --batch-size 128 \
     --n-evolution-per-type 10 \
     --save-formats png \
     --colorblind-safe \
@@ -429,10 +523,6 @@ echo "Evaluation complete: ${EVAL_NAME}"
 EVALSCRIPT
 
     chmod +x "${OUTPUT_BASE}/eval_job.sh"
-    
-    # Full paths to experiment directories
-    local baseline_dir="${OUTPUT_BASE}/baseline/${baseline_exp}"
-    local distinct_dir="${OUTPUT_BASE}/distinct/${distinct_exp}"
     
     # Submit 4 evaluation jobs
     JOB1=$(sbatch --parsable --job-name=eval_b2b \
@@ -455,11 +545,15 @@ EVALSCRIPT
         "${OUTPUT_BASE}/eval_job.sh" "${distinct_dir}" "${BASELINE_TEST}" "distinct_on_baseline")
     log_info "Submitted eval 4/4: distinct->baseline (${JOB4})"
     
-    # Submit summary job
+    # Submit summary job - WITH GPU REQUEST
     sbatch --dependency=afterok:${JOB1}:${JOB2}:${JOB3}:${JOB4} \
         --job-name=summary \
         --output=logs/summary_%j.out --error=logs/summary_%j.err \
-        --time=00:10:00 -p gpu_a100_short --nodes=1 --ntasks=1 \
+        --time=00:10:00 \
+        -p gpu_a100_short \
+        --nodes=1 \
+        --ntasks=1 \
+        --gres=gpu:1 \
         --wrap="cd ~/Thesis/code && python3 << 'PYEOF'
 import json
 from pathlib import Path
@@ -484,6 +578,8 @@ print()
 print('='*80)
 print('PIPELINE COMPLETE - FINAL RESULTS')
 print('='*80)
+
+results = []
 
 for exp_dir, test_set, description in evaluations:
     # Find eval directory
@@ -513,8 +609,22 @@ for exp_dir, test_set, description in evaluations:
     print(f'     Accuracy: {acc:.2f}%')
     print(f'     Recall - Flat: {flat_r:.1f}%  PSPL: {pspl_r:.1f}%  Binary: {binary_r:.1f}%')
     print()
+    
+    results.append({
+        'evaluation': description,
+        'accuracy': acc,
+        'recall_flat': flat_r,
+        'recall_pspl': pspl_r,
+        'recall_binary': binary_r
+    })
 
 print('='*80)
+
+# Save combined results
+combined_results = output_base / 'final_results.json'
+with open(combined_results, 'w') as f:
+    json.dump(results, f, indent=2)
+print(f'Results saved to: {combined_results}')
 PYEOF"
     
     log_info "Summary job submitted"
@@ -561,11 +671,49 @@ handle_preemption() {
 trap handle_preemption USR1
 
 # =============================================================================
+# CLEAN START OPTION
+# =============================================================================
+
+clean_start() {
+    log_info "========================================"
+    log_info "CLEANING PREVIOUS RUN"
+    log_info "========================================"
+    
+    # Remove progress file
+    rm -f "${PROGRESS_FILE}"
+    log_info "Removed progress file"
+    
+    # Remove tracking files
+    rm -f "${OUTPUT_BASE}/.exp_baseline"
+    rm -f "${OUTPUT_BASE}/.exp_distinct"
+    rm -f "${OUTPUT_BASE}/.current_experiment"
+    rm -f "${OUTPUT_BASE}/.continuation_job_id"
+    log_info "Removed tracking files"
+    
+    # Optionally remove old experiment directories
+    if [ "${CLEAN_EXPERIMENTS:-false}" = "true" ]; then
+        rm -rf "${OUTPUT_BASE}/baseline"
+        rm -rf "${OUTPUT_BASE}/distinct"
+        log_info "Removed old experiment directories"
+    fi
+    
+    # Cleanup cached data
+    cleanup_all
+    
+    log_info "Clean start complete"
+}
+
+# Check for clean start flag
+if [ "${1:-}" = "--clean" ] || [ "${CLEAN_START:-false}" = "true" ]; then
+    clean_start
+fi
+
+# =============================================================================
 # MAIN PIPELINE
 # =============================================================================
 
 log_info "========================================"
-log_info "ML TRAINING PIPELINE v6.0"
+log_info "ML TRAINING PIPELINE v7.0"
 log_info "========================================"
 log_info "Job ID: ${SLURM_JOB_ID}"
 log_info "Nodes: ${SLURM_NNODES}"
@@ -644,9 +792,30 @@ if [ "${PHASE}" = "evaluations" ]; then
     log_info "========================================"
     
     # Read experiment names from tracking files
-    if [ ! -f "${OUTPUT_BASE}/.exp_baseline" ] || [ ! -f "${OUTPUT_BASE}/.exp_distinct" ]; then
-        log_error "Missing tracking files"
-        exit 1
+    if [ ! -f "${OUTPUT_BASE}/.exp_baseline" ]; then
+        log_error "Missing tracking file: .exp_baseline"
+        # Try to find it
+        baseline_exp=$(find_latest_experiment "${OUTPUT_BASE}/baseline")
+        if [ -n "${baseline_exp}" ]; then
+            echo "${baseline_exp}" > "${OUTPUT_BASE}/.exp_baseline"
+            log_info "Recovered baseline experiment: ${baseline_exp}"
+        else
+            log_error "Cannot find baseline experiment"
+            exit 1
+        fi
+    fi
+    
+    if [ ! -f "${OUTPUT_BASE}/.exp_distinct" ]; then
+        log_error "Missing tracking file: .exp_distinct"
+        # Try to find it
+        distinct_exp=$(find_latest_experiment "${OUTPUT_BASE}/distinct")
+        if [ -n "${distinct_exp}" ]; then
+            echo "${distinct_exp}" > "${OUTPUT_BASE}/.exp_distinct"
+            log_info "Recovered distinct experiment: ${distinct_exp}"
+        else
+            log_error "Cannot find distinct experiment"
+            exit 1
+        fi
     fi
     
     BASELINE_EXP=$(cat "${OUTPUT_BASE}/.exp_baseline" | tr -d '[:space:]')
