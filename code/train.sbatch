@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 8
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 00:30:00
@@ -63,7 +63,7 @@ PROGRESS_FILE="${OUTPUT_BASE}/.pipeline_progress"
 BATCH_SIZE=256
 NUM_WORKERS=0
 ACCUMULATION_STEPS=2
-MAX_EPOCHS=200
+MAX_EPOCHS=150
 
 # Model architecture
 D_MODEL=32

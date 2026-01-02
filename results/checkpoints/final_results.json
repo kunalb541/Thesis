@@ -1,0 +1,30 @@
+[
+  {
+    "evaluation": "Baseline -> Baseline",
+    "accuracy": 77.95733333333334,
+    "recall_flat": 100.0,
+    "recall_pspl": 95.364,
+    "recall_binary": 38.507999999999996
+  },
+  {
+    "evaluation": "Baseline -> Distinct",
+    "accuracy": 98.408,
+    "recall_flat": 100.0,
+    "recall_pspl": 95.262,
+    "recall_binary": 99.96199999999999
+  },
+  {
+    "evaluation": "Distinct -> Distinct",
+    "accuracy": 99.97266666666667,
+    "recall_flat": 100.0,
+    "recall_pspl": 100.0,
+    "recall_binary": 99.91799999999999
+  },
+  {
+    "evaluation": "Distinct -> Baseline",
+    "accuracy": 72.15533333333333,
+    "recall_flat": 100.0,
+    "recall_pspl": 100.0,
+    "recall_binary": 16.466
+  }
+]
