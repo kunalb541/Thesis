@@ -230,17 +230,10 @@ ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0
 ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0
 ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
 
-# v4.1.0 FIX: Corrected comment - this produces ~45 checkpoints, not ~70
-# v4.0.0 FIX: Reduced from range(100, 6920, 5) which created 1364 checkpoints!
-# Now uses ~45 checkpoints with geometric-like spacing for faster evolution plots
-# For 72-day season with 6912 observations, sample at reasonable intervals
-EVOLUTION_OBS_COUNTS: Final[List[int]] = (
-    list(range(100, 500, 50)) +      # 100-450: every 50 obs (8 points)
-    list(range(500, 2000, 100)) +    # 500-1900: every 100 obs (15 points)
-    list(range(2000, 4000, 200)) +   # 2000-3800: every 200 obs (10 points)
-    list(range(4000, 6000, 300)) +   # 4000-5700: every 300 obs (7 points)
-    list(range(6000, 6913, 200))     # 6000-6912: every 200 obs (5 points)
-)  # Total: ~45 checkpoints
+# v4.2.0: Restored dense sampling for detailed evolution plots
+# For 72-day Roman season with 6912 observations (15-min cadence)
+# Sample every 5 observations = ~1.25 hour resolution in evolution plots
+EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(100, 6913, 5))  # 1363 checkpoints
 
 # Font sizes for plots
 FONT_SIZE_TITLE: Final[int] = 12

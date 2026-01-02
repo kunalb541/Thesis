@@ -1240,6 +1240,8 @@ def main():
     
     parser.add_argument('--data', type=str, required=True, help='Path to data file')
     parser.add_argument('--output', type=str, default='../results/checkpoints', help='Output directory')
+    parser.add_argument('--output-dir', type=str, default=None, 
+                        help='Exact output directory (overrides auto-generated timestamped name)')
     parser.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION, help='Validation fraction')
     
     parser.add_argument('--d-model', type=int, default=128, help='Model dimension')
@@ -1316,8 +1318,16 @@ def main():
         dist.barrier()
     
     if is_main_process(rank):
-        output_dir = create_experiment_dir(base_output_dir, args)
-        exp_name = output_dir.name
+        # v4.2.0: Support --output-dir for resuming in same directory
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            exp_name = output_dir.name
+            logger.info(f"Using specified output directory: {output_dir}")
+        else:
+            output_dir = create_experiment_dir(base_output_dir, args)
+            exp_name = output_dir.name
+        
         with open(base_output_dir / '.current_experiment', 'w') as f:
             f.write(exp_name)
     else:
@@ -1328,7 +1338,7 @@ def main():
         exp_name_list = [exp_name] if is_main_process(rank) else [None]
         dist.broadcast_object_list(exp_name_list, src=0)
         exp_name = exp_name_list[0]
-        output_dir = base_output_dir / exp_name
+        output_dir = Path(args.output_dir) if args.output_dir else base_output_dir / exp_name
     
     # v4.1.0: Pass is_ddp to enable broadcast optimization
     train_idx, val_idx, train_labels, stats = load_and_split_data(
