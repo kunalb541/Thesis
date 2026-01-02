@@ -442,29 +442,33 @@ class MicrolensingDataset(Dataset):
 # DATA LOADING
 # =============================================================================
 
-def compute_normalization_statistics(
+def compute_normalization_statistics_from_indices(
     flux: np.ndarray,
     delta_t: np.ndarray,
+    train_idx: np.ndarray,
     rank: int = 0
 ) -> Dict[str, float]:
-    """Compute normalization statistics from valid observations."""
-    flux_valid = flux[flux != 0.0]
-    delta_t_valid = delta_t[delta_t != 0.0]
-    
+    """Compute normalization stats using ONLY the train split (valid observations only)."""
+    flux_train = flux[train_idx]
+    dt_train = delta_t[train_idx]
+
+    flux_valid = flux_train[flux_train != 0.0]
+    dt_valid = dt_train[dt_train != 0.0]
+
     stats = {
-        'flux_mean': float(np.mean(flux_valid)),
-        'flux_std': float(np.std(flux_valid)),
-        'delta_t_mean': float(np.mean(delta_t_valid)),
-        'delta_t_std': float(np.std(delta_t_valid))
+        "flux_mean": float(np.mean(flux_valid)),
+        "flux_std": float(np.std(flux_valid)),
+        "delta_t_mean": float(np.mean(dt_valid)),
+        "delta_t_std": float(np.std(dt_valid)),
     }
-    
+
     if is_main_process(rank):
-        logger.info("Normalization statistics:")
+        logger.info("Normalization statistics (TRAIN-ONLY):")
         logger.info(f"  Flux: mean={stats['flux_mean']:.4f}, std={stats['flux_std']:.4f}")
         logger.info(f"  Delta_t: mean={stats['delta_t_mean']:.4f}, std={stats['delta_t_std']:.4f}")
-    
-    return stats
 
+    return stats
+    
 def load_and_split_data(
     file_path: str,
     val_fraction: float,
@@ -482,7 +486,7 @@ def load_and_split_data(
             flux, delta_t, labels = _load_arrays_from_file(file_path)
             total_samples = len(labels)
             
-            stats = compute_normalization_statistics(flux, delta_t, rank)
+            stats = compute_normalization_statistics_from_indices(flux, delta_t, train_idx, rank)
             
             indices = np.arange(total_samples)
             train_idx, val_idx = train_test_split(
@@ -519,7 +523,7 @@ def load_and_split_data(
         flux, delta_t, labels = _load_arrays_from_file(file_path)
         total_samples = len(labels)
         
-        stats = compute_normalization_statistics(flux, delta_t, rank)
+        stats = compute_normalization_statistics_from_indices(flux, delta_t, train_idx, rank)
         
         indices = np.arange(total_samples)
         train_idx, val_idx = train_test_split(
