@@ -486,7 +486,6 @@ def load_and_split_data(
             flux, delta_t, labels = _load_arrays_from_file(file_path)
             total_samples = len(labels)
             
-            stats = compute_normalization_statistics_from_indices(flux, delta_t, train_idx, rank)
             
             indices = np.arange(total_samples)
             train_idx, val_idx = train_test_split(
@@ -495,7 +494,7 @@ def load_and_split_data(
                 stratify=labels,
                 random_state=seed
             )
-            
+            stats = compute_normalization_statistics_from_indices(flux, delta_t, train_idx, rank)
             train_labels = labels[train_idx]
             
             logger.info(f"Dataset: {format_number(total_samples)} samples")
