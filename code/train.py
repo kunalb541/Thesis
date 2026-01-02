@@ -807,8 +807,9 @@ def train_epoch(
                     stage1_weight, stage2_weight, aux_weight, nll_weight
                 )
                 log_probs = output.log_probs
-                total_stage1_loss += loss_dict['stage1_bce']
-                total_stage2_loss += loss_dict['stage2_bce']
+                bs = labels.size(0)
+                total_stage1_loss += torch.tensor(loss_dict['stage1_bce'], device=device) * bs
+                total_stage2_loss += torch.tensor(loss_dict['stage2_bce'], device=device) * bs
             else:
                 # Non-hierarchical: model returns log_probs directly
                 log_probs = model(flux, delta_t)
@@ -928,8 +929,7 @@ def evaluate(
                 log_probs = model(flux, delta_t)
                 loss = F.nll_loss(log_probs, labels, weight=class_weights)
         
-        probs = torch.exp(log_probs)
-        preds = probs.argmax(dim=1)
+        preds = log_probs.argmax(dim=1)
         
         total_loss_gpu += loss * labels.size(0)
         total_correct_gpu += (preds == labels).sum()
