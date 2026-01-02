@@ -22,7 +22,7 @@ cd ~/Thesis/code
 # CONFIG
 # =============================================================================
 DATA_DIR="$HOME/Thesis/data"
-BASELINE_TRAIN="${DATA_DIR}/raw/baseline_train.h5"
+BASELINE_TRAIN="${DATA_DIR}/raw/general_train.h5"
 DISTINCT_TRAIN="${DATA_DIR}/raw/distinct_train.h5"
 
 OUTPUT_BASE="../results/checkpoints"
