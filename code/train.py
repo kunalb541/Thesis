@@ -835,12 +835,14 @@ def train_epoch(
             scheduler.step()
         
         with torch.no_grad():
-            # Model returns log_probs, convert to probs
+            
             probs = torch.exp(log_probs)
             preds = probs.argmax(dim=1)
-            loss_unscaled = loss.detach() * accumulation_steps
-            
-            total_loss_gpu += loss_unscaled * labels.size(0)
+        
+
+            loss_unscaled = loss.detach() * accumulation_steps         
+            total_loss_gpu += loss_unscaled * labels.size(0)            
+        
             total_correct_gpu += (preds == labels).sum()
             total_samples_gpu += labels.size(0)
             
