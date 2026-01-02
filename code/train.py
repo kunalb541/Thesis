@@ -1,41 +1,6 @@
-"""
-Roman Microlensing Classifier Training Engine v4.1.0
-====================================================
-
-MULTI-GPU OPTIMIZATION v4.1.0 - CLEANUP RACE FIX + BROADCAST OPTIMIZATION
---------------------------------------------------------------------------
-**Fixed:** Added dist.barrier() before /dev/shm cleanup (prevents race condition)
-**Fixed:** Stats and indices now broadcast from rank0 (avoids redundant file reads)
-**Fixed:** Logging uses local_rank instead of rank % 4 (works with any GPU count)
-**Fixed:** Documentation now accurately describes what /dev/shm sharing achieves
-
-**What /dev/shm actually provides (corrected from v4.0.0):**
-- Fast RAM-backed filesystem reads (no disk I/O)
-- Linux page cache sharing for the FILE (reduces disk reads)
-- Each process still allocates its own numpy arrays after load
-- NOT true shared memory across processes (would need multiprocessing.shared_memory)
-
-All v4.0.0, v3.2.0, v3.1.0 and v3.0.0 fixes preserved:
-- Deterministic /dev/shm path (no PID, uses SLURM_JOB_ID)
-- Preserves source file suffix (.npz/.h5)
-- Model calls use keyword arguments (lengths=lengths)
-- lengths tensor moved to device
-- torch.load compatibility wrapper
-- SharedRAMLensingDataset (no train/val double loading)
-- Hierarchical loss with separate BCE stages
-- Memory leak prevention
-- Complete type hints
-
-Author: Kunal Bhatia
-Institution: University of Heidelberg
-Version: 4.1.0
-Date: December 2024
-"""
-
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import logging
 import math
@@ -44,13 +9,10 @@ import random
 import shutil
 import sys
 import time
-import warnings
 from contextlib import nullcontext
-from dataclasses import asdict
 from datetime import datetime, timedelta
-from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import h5py
 import numpy as np
@@ -58,7 +20,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -67,10 +28,10 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-__version__: str = "4.1.0"
+__version__: str = "7.1.0"
 
 __all__ = [
-    "SharedRAMLensingDataset",
+    "MicrolensingDataset",
     "load_data_to_shared_memory",
     "load_and_split_data",
     "WarmupCosineScheduler",
@@ -88,11 +49,11 @@ __all__ = [
 ]
 
 # =============================================================================
-# v4.0.0: TORCH SERIALIZATION COMPATIBILITY GUARD
+# TORCH SERIALIZATION COMPATIBILITY
 # =============================================================================
-# Guard torch.serialization import (prevents some PyTorch crashes on certain versions)
+
 try:
-    import torch.serialization  # type: ignore
+    import torch.serialization
     try:
         torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
     except (AttributeError, TypeError):
@@ -125,10 +86,11 @@ def _configure_environment() -> None:
 
 _configure_environment()
 
-# Import model after path setup
+# Import model after environment setup
 current_dir = Path(__file__).resolve().parent
 if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
+
 from model import ModelConfig, RomanMicrolensingClassifier, HierarchicalOutput
 
 # =============================================================================
@@ -145,7 +107,7 @@ LOG_DATE_FORMAT: str = '%Y-%m-%d %H:%M:%S'
 DEFAULT_BATCH_SIZE: int = 64
 DEFAULT_LR: float = 1e-3
 DEFAULT_EPOCHS: int = 50
-DEFAULT_NUM_WORKERS: int = 0
+DEFAULT_NUM_WORKERS: int = 4
 DEFAULT_PREFETCH_FACTOR: int = 2
 DEFAULT_ACCUMULATION_STEPS: int = 1
 DEFAULT_CLIP_NORM: float = 1.0
@@ -154,13 +116,11 @@ DEFAULT_VAL_FRACTION: float = 0.1
 
 DEFAULT_STAGE1_WEIGHT: float = 1.0
 DEFAULT_STAGE2_WEIGHT: float = 1.0
-DEFAULT_AUX_WEIGHT: float = 0.5
+DEFAULT_AUX_WEIGHT: float = 0.3
+DEFAULT_NLL_WEIGHT: float = 0.5
 
 PROGRESS_UPDATE_FREQ: int = 50
 DDP_INIT_TIMEOUT_MINUTES: int = 10
-DDP_BARRIER_TIMEOUT_SECONDS: int = 300
-INVALID_TIMESTAMP: float = -999.0
-MIN_VALID_SEQ_LEN: int = 10
 
 # =============================================================================
 # LOGGING
@@ -170,8 +130,9 @@ def setup_logging(rank: int) -> logging.Logger:
     """Configure logging for distributed training."""
     logger = logging.getLogger('train')
     logger.setLevel(logging.INFO if rank == 0 else logging.WARNING)
+    logger.handlers.clear()
 
-    if not logger.handlers:
+    if rank == 0:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
         logger.addHandler(handler)
@@ -181,7 +142,7 @@ def setup_logging(rank: int) -> logging.Logger:
 logger = setup_logging(0)
 
 # =============================================================================
-# v4.0.0: TORCH LOAD COMPATIBILITY WRAPPER
+# TORCH LOAD COMPATIBILITY WRAPPER
 # =============================================================================
 
 def torch_load_compat(
@@ -190,28 +151,11 @@ def torch_load_compat(
     weights_only: bool = False
 ) -> Dict[str, Any]:
     """
-    Compatibility torch.load wrapper.
-    
-    Handles older PyTorch versions that don't support weights_only parameter.
-    
-    Parameters
-    ----------
-    path : str or Path
-        Path to checkpoint file.
-    map_location : str, torch.device, or None
-        Device to map tensors to.
-    weights_only : bool
-        If True, only load weights (not supported on older PyTorch).
-        
-    Returns
-    -------
-    checkpoint : dict
-        Loaded checkpoint dictionary.
+    Compatibility torch.load wrapper for older PyTorch versions.
     """
     try:
         return torch.load(path, map_location=map_location, weights_only=weights_only)
     except TypeError:
-        # Older PyTorch without weights_only parameter
         return torch.load(path, map_location=map_location)
 
 # =============================================================================
@@ -274,34 +218,15 @@ def configure_cuda() -> None:
         torch.backends.cudnn.deterministic = False
 
 # =============================================================================
-# v4.1.0: MULTI-GPU SHARED MEMORY (DOCUMENTATION CORRECTED)
+# MULTI-GPU SHARED MEMORY
 # =============================================================================
 
 def get_node_id(rank: int, local_rank: int) -> int:
-    """
-    Determine which physical node this process is on.
-    
-    v4.0.0 FIX: Use LOCAL_WORLD_SIZE env var for robust node calculation.
-    Previous version used torch.cuda.device_count() which can be unreliable.
-    
-    Parameters
-    ----------
-    rank : int
-        Global rank.
-    local_rank : int
-        Local rank within node.
-    
-    Returns
-    -------
-    node_id : int
-        Node identifier (0, 1, 2, ...).
-    """
-    # v4.0.0: Use LOCAL_WORLD_SIZE from SLURM/torchrun for accuracy
+    """Determine which physical node this process is on."""
     local_world_size = int(os.environ.get(
         "LOCAL_WORLD_SIZE",
         torch.cuda.device_count() if torch.cuda.is_available() else 1
     ))
-    # More robust calculation: (rank - local_rank) gives first rank on this node
     return (rank - local_rank) // max(local_world_size, 1)
 
 def load_data_to_shared_memory(
@@ -311,72 +236,39 @@ def load_data_to_shared_memory(
     is_ddp: bool
 ) -> Tuple[str, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Load data to /dev/shm RAM-backed filesystem (ONLY local_rank=0 per node copies).
+    Load data to /dev/shm RAM-backed filesystem.
     
-    v4.1.0 DOCUMENTATION CORRECTION:
-    This function copies data to /dev/shm for fast RAM-backed reads, but each
-    process still allocates its own numpy arrays after loading. The Linux page
-    cache is shared (reducing disk I/O), but the arrays themselves are duplicated.
-    
-    For true shared memory across processes, would need multiprocessing.shared_memory
-    or memory-mapped .npy files. Current approach provides:
-    - Fast RAM-backed reads (no disk I/O after first copy)
-    - Page cache sharing at filesystem level
-    - Each process still has separate array copies in RAM
-    
-    v4.0.0 FIXES (preserved):
-    - shm_path now deterministic across ranks (removed os.getpid())
-    - Preserves source file suffix (.npz/.h5)
-    - Uses SLURM_JOB_ID for collision avoidance across jobs
-    - Only copies if file doesn't already exist (recovery-friendly)
-    
-    Parameters
-    ----------
-    file_path : str
-        Path to source HDF5/NPZ file (could be in /tmp already).
-    rank : int
-        Global process rank.
-    local_rank : int
-        Local rank within node (0-3 for 4 GPUs).
-    is_ddp : bool
-        Whether using distributed training.
+    Only local_rank=0 per node copies the file. Other ranks wait and then
+    load from the same /dev/shm path.
     
     Returns
     -------
     shm_path : str
-        Path to shared memory file in /dev/shm.
-    magnification : np.ndarray
-        Magnification array loaded from /dev/shm.
+        Path to shared memory file.
+    flux : np.ndarray
+        Flux/magnification array [N, T].
     delta_t : np.ndarray
-        Time interval array loaded from /dev/shm.
+        Time interval array [N, T].
     labels : np.ndarray
-        Labels array loaded from /dev/shm.
+        Labels array [N].
     """
     node_id = get_node_id(rank, local_rank)
     
-    # v4.0.0 FIX: Create deterministic /dev/shm path
-    # - Use SLURM_JOB_ID (not PID) for collision avoidance
-    # - Preserve original file suffix (.npz or .h5) - critical fix from v3.2.0
     src = Path(file_path)
-    suffix = src.suffix  # Keep .h5 or .npz
+    suffix = src.suffix
     job_id = os.environ.get("SLURM_JOB_ID", "nojid")
     shm_path = f"/dev/shm/{src.stem}_job{job_id}_node{node_id}{suffix}"
     
     if local_rank == 0:
-        # =====================================================================
-        # FIRST GPU ON NODE: Copy data to /dev/shm
-        # =====================================================================
         if is_main_process(rank):
             logger.info("=" * 80)
-            logger.info("v4.1.0 /dev/shm OPTIMIZATION: RAM-Backed File Loading")
+            logger.info("/dev/shm OPTIMIZATION: RAM-Backed File Loading")
             logger.info("=" * 80)
             logger.info(f"Node {node_id} (Rank {rank}): Setting up /dev/shm...")
         
-        # Check /dev/shm availability and space
         if not Path('/dev/shm').exists():
             raise RuntimeError("/dev/shm not available on this system!")
         
-        # v4.0.0 FIX: Only copy if file doesn't already exist (recovery-friendly)
         try:
             if not Path(shm_path).exists():
                 shutil.copy2(file_path, shm_path)
@@ -391,99 +283,66 @@ def load_data_to_shared_memory(
             logger.error(f"Failed to setup /dev/shm: {e}")
             raise
         
-        # Load data from /dev/shm
         if is_main_process(rank):
-            logger.info(f"  Loading data from /dev/shm...")
+            logger.info("  Loading data from /dev/shm...")
         
-        magnification, delta_t, labels = _load_arrays_from_file(shm_path, rank)
+        flux, delta_t, labels = _load_arrays_from_file(shm_path)
         
         if is_main_process(rank):
-            total_mem = (magnification.nbytes + delta_t.nbytes + labels.nbytes) / 1e9
-            logger.info(f"  Data loaded: {total_mem:.2f} GB arrays allocated")
-            # v4.1.0: Accurate documentation of what's shared
-            logger.info(f"  Note: Page cache shared, but each process has own array copy")
+            total_mem = (flux.nbytes + delta_t.nbytes + labels.nbytes) / 1e9
+            logger.info(f"  Data loaded: {total_mem:.2f} GB")
+            logger.info(f"  Shape: flux={flux.shape}, delta_t={delta_t.shape}, labels={labels.shape}")
         
-        # Signal other GPUs on this node that data is ready
-        # Note: This barrier is global (all ranks), not per-node
         if is_ddp:
             dist.barrier()
-    
     else:
-        # =====================================================================
-        # OTHER GPUs ON NODE: Wait and load from same /dev/shm file
-        # =====================================================================
-        
-        # Wait for first GPU to finish copying
         if is_ddp:
             dist.barrier()
         
-        # Load from SAME /dev/shm file (fast RAM-backed read, but allocates own arrays)
-        magnification, delta_t, labels = _load_arrays_from_file(shm_path, rank)
-        
-        # v4.1.0 FIX: Use local_rank instead of rank % 4 (works with any GPU count)
-        if local_rank == 1 and is_main_process(rank):
-            logger.info(f"  GPU {local_rank}: Loaded from /dev/shm (fast RAM read)")
+        flux, delta_t, labels = _load_arrays_from_file(shm_path)
     
-    # v4.1.0 FIX: Use local_rank instead of rank % 4
     local_world_size = int(os.environ.get(
         "LOCAL_WORLD_SIZE",
         torch.cuda.device_count() if torch.cuda.is_available() else 1
     ))
     if local_rank == local_world_size - 1 and is_main_process(rank):
         logger.info("=" * 80)
-        total_mem = (magnification.nbytes + delta_t.nbytes + labels.nbytes) / 1e9
+        total_mem = (flux.nbytes + delta_t.nbytes + labels.nbytes) / 1e9
         logger.info(f"Node {node_id}: All {local_world_size} GPUs loaded {total_mem:.2f} GB each")
         logger.info("=" * 80)
     
-    return shm_path, magnification, delta_t, labels
+    return shm_path, flux, delta_t, labels
 
-def _load_arrays_from_file(
-    file_path: str,
-    rank: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Load numpy arrays from HDF5 or NPZ file.
-    
-    Helper function called by load_data_to_shared_memory.
-    """
+def _load_arrays_from_file(file_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load numpy arrays from HDF5 or NPZ file."""
     file_path = Path(file_path)
     
     if file_path.suffix == '.npz':
         data = np.load(str(file_path))
-        magnification = data.get('flux', data.get('magnification', data.get('mag')))
+        flux = data.get('flux', data.get('magnification', data.get('mag')))
         delta_t = data['delta_t']
         labels = data.get('labels', data['y'])
     
     elif file_path.suffix in ['.h5', '.hdf5']:
         with h5py.File(str(file_path), 'r') as f:
             if 'flux' in f:
-                magnification = f['flux'][:]
+                flux = f['flux'][:]
             elif 'magnification' in f:
-                magnification = f['magnification'][:]
+                flux = f['magnification'][:]
             else:
-                magnification = f['mag'][:]
+                flux = f['mag'][:]
             delta_t = f['delta_t'][:]
             labels = f['labels'][:]
     else:
         raise ValueError(f"Unsupported file format: {file_path.suffix}")
     
-    return magnification, delta_t, labels
+    return flux.astype(np.float32), delta_t.astype(np.float32), labels.astype(np.int64)
 
 def cleanup_shared_memory(shm_path: str, rank: int, local_rank: int) -> None:
     """
-    Cleanup /dev/shm files (ONLY local_rank=0 deletes).
+    Cleanup /dev/shm files (only local_rank=0 deletes).
     
-    v4.1.0: Caller must ensure dist.barrier() is called BEFORE this function
-    to prevent race conditions where rank0 deletes while others still reading.
-    
-    Parameters
-    ----------
-    shm_path : str
-        Path to shared memory file.
-    rank : int
-        Global rank.
-    local_rank : int
-        Local rank within node.
+    Caller must ensure dist.barrier() is called BEFORE this function.
     """
     if local_rank == 0:
         try:
@@ -496,127 +355,115 @@ def cleanup_shared_memory(shm_path: str, rank: int, local_rank: int) -> None:
             logger.warning(f"Failed to cleanup {shm_path}: {e}")
 
 # =============================================================================
-# v3.1.0: SHARED DATASET (preserved from v3.1.0)
+# DATASET
 # =============================================================================
 
-class SharedRAMLensingDataset(Dataset):
+class MicrolensingDataset(Dataset):
     """
-    Lightweight dataset that references shared memory arrays.
+    Dataset for Roman microlensing light curves.
     
-    From v3.1.0 - eliminates train/val double loading within each process.
-    Combined with v4.1.0 /dev/shm, provides fast RAM-backed reads.
-    
-    Note: Each process has its own copy of the arrays in RAM.
+    Compatible with model.py v7.1.0:
+    - Returns (flux, delta_t, label) tuples
+    - Model infers observation mask from flux != 0.0
+    - Normalization applied to valid observations only
     """
     
     def __init__(
         self,
-        magnification: np.ndarray,
+        flux: np.ndarray,
         delta_t: np.ndarray,
         labels: np.ndarray,
         indices: np.ndarray,
-        magnification_mean: float,
-        magnification_std: float,
+        flux_mean: float,
+        flux_std: float,
         delta_t_mean: float,
         delta_t_std: float,
-        rank: int = 0
+        normalize: bool = True
     ) -> None:
-        self.magnification = magnification
+        self.flux = flux
         self.delta_t = delta_t
         self.labels = labels
         self.indices = indices
-        self.rank = rank
+        self.normalize = normalize
         
-        self._magnification_scale = 1.0 / (magnification_std + EPS)
-        self._dt_scale = 1.0 / (delta_t_std + EPS)
-        self.magnification_mean = magnification_mean
+        self.flux_mean = flux_mean
+        self.flux_std = flux_std
         self.delta_t_mean = delta_t_mean
+        self.delta_t_std = delta_t_std
+        
+        self._flux_scale = 1.0 / (flux_std + EPS)
+        self._dt_scale = 1.0 / (delta_t_std + EPS)
     
     def __len__(self) -> int:
         return len(self.indices)
     
-    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor, int]:
+    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, int]:
+        """
+        Get a single sample.
+        
+        Returns
+        -------
+        flux : Tensor [T]
+            Flux values. Missing observations = 0.0.
+        delta_t : Tensor [T]
+            Time differences.
+        label : int
+            Class label.
+        """
         full_idx = self.indices[idx]
         
-        magnification_raw = self.magnification[full_idx].copy()
+        flux_raw = self.flux[full_idx].copy()
         delta_t_raw = self.delta_t[full_idx].copy()
         label = int(self.labels[full_idx])
         
-        # Sequence compaction
-        valid_mask = magnification_raw != 0.0
-        valid_count = valid_mask.sum()
+        if self.normalize:
+            # Only normalize valid (non-zero) observations
+            valid_mask = flux_raw != 0.0
+            if valid_mask.any():
+                flux_raw[valid_mask] = (flux_raw[valid_mask] - self.flux_mean) * self._flux_scale
+                delta_t_raw[valid_mask] = (delta_t_raw[valid_mask] - self.delta_t_mean) * self._dt_scale
         
-        if valid_count == 0:
-            valid_count = 1
-            magnification_raw[0] = self.magnification_mean
-            delta_t_raw[0] = 0.0
-            valid_mask[0] = True
+        flux_tensor = torch.from_numpy(flux_raw).float()
+        delta_t_tensor = torch.from_numpy(delta_t_raw).float()
         
-        magnification_compacted = np.zeros_like(magnification_raw)
-        delta_t_compacted = np.zeros_like(delta_t_raw)
-        
-        magnification_compacted[:valid_count] = magnification_raw[valid_mask]
-        delta_t_compacted[:valid_count] = delta_t_raw[valid_mask]
-        
-        magnification_norm = (magnification_compacted - self.magnification_mean) * self._magnification_scale
-        dt_norm = (delta_t_compacted - self.delta_t_mean) * self._dt_scale
-        
-        magnification_tensor = torch.from_numpy(magnification_norm).float()
-        delta_t_tensor = torch.from_numpy(dt_norm).float()
-        # v4.0.0: Return length as tensor for device transfer
-        length_tensor = torch.tensor(int(valid_count), dtype=torch.long)
-        
-        return magnification_tensor, delta_t_tensor, length_tensor, label
+        return flux_tensor, delta_t_tensor, label
     
     def __del__(self) -> None:
+        """Cleanup references to prevent memory leaks."""
         try:
-            self.magnification = None
+            self.flux = None
             self.delta_t = None
             self.labels = None
             self.indices = None
-        except:
+        except Exception:
             pass
 
 # =============================================================================
-# DATA LOADING (v4.1.0: Broadcast optimization)
+# DATA LOADING
 # =============================================================================
 
-def compute_robust_statistics(
-    file_path: str,
+def compute_normalization_statistics(
+    flux: np.ndarray,
+    delta_t: np.ndarray,
     rank: int = 0
 ) -> Dict[str, float]:
-    """Compute normalization statistics."""
-    file_path = Path(file_path)
+    """Compute normalization statistics from valid observations."""
+    flux_valid = flux[flux != 0.0]
+    delta_t_valid = delta_t[delta_t != 0.0]
     
-    if file_path.suffix == '.npz':
-        data = np.load(str(file_path))
-        magnification_data = data.get('flux', data.get('magnification', data.get('mag')))
-        delta_t_data = data['delta_t']
-    else:
-        with h5py.File(str(file_path), 'r') as f:
-            if 'flux' in f:
-                magnification_data = f['flux'][:]
-            elif 'magnification' in f:
-                magnification_data = f['magnification'][:]
-            else:
-                magnification_data = f['mag'][:]
-            delta_t_data = f['delta_t'][:]
-    
-    magnification_valid = magnification_data[magnification_data != 0.0]
-    delta_t_valid = delta_t_data[delta_t_data != 0.0]
-    
-    magnification_mean = float(np.mean(magnification_valid))
-    magnification_std = float(np.std(magnification_valid))
-    delta_t_mean = float(np.mean(delta_t_valid))
-    delta_t_std = float(np.std(delta_t_valid))
-    
-    return {
-        'magnification_mean': magnification_mean,
-        'magnification_std': magnification_std,
-        'delta_t_mean': delta_t_mean,
-        'delta_t_std': delta_t_std
+    stats = {
+        'flux_mean': float(np.mean(flux_valid)),
+        'flux_std': float(np.std(flux_valid)),
+        'delta_t_mean': float(np.mean(delta_t_valid)),
+        'delta_t_std': float(np.std(delta_t_valid))
     }
-
+    
+    if is_main_process(rank):
+        logger.info("Normalization statistics:")
+        logger.info(f"  Flux: mean={stats['flux_mean']:.4f}, std={stats['flux_std']:.4f}")
+        logger.info(f"  Delta_t: mean={stats['delta_t_mean']:.4f}, std={stats['delta_t_std']:.4f}")
+    
+    return stats
 
 def load_and_split_data(
     file_path: str,
@@ -628,57 +475,24 @@ def load_and_split_data(
     """
     Load data, compute statistics, and split into train/val.
     
-    v4.1.0: Rank 0 computes everything and broadcasts to avoid redundant file reads.
-    
-    Parameters
-    ----------
-    file_path : str
-        Path to data file.
-    val_fraction : float
-        Fraction of data for validation.
-    seed : int
-        Random seed for reproducibility.
-    rank : int
-        Process rank.
-    is_ddp : bool
-        Whether using distributed training.
-    
-    Returns
-    -------
-    train_idx : np.ndarray
-        Training indices.
-    val_idx : np.ndarray
-        Validation indices.
-    train_labels : np.ndarray
-        Labels for training samples.
-    stats : dict
-        Normalization statistics.
+    Rank 0 computes everything and broadcasts to avoid redundant file reads.
     """
     if is_ddp:
-        # v4.1.0: Only rank 0 reads file and computes, then broadcasts
         if rank == 0:
-            file_path_obj = Path(file_path)
+            flux, delta_t, labels = _load_arrays_from_file(file_path)
+            total_samples = len(labels)
             
-            if file_path_obj.suffix == '.npz':
-                data = np.load(str(file_path_obj))
-                total_samples = len(data.get('labels', data['y']))
-                all_labels = data.get('labels', data['y'])
-            else:
-                with h5py.File(str(file_path_obj), 'r') as f:
-                    total_samples = len(f['labels'])
-                    all_labels = f['labels'][:]
-            
-            stats = compute_robust_statistics(file_path, rank)
+            stats = compute_normalization_statistics(flux, delta_t, rank)
             
             indices = np.arange(total_samples)
             train_idx, val_idx = train_test_split(
                 indices,
                 test_size=val_fraction,
-                stratify=all_labels,
+                stratify=labels,
                 random_state=seed
             )
             
-            train_labels = all_labels[train_idx]
+            train_labels = labels[train_idx]
             
             logger.info(f"Dataset: {format_number(total_samples)} samples")
             logger.info(f"  Train: {format_number(len(train_idx))} samples")
@@ -689,41 +503,33 @@ def load_and_split_data(
             for cls_idx, count in zip(unique, counts):
                 pct = 100 * count / len(train_labels)
                 logger.info(f"  {CLASS_NAMES[cls_idx]}: {count:,} ({pct:.1f}%)")
+            
+            del flux, delta_t, labels
         else:
             train_idx = None
             val_idx = None
             train_labels = None
             stats = None
         
-        # v4.1.0: Broadcast from rank0 to all other ranks
         obj_list = [train_idx, val_idx, train_labels, stats]
         dist.broadcast_object_list(obj_list, src=0)
         train_idx, val_idx, train_labels, stats = obj_list
         
     else:
-        # Non-DDP path: single process does everything
-        file_path_obj = Path(file_path)
+        flux, delta_t, labels = _load_arrays_from_file(file_path)
+        total_samples = len(labels)
         
-        if file_path_obj.suffix == '.npz':
-            data = np.load(str(file_path_obj))
-            total_samples = len(data.get('labels', data['y']))
-            all_labels = data.get('labels', data['y'])
-        else:
-            with h5py.File(str(file_path_obj), 'r') as f:
-                total_samples = len(f['labels'])
-                all_labels = f['labels'][:]
-        
-        stats = compute_robust_statistics(file_path, rank)
+        stats = compute_normalization_statistics(flux, delta_t, rank)
         
         indices = np.arange(total_samples)
         train_idx, val_idx = train_test_split(
             indices,
             test_size=val_fraction,
-            stratify=all_labels,
+            stratify=labels,
             random_state=seed
         )
         
-        train_labels = all_labels[train_idx]
+        train_labels = labels[train_idx]
         
         if is_main_process(rank):
             logger.info(f"Dataset: {format_number(total_samples)} samples")
@@ -735,6 +541,8 @@ def load_and_split_data(
             for cls_idx, count in zip(unique, counts):
                 pct = 100 * count / len(train_labels)
                 logger.info(f"  {CLASS_NAMES[cls_idx]}: {count:,} ({pct:.1f}%)")
+        
+        del flux, delta_t, labels
     
     return train_idx, val_idx, train_labels, stats
 
@@ -749,60 +557,28 @@ def create_dataloaders(
     prefetch_factor: int,
     is_ddp: bool,
     rank: int,
-    local_rank: int
+    local_rank: int,
+    normalize: bool = True
 ) -> Tuple[DataLoader, DataLoader, str]:
-    """
-    Create dataloaders with /dev/shm optimization (v4.1.0).
-    
-    Returns
-    -------
-    train_loader : DataLoader
-    val_loader : DataLoader
-    shm_path : str
-        Path to /dev/shm file (for cleanup later).
-    """
-    # =========================================================================
-    # v4.1.0: Load to /dev/shm (ONLY local_rank=0 per node copies)
-    # =========================================================================
-    shm_path, magnification, delta_t, labels = load_data_to_shared_memory(
+    """Create dataloaders with /dev/shm optimization."""
+    shm_path, flux, delta_t, labels = load_data_to_shared_memory(
         file_path, rank, local_rank, is_ddp
     )
     
-    # =========================================================================
-    # v3.1.0: Create shared datasets (no train/val double loading)
-    # v4.1.0 FIX: Use correct stats keys (magnification_mean, not flux_mean)
-    # =========================================================================
-    train_dataset = SharedRAMLensingDataset(
-        magnification, delta_t, labels, train_idx,
-        stats['magnification_mean'], stats['magnification_std'],
+    train_dataset = MicrolensingDataset(
+        flux, delta_t, labels, train_idx,
+        stats['flux_mean'], stats['flux_std'],
         stats['delta_t_mean'], stats['delta_t_std'],
-        rank=rank
+        normalize=normalize
     )
     
-    val_dataset = SharedRAMLensingDataset(
-        magnification, delta_t, labels, val_idx,
-        stats['magnification_mean'], stats['magnification_std'],
+    val_dataset = MicrolensingDataset(
+        flux, delta_t, labels, val_idx,
+        stats['flux_mean'], stats['flux_std'],
         stats['delta_t_mean'], stats['delta_t_std'],
-        rank=rank
+        normalize=normalize
     )
     
-    if is_main_process(rank):
-        total_mem = (magnification.nbytes + delta_t.nbytes + labels.nbytes) / 1e9
-        local_world_size = int(os.environ.get(
-            "LOCAL_WORLD_SIZE",
-            torch.cuda.device_count() if torch.cuda.is_available() else 1
-        ))
-        world_size = dist.get_world_size() if is_ddp else 1
-        n_nodes = world_size // local_world_size if is_ddp else 1
-        logger.info("=" * 80)
-        logger.info(f"v4.1.0 MEMORY LAYOUT:")
-        logger.info(f"  Array size per process: {total_mem:.2f} GB")
-        logger.info(f"  Processes per node: {local_world_size}")
-        logger.info(f"  Total nodes: {n_nodes}")
-        logger.info(f"  /dev/shm benefit: Fast RAM reads, page cache shared at OS level")
-        logger.info("=" * 80)
-    
-    # Setup samplers
     if is_ddp:
         train_sampler = DistributedSampler(
             train_dataset, shuffle=True, seed=SEED, drop_last=True
@@ -814,7 +590,6 @@ def create_dataloaders(
         train_sampler = None
         val_sampler = None
     
-    # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -849,18 +624,26 @@ def create_dataloaders(
     return train_loader, val_loader, shm_path
 
 # =============================================================================
-# SCHEDULER, WEIGHTS, LOSS (Same as v3.1.0)
+# SCHEDULER
 # =============================================================================
 
 class WarmupCosineScheduler(_LRScheduler):
     """Cosine annealing scheduler with linear warmup."""
-    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=0.0, last_epoch=-1):
+    
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        warmup_steps: int,
+        total_steps: int,
+        min_lr: float = 0.0,
+        last_epoch: int = -1
+    ) -> None:
         self.warmup_steps = warmup_steps
         self.total_steps = total_steps
         self.min_lr = min_lr
         super().__init__(optimizer, last_epoch)
     
-    def get_lr(self):
+    def get_lr(self) -> List[float]:
         if self.last_epoch < self.warmup_steps:
             alpha = self.last_epoch / max(self.warmup_steps, 1)
             return [base_lr * alpha for base_lr in self.base_lrs]
@@ -869,59 +652,123 @@ class WarmupCosineScheduler(_LRScheduler):
             cosine_decay = 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
             return [self.min_lr + (base_lr - self.min_lr) * cosine_decay for base_lr in self.base_lrs]
 
-def compute_class_weights(labels, n_classes, device):
-    """Compute balanced class weights."""
+# =============================================================================
+# CLASS WEIGHTS
+# =============================================================================
+
+def compute_class_weights(
+    labels: np.ndarray,
+    n_classes: int,
+    device: torch.device
+) -> Tensor:
+    """Compute balanced class weights using inverse frequency."""
     counts = np.bincount(labels, minlength=n_classes)
     weights = 1.0 / (counts + EPS)
     weights = weights / weights.sum() * n_classes
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
-def compute_hierarchical_loss(output, labels, class_weights, stage1_weight=1.0, stage2_weight=1.0, aux_weight=0.5):
-    """Compute hierarchical loss (v3.0.0 fix)."""
+# =============================================================================
+# HIERARCHICAL LOSS
+# =============================================================================
+
+def compute_hierarchical_loss(
+    output: HierarchicalOutput,
+    labels: Tensor,
+    class_weights: Tensor,
+    stage1_weight: float = 1.0,
+    stage2_weight: float = 1.0,
+    aux_weight: float = 0.3,
+    nll_weight: float = 0.5
+) -> Tuple[Tensor, Dict[str, float]]:
+    """
+    Compute hierarchical classification loss.
+    
+    Components:
+    1. Stage 1 BCE: P(deviation) - flat vs non-flat
+    2. Stage 2 BCE: P(PSPL|deviation) - PSPL vs binary (non-flat only)
+    3. Aux CE: Standard cross-entropy on auxiliary head
+    4. NLL: Negative log likelihood on final log_probs
+    """
     device = labels.device
-    B = labels.size(0)
     
     is_deviation = (labels > 0).float().unsqueeze(1)
     is_pspl = (labels == 1).float().unsqueeze(1)
     non_flat_mask = (labels > 0)
     n_non_flat = non_flat_mask.sum().item()
     
-    stage1_pos_weight_scalar = (class_weights[1] + class_weights[2]) / 2.0 / (class_weights[0] + EPS)
+    # Stage 1: Flat vs Deviation
+    stage1_pos_weight = (class_weights[1] + class_weights[2]) / 2.0 / (class_weights[0] + EPS)
     stage1_bce = F.binary_cross_entropy_with_logits(
-        output.stage1_logit, is_deviation, pos_weight=stage1_pos_weight_scalar, reduction='mean'
+        output.stage1_logit,
+        is_deviation,
+        pos_weight=stage1_pos_weight.unsqueeze(0),
+        reduction='mean'
     )
     
+    # Stage 2: PSPL vs Binary (only for non-flat samples)
     if n_non_flat > 0:
         stage2_logit_nonflat = output.stage2_logit[non_flat_mask]
         is_pspl_nonflat = is_pspl[non_flat_mask]
-        stage2_pos_weight_scalar = class_weights[1] / (class_weights[2] + EPS)
+        stage2_pos_weight = class_weights[1] / (class_weights[2] + EPS)
         stage2_bce = F.binary_cross_entropy_with_logits(
-            stage2_logit_nonflat, is_pspl_nonflat, pos_weight=stage2_pos_weight_scalar, reduction='mean'
+            stage2_logit_nonflat,
+            is_pspl_nonflat,
+            pos_weight=stage2_pos_weight.unsqueeze(0),
+            reduction='mean'
         )
     else:
         stage2_bce = torch.tensor(0.0, device=device)
     
+    # Auxiliary head cross-entropy
     if output.aux_logits is not None:
         aux_ce = F.cross_entropy(output.aux_logits, labels, weight=class_weights)
     else:
         aux_ce = torch.tensor(0.0, device=device)
     
-    total_loss = stage1_weight * stage1_bce + stage2_weight * stage2_bce + aux_weight * aux_ce
+    # NLL loss on final log probabilities
+    nll_loss = F.nll_loss(output.log_probs, labels, weight=class_weights)
+    
+    # Combined loss
+    total_loss = (
+        stage1_weight * stage1_bce +
+        stage2_weight * stage2_bce +
+        aux_weight * aux_ce +
+        nll_weight * nll_loss
+    )
     
     return total_loss, {
         'stage1_bce': float(stage1_bce.item()),
         'stage2_bce': float(stage2_bce.item()) if n_non_flat > 0 else 0.0,
         'aux_ce': float(aux_ce.item()) if output.aux_logits is not None else 0.0,
+        'nll': float(nll_loss.item()),
         'total': float(total_loss.item()),
         'n_non_flat': n_non_flat
     }
 
 # =============================================================================
-# TRAINING & EVALUATION (v4.0.0: Fixed model calls and lengths device)
+# TRAINING
 # =============================================================================
 
-def train_epoch(model, loader, optimizer, scheduler, scaler, class_weights, device, rank, world_size,
-                epoch, config, accumulation_steps=1, clip_norm=1.0, stage1_weight=1.0, stage2_weight=1.0, aux_weight=0.5):
+def train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scheduler: _LRScheduler,
+    scaler: Optional[torch.amp.GradScaler],
+    class_weights: Tensor,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    epoch: int,
+    hierarchical: bool,
+    use_amp: bool,
+    accumulation_steps: int = 1,
+    clip_norm: float = 1.0,
+    stage1_weight: float = 1.0,
+    stage2_weight: float = 1.0,
+    aux_weight: float = 0.3,
+    nll_weight: float = 0.5
+) -> Tuple[float, float]:
     """Execute one training epoch."""
     model.train()
     
@@ -930,11 +777,16 @@ def train_epoch(model, loader, optimizer, scheduler, scaler, class_weights, devi
     total_samples_gpu = torch.zeros(1, device=device, dtype=torch.long)
     total_stage1_loss = torch.zeros(1, device=device)
     total_stage2_loss = torch.zeros(1, device=device)
-    total_aux_loss = torch.zeros(1, device=device)
     
-    pbar = tqdm(loader, desc=f'Epoch {epoch} [Train]', disable=not is_main_process(rank), ncols=120, leave=False)
+    pbar = tqdm(
+        loader,
+        desc=f'Epoch {epoch} [Train]',
+        disable=not is_main_process(rank),
+        ncols=120,
+        leave=False
+    )
     
-    if device.type == 'cuda' and config.use_amp:
+    if device.type == 'cuda' and use_amp:
         autocast_ctx = torch.amp.autocast('cuda', enabled=True)
     else:
         autocast_ctx = nullcontext()
@@ -942,27 +794,25 @@ def train_epoch(model, loader, optimizer, scheduler, scaler, class_weights, devi
     optimizer.zero_grad(set_to_none=True)
     
     for batch_idx, batch in enumerate(pbar):
-        magnification = batch[0].to(device, non_blocking=True)
+        flux = batch[0].to(device, non_blocking=True)
         delta_t = batch[1].to(device, non_blocking=True)
-        # v4.0.0 FIX: Move lengths to device (was staying on CPU)
-        lengths = batch[2].to(device, non_blocking=True)
-        labels = batch[3].to(device, non_blocking=True)
+        labels = batch[2].to(device, non_blocking=True)
         
         with autocast_ctx:
-            if config.hierarchical:
-                # v4.0.0 FIX: Use keyword argument for lengths (matches v4 model API)
-                output = model(magnification, delta_t, lengths=lengths, return_intermediates=True)
+            if hierarchical:
+                # model.py v7.1.0: forward(flux, delta_t, return_intermediates=True)
+                output = model(flux, delta_t, return_intermediates=True)
                 loss, loss_dict = compute_hierarchical_loss(
-                    output, labels, class_weights, stage1_weight, stage2_weight, aux_weight
+                    output, labels, class_weights,
+                    stage1_weight, stage2_weight, aux_weight, nll_weight
                 )
-                logits = output.logits
+                log_probs = output.log_probs
                 total_stage1_loss += loss_dict['stage1_bce']
                 total_stage2_loss += loss_dict['stage2_bce']
-                total_aux_loss += loss_dict['aux_ce']
             else:
-                # v4.0.0 FIX: Use keyword argument for lengths
-                logits = model(magnification, delta_t, lengths=lengths)
-                loss = F.cross_entropy(logits, labels, weight=class_weights)
+                # Non-hierarchical: model returns log_probs directly
+                log_probs = model(flux, delta_t)
+                loss = F.nll_loss(log_probs, labels, weight=class_weights)
             
             loss = loss / accumulation_steps
         
@@ -985,12 +835,10 @@ def train_epoch(model, loader, optimizer, scheduler, scaler, class_weights, devi
             scheduler.step()
         
         with torch.no_grad():
-            if config.hierarchical:
-                probs = torch.exp(logits)
-            else:
-                probs = F.softmax(logits, dim=1)
-            
+            # Model returns log_probs, convert to probs
+            probs = torch.exp(log_probs)
             preds = probs.argmax(dim=1)
+            
             total_loss_gpu += loss.detach() * accumulation_steps
             total_correct_gpu += (preds == labels).sum()
             total_samples_gpu += labels.size(0)
@@ -999,7 +847,7 @@ def train_epoch(model, loader, optimizer, scheduler, scaler, class_weights, devi
             current_loss = total_loss_gpu.item() / max(total_samples_gpu.item(), 1)
             current_acc = total_correct_gpu.item() / max(total_samples_gpu.item(), 1)
             
-            if config.hierarchical:
+            if hierarchical:
                 n_batches = batch_idx + 1
                 pbar.set_postfix({
                     'loss': f'{current_loss:.4f}',
@@ -1025,10 +873,26 @@ def train_epoch(model, loader, optimizer, scheduler, scaler, class_weights, devi
     
     return avg_loss, avg_acc
 
+# =============================================================================
+# EVALUATION
+# =============================================================================
+
 @torch.no_grad()
-def evaluate(model, loader, class_weights, device, rank, world_size, config,
-             stage1_weight=1.0, stage2_weight=1.0, aux_weight=0.5):
-    """Evaluate model."""
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    class_weights: Tensor,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    hierarchical: bool,
+    use_amp: bool,
+    stage1_weight: float = 1.0,
+    stage2_weight: float = 1.0,
+    aux_weight: float = 0.3,
+    nll_weight: float = 0.5
+) -> Dict[str, float]:
+    """Evaluate model on validation set."""
     model.eval()
     
     total_loss_gpu = torch.zeros(1, device=device)
@@ -1037,42 +901,32 @@ def evaluate(model, loader, class_weights, device, rank, world_size, config,
     class_correct = torch.zeros(N_CLASSES, device=device, dtype=torch.long)
     class_total = torch.zeros(N_CLASSES, device=device, dtype=torch.long)
     
-    if device.type == 'cuda' and config.use_amp:
+    if device.type == 'cuda' and use_amp:
         autocast_ctx = torch.amp.autocast('cuda', enabled=True)
     else:
         autocast_ctx = nullcontext()
     
     for batch in loader:
-        magnification = batch[0].to(device, non_blocking=True)
+        flux = batch[0].to(device, non_blocking=True)
         delta_t = batch[1].to(device, non_blocking=True)
-        # v4.0.0 FIX: Move lengths to device (was staying on CPU)
-        lengths = batch[2].to(device, non_blocking=True)
-        labels = batch[3].to(device, non_blocking=True)
+        labels = batch[2].to(device, non_blocking=True)
         
         with autocast_ctx:
-            if config.hierarchical:
-                # v4.0.0 FIX: Use keyword argument for lengths (matches v4 model API)
-                output = model(magnification, delta_t, lengths=lengths, return_intermediates=True)
+            if hierarchical:
+                output = model(flux, delta_t, return_intermediates=True)
                 loss, _ = compute_hierarchical_loss(
-                    output, labels, class_weights, stage1_weight, stage2_weight, aux_weight
+                    output, labels, class_weights,
+                    stage1_weight, stage2_weight, aux_weight, nll_weight
                 )
-                logits = output.logits
+                log_probs = output.log_probs
             else:
-                # v4.0.0 FIX: Use keyword argument for lengths
-                logits = model(magnification, delta_t, lengths=lengths)
-                loss = F.cross_entropy(logits, labels, weight=class_weights, reduction='sum')
+                log_probs = model(flux, delta_t)
+                loss = F.nll_loss(log_probs, labels, weight=class_weights)
         
-        if config.hierarchical:
-            probs = torch.exp(logits)
-        else:
-            probs = F.softmax(logits, dim=1)
-        
+        probs = torch.exp(log_probs)
         preds = probs.argmax(dim=1)
         
-        if config.hierarchical:
-            total_loss_gpu += loss * labels.size(0)
-        else:
-            total_loss_gpu += loss
+        total_loss_gpu += loss * labels.size(0)
         total_correct_gpu += (preds == labels).sum()
         total_samples_gpu += labels.size(0)
         
@@ -1105,10 +959,20 @@ def evaluate(model, loader, class_weights, device, rank, world_size, config,
     }
 
 # =============================================================================
-# CHECKPOINTING (v4.0.0: Fixed torch.load compatibility)
+# CHECKPOINTING
 # =============================================================================
 
-def save_checkpoint(model, optimizer, scheduler, scaler, config, stats, epoch, best_acc, path):
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: _LRScheduler,
+    scaler: Optional[torch.amp.GradScaler],
+    config: ModelConfig,
+    stats: Dict[str, float],
+    epoch: int,
+    best_acc: float,
+    path: Union[str, Path]
+) -> None:
     """Save training checkpoint."""
     model_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
     checkpoint = {
@@ -1125,16 +989,25 @@ def save_checkpoint(model, optimizer, scheduler, scaler, config, stats, epoch, b
     torch.save(checkpoint, path)
     logger.info(f"Checkpoint saved: {path}")
 
-def load_checkpoint_for_resume(path, model, optimizer, scheduler, scaler, device):
-    """
-    Load checkpoint for resuming training.
-    
-    v4.0.0 FIX: Uses torch_load_compat with weights_only=False for full checkpoint.
-    """
-    # v4.0.0 FIX: Use compat loader with weights_only=False (checkpoint has metadata)
+def load_checkpoint_for_resume(
+    path: Union[str, Path],
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: _LRScheduler,
+    scaler: Optional[torch.amp.GradScaler],
+    device: torch.device
+) -> Tuple[int, float]:
+    """Load checkpoint for resuming training."""
     checkpoint = torch_load_compat(path, map_location=device, weights_only=False)
     
     state = checkpoint['model_state_dict']
+    
+    # Handle DDP and torch.compile prefixes
+    if any(k.startswith('module.') for k in state):
+        state = {k.replace('module.', ''): v for k, v in state.items()}
+    if any(k.startswith('_orig_mod.') for k in state):
+        state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}
+    
     if isinstance(model, DDP):
         model.module.load_state_dict(state)
     else:
@@ -1154,10 +1027,10 @@ def load_checkpoint_for_resume(path, model, optimizer, scheduler, scaler, device
     return start_epoch, best_acc
 
 # =============================================================================
-# DDP SETUP (Same as v3.1.0)
+# DDP SETUP
 # =============================================================================
 
-def setup_ddp():
+def setup_ddp() -> Tuple[int, int, int, torch.device]:
     """Setup Distributed Data Parallel."""
     if dist.is_initialized():
         rank = dist.get_rank()
@@ -1218,7 +1091,7 @@ def setup_ddp():
     
     return rank, local_rank, world_size, device
 
-def cleanup_ddp():
+def cleanup_ddp() -> None:
     """Cleanup DDP process group."""
     if dist.is_initialized():
         try:
@@ -1231,59 +1104,77 @@ def cleanup_ddp():
 # MAIN
 # =============================================================================
 
-def main():
+def main() -> None:
     """Main training entry point."""
     parser = argparse.ArgumentParser(
         description=f'Train Roman Microlensing Classifier v{__version__}',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
+    # Data arguments
     parser.add_argument('--data', type=str, required=True, help='Path to data file')
-    parser.add_argument('--output', type=str, default='../results/checkpoints', help='Output directory')
-    parser.add_argument('--output-dir', type=str, default=None, 
-                        help='Exact output directory (overrides auto-generated timestamped name)')
+    parser.add_argument('--output', type=str, default='./results/checkpoints', help='Output directory')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Exact output directory (overrides auto-generated name)')
     parser.add_argument('--val-fraction', type=float, default=DEFAULT_VAL_FRACTION, help='Validation fraction')
     
-    parser.add_argument('--d-model', type=int, default=128, help='Model dimension')
-    parser.add_argument('--n-layers', type=int, default=4, help='Number of GRU layers')
-    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout')
-    parser.add_argument('--window-size', type=int, default=7, help='Conv kernel size')
-    parser.add_argument('--hierarchical', action='store_true', help='Use hierarchical classification')
-    parser.add_argument('--attention-pooling', action='store_true', help='Use attention pooling')
+    # Model architecture
+    parser.add_argument('--d-model', type=int, default=32, help='Model dimension')
+    parser.add_argument('--n-layers', type=int, default=4, help='Number of LSTM layers')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout')
+    parser.add_argument('--window-size', type=int, default=5, help='Conv kernel size')
+    parser.add_argument('--hierarchical', action='store_true', default=True, help='Use hierarchical classification')
+    parser.add_argument('--no-hierarchical', dest='hierarchical', action='store_false')
+    parser.add_argument('--use-attention-pooling', action='store_true', default=True)
+    parser.add_argument('--no-attention-pooling', dest='use_attention_pooling', action='store_false')
+    parser.add_argument('--num-attention-heads', type=int, default=2)
+    parser.add_argument('--num-groups', type=int, default=8)
     
-    parser.add_argument('--use-aux-head', action='store_true', default=True, help='Use auxiliary head')
-    parser.add_argument('--no-aux-head', dest='use_aux_head', action='store_false', help='Disable aux head')
-    parser.add_argument('--stage2-temperature', type=float, default=1.0, help='Stage 2 temperature')
-    parser.add_argument('--stage1-weight', type=float, default=DEFAULT_STAGE1_WEIGHT, help='Stage 1 weight')
-    parser.add_argument('--stage2-weight', type=float, default=DEFAULT_STAGE2_WEIGHT, help='Stage 2 weight')
-    parser.add_argument('--aux-weight', type=float, default=DEFAULT_AUX_WEIGHT, help='Aux weight')
+    # Hierarchical head
+    parser.add_argument('--use-aux-head', action='store_true', default=True)
+    parser.add_argument('--no-aux-head', dest='use_aux_head', action='store_false')
+    parser.add_argument('--stage2-temperature', type=float, default=1.0)
     
-    parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE, help='Batch size per GPU')
-    parser.add_argument('--lr', type=float, default=DEFAULT_LR, help='Learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay')
-    parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS, help='Number of epochs')
-    parser.add_argument('--warmup-epochs', type=int, default=DEFAULT_WARMUP_EPOCHS, help='Warmup epochs')
-    parser.add_argument('--accumulation-steps', type=int, default=DEFAULT_ACCUMULATION_STEPS, help='Gradient accumulation')
-    parser.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM, help='Gradient clipping norm')
+    # Loss weights
+    parser.add_argument('--stage1-weight', type=float, default=DEFAULT_STAGE1_WEIGHT)
+    parser.add_argument('--stage2-weight', type=float, default=DEFAULT_STAGE2_WEIGHT)
+    parser.add_argument('--aux-weight', type=float, default=DEFAULT_AUX_WEIGHT)
+    parser.add_argument('--nll-weight', type=float, default=DEFAULT_NLL_WEIGHT)
     
-    parser.add_argument('--use-amp', action='store_true', help='Use mixed precision')
-    parser.add_argument('--compile', action='store_true', help='Use torch.compile')
+    # Training
+    parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument('--lr', type=float, default=DEFAULT_LR)
+    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument('--warmup-epochs', type=int, default=DEFAULT_WARMUP_EPOCHS)
+    parser.add_argument('--accumulation-steps', type=int, default=DEFAULT_ACCUMULATION_STEPS)
+    parser.add_argument('--clip-norm', type=float, default=DEFAULT_CLIP_NORM)
+    
+    # Performance
+    parser.add_argument('--use-amp', action='store_true')
+    parser.add_argument('--compile', action='store_true')
     parser.add_argument('--compile-mode', type=str, default='reduce-overhead',
-                       choices=['default', 'reduce-overhead', 'max-autotune'], help='Compile mode')
-    parser.add_argument('--no-class-weights', action='store_true', help='Disable class weighting')
+                        choices=['default', 'reduce-overhead', 'max-autotune'])
+    parser.add_argument('--gradient-checkpointing', action='store_true')
+    parser.add_argument('--no-class-weights', action='store_true')
+    parser.add_argument('--no-normalize', action='store_true')
     
-    parser.add_argument('--num-workers', type=int, default=DEFAULT_NUM_WORKERS, help='Data workers')
-    parser.add_argument('--prefetch-factor', type=int, default=DEFAULT_PREFETCH_FACTOR, help='Prefetch factor')
+    # Data loading
+    parser.add_argument('--num-workers', type=int, default=DEFAULT_NUM_WORKERS)
+    parser.add_argument('--prefetch-factor', type=int, default=DEFAULT_PREFETCH_FACTOR)
     
-    parser.add_argument('--resume', type=str, default=None, help='Resume checkpoint')
-    parser.add_argument('--save-every', type=int, default=5, help='Save every N epochs')
+    # Checkpointing
+    parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--save-every', type=int, default=5)
     
     args = parser.parse_args()
     args.use_class_weights = not args.no_class_weights
+    args.normalize = not args.no_normalize
     
     set_seed(SEED)
     configure_cuda()
     rank, local_rank, world_size, device = setup_ddp()
+    
     global logger
     logger = setup_logging(rank)
     
@@ -1295,19 +1186,16 @@ def main():
         logger.info("=" * 80)
         logger.info(f"Device: {device}")
         logger.info(f"World size: {world_size}")
-        logger.info(f"GPUs per node: {torch.cuda.device_count()}")
-        logger.info(f"Workers: {args.num_workers}")
+        if torch.cuda.is_available():
+            logger.info(f"GPUs per node: {torch.cuda.device_count()}")
         if args.hierarchical:
-            logger.info("=" * 80)
-            logger.info("HIERARCHICAL MODE (v4.1 FIXES APPLIED)")
+            logger.info("HIERARCHICAL MODE")
             logger.info(f"  Stage 1 weight: {args.stage1_weight}")
             logger.info(f"  Stage 2 weight: {args.stage2_weight}")
             logger.info(f"  Aux weight: {args.aux_weight}")
-            logger.info("=" * 80)
+            logger.info(f"  NLL weight: {args.nll_weight}")
     
     if is_ddp:
-        if is_main_process(rank):
-            logger.info("Synchronizing all processes...")
         dist.barrier()
     
     base_output_dir = Path(args.output)
@@ -1318,12 +1206,10 @@ def main():
         dist.barrier()
     
     if is_main_process(rank):
-        # v4.2.0: Support --output-dir for resuming in same directory
         if args.output_dir:
             output_dir = Path(args.output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             exp_name = output_dir.name
-            logger.info(f"Using specified output directory: {output_dir}")
         else:
             output_dir = create_experiment_dir(base_output_dir, args)
             exp_name = output_dir.name
@@ -1340,28 +1226,38 @@ def main():
         exp_name = exp_name_list[0]
         output_dir = Path(args.output_dir) if args.output_dir else base_output_dir / exp_name
     
-    # v4.1.0: Pass is_ddp to enable broadcast optimization
+    # Load and split data
     train_idx, val_idx, train_labels, stats = load_and_split_data(
         args.data, args.val_fraction, SEED, rank, is_ddp
     )
     
-    # v4.1.0: Multi-GPU /dev/shm dataloaders
+    # Create dataloaders
     train_loader, val_loader, shm_path = create_dataloaders(
         args.data, train_idx, val_idx, stats,
         args.batch_size, args.num_workers, args.prefetch_factor,
-        is_ddp, rank, local_rank
+        is_ddp, rank, local_rank,
+        normalize=args.normalize
     )
     
+    # Create model configuration (compatible with model.py v7.1.0)
     config = ModelConfig(
         d_model=args.d_model,
         n_layers=args.n_layers,
         dropout=args.dropout,
         window_size=args.window_size,
+        n_classes=N_CLASSES,
         hierarchical=args.hierarchical,
         use_aux_head=args.use_aux_head,
         stage2_temperature=args.stage2_temperature,
-        use_attention_pooling=args.attention_pooling,
-        use_amp=args.use_amp
+        use_residual=True,
+        use_layer_norm=True,
+        use_attention_pooling=args.use_attention_pooling,
+        use_flash_attention=True,
+        num_attention_heads=args.num_attention_heads,
+        lstm_dropout=args.dropout * 0.5,
+        locked_dropout=args.dropout * 0.5,
+        num_groups=args.num_groups,
+        use_gradient_checkpointing=args.gradient_checkpointing
     )
     
     if is_main_process(rank):
@@ -1374,10 +1270,10 @@ def main():
     model = RomanMicrolensingClassifier(config).to(device)
     
     if is_main_process(rank):
-        complexity = model.get_complexity_info()
+        n_params = model.count_parameters(trainable_only=True)
         logger.info("Model Architecture:")
-        logger.info(f"  Total parameters: {format_number(complexity['total_parameters'])}")
-        logger.info(f"  Trainable parameters: {format_number(complexity['trainable_parameters'])}")
+        logger.info(f"  Trainable parameters: {format_number(n_params)}")
+        logger.info(f"  Receptive field: {model.receptive_field} timesteps")
         
         if config.hierarchical:
             logger.info("Hierarchical Head Initialization:")
@@ -1399,28 +1295,43 @@ def main():
             if is_main_process(rank):
                 logger.warning(f"torch.compile failed: {e}")
     
+    # Optimizer
     fused_available = 'fused' in torch.optim.AdamW.__init__.__code__.co_varnames
     if fused_available and device.type == 'cuda':
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True
+        )
         if is_main_process(rank):
             logger.info("Using fused AdamW optimizer")
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
     
+    # Scheduler
     steps_per_epoch = len(train_loader) // args.accumulation_steps
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = steps_per_epoch * args.warmup_epochs
     
     scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps, min_lr=1e-6)
     
-    use_scaler = args.use_amp and device.type == 'cuda' and not torch.cuda.is_bf16_supported()
-    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler) if use_scaler else None
-    
-    if args.use_class_weights:
-        class_weights = compute_class_weights(train_labels, config.n_classes, device)
+    # AMP scaler
+    if args.use_amp and device.type == 'cuda':
+        scaler = torch.amp.GradScaler('cuda', enabled=True)
+        if is_main_process(rank):
+            logger.info("Using AMP with gradient scaler")
     else:
-        class_weights = torch.ones(config.n_classes, device=device)
+        scaler = None
     
+    # Class weights
+    if args.use_class_weights:
+        class_weights = compute_class_weights(train_labels, N_CLASSES, device)
+        if is_main_process(rank):
+            logger.info(f"Class weights: {class_weights.tolist()}")
+    else:
+        class_weights = torch.ones(N_CLASSES, device=device)
+    
+    # Resume
     start_epoch = 1
     best_acc = 0.0
     if args.resume:
@@ -1431,6 +1342,7 @@ def main():
     if is_ddp:
         dist.barrier()
     
+    # Training loop
     try:
         if is_main_process(rank):
             logger.info("Starting training...")
@@ -1441,18 +1353,19 @@ def main():
             
             if is_ddp:
                 train_loader.sampler.set_epoch(epoch)
-                val_loader.sampler.set_epoch(epoch)
             
             train_loss, train_acc = train_epoch(
                 model, train_loader, optimizer, scheduler, scaler,
-                class_weights, device, rank, world_size, epoch, config,
+                class_weights, device, rank, world_size, epoch,
+                args.hierarchical, args.use_amp,
                 args.accumulation_steps, args.clip_norm,
-                args.stage1_weight, args.stage2_weight, args.aux_weight
+                args.stage1_weight, args.stage2_weight, args.aux_weight, args.nll_weight
             )
             
             val_results = evaluate(
-                model, val_loader, class_weights, device, rank, world_size, config,
-                args.stage1_weight, args.stage2_weight, args.aux_weight
+                model, val_loader, class_weights, device, rank, world_size,
+                args.hierarchical, args.use_amp,
+                args.stage1_weight, args.stage2_weight, args.aux_weight, args.nll_weight
             )
             
             epoch_time = time.time() - epoch_start
@@ -1464,7 +1377,7 @@ def main():
                     f"Val Loss: {val_results['loss']:.4f} | Val Acc: {100*val_results['accuracy']:.2f}% | "
                     f"Time: {format_time(epoch_time)}"
                 )
-                if config.hierarchical:
+                if args.hierarchical:
                     logger.info(
                         f"         Per-class recall: "
                         f"Flat={100*val_results.get('recall_Flat', 0):.1f}% | "
@@ -1494,7 +1407,7 @@ def main():
                 if epoch % args.save_every == 0:
                     save_checkpoint(
                         model, optimizer, scheduler, scaler, config, stats,
-                        epoch, best_acc, output_dir / f'epoch_{epoch:03d}.pt'
+                        epoch, best_acc, checkpoint_dir / f'epoch_{epoch:03d}.pt'
                     )
         
         if is_main_process(rank):
@@ -1504,6 +1417,7 @@ def main():
             )
             logger.info("=" * 80)
             logger.info(f"Training complete! Best validation accuracy: {100*best_acc:.2f}%")
+            logger.info(f"Results saved to: {output_dir}")
             logger.info("=" * 80)
     
     except KeyboardInterrupt:
@@ -1519,10 +1433,7 @@ def main():
         raise
     
     finally:
-        # =====================================================================
-        # v4.1.0 FIX: Barrier BEFORE cleanup to prevent race condition
-        # Without this, rank0 can delete /dev/shm while others still reading
-        # =====================================================================
+        # Barrier before cleanup to prevent race condition
         try:
             if dist.is_initialized():
                 dist.barrier()
@@ -1531,6 +1442,7 @@ def main():
         
         cleanup_shared_memory(shm_path, rank, local_rank)
         cleanup_ddp()
+
 
 if __name__ == '__main__':
     main()
