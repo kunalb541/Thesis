@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "7.2.0"
+__version__: Final[str] = "7.3.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -601,7 +601,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     """Main simulation pipeline with streaming HDF5 writes."""
     parser = argparse.ArgumentParser(
-        description="Roman Microlensing Event Simulator v7.2.0",
+        description="Roman Microlensing Event Simulator v7.3.0",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -626,8 +626,11 @@ def main() -> None:
     n_total = args.n_flat + args.n_pspl + args.n_binary
     n_points = SimConfig.N_POINTS
 
+    # CRITICAL: Hard-cap submitted tasks using oversample
+    max_tasks = int(np.ceil(n_total * args.oversample))
+
     print("=" * 60)
-    print("Roman Microlensing Simulator v7.2.0 (Streaming)")
+    print("Roman Microlensing Simulator v7.3.0 (Production)")
     print("=" * 60)
     print(f"Season: {SimConfig.TIME_MAX:.1f} days, {n_points} obs")
     print(f"Cadence: {ROMAN_CADENCE_MINUTES:.1f} min")
@@ -635,7 +638,7 @@ def main() -> None:
     print(f"Total: {n_total:,} events")
     print(f"Preset: {args.binary_preset}")
     print(f"Caustic: {BinaryPresets.PRESETS[args.binary_preset]['require_caustic']}")
-    print(f"Oversample: {args.oversample}x (safety margin, early stop when full)")
+    print(f"Oversample: {args.oversample}x (max {max_tasks:,} tasks)")
     print(f"Output: {out_path}")
     print(f"Seed: {args.seed}")
     print(f"Numba: {'ON' if HAS_NUMBA else 'OFF'}")
@@ -654,7 +657,7 @@ def main() -> None:
         'chunks': (min(1000, n_total),)
     }
 
-    # Define unified params dtype (NaN for unused fields)
+    # Define unified params dtype
     dtype_params = np.dtype([
         ('m_base', 'f4'),
         ('t0', 'f4'),
@@ -684,12 +687,6 @@ def main() -> None:
         'pspl': args.n_flat,
         'binary': args.n_flat + args.n_pspl
     }
-    
-    label_map = {
-        'flat': 0,
-        'pspl': 1,
-        'binary': 2
-    }
 
     def all_quotas_full() -> bool:
         """Check if all quotas are filled."""
@@ -703,20 +700,27 @@ def main() -> None:
         write_pos[etype] += 1
         return row
 
-    # Infinite task generator (only yields types still needed)
-    def task_stream() -> Iterator[Tuple[str, int]]:
-        """Generate tasks until all quotas filled."""
+    # CRITICAL: Limited task generator with hard cap
+    def task_stream_limited() -> Iterator[Tuple[str, int]]:
+        """Generate tasks until quotas full or max_tasks reached."""
         seed = args.seed
-        while not all_quotas_full():
-            # Round-robin through types that still need events
-            for etype in ['flat', 'pspl', 'binary']:
+        submitted = 0
+        while (not all_quotas_full()) and (submitted < max_tasks):
+            for etype in ('flat', 'pspl', 'binary'):
                 if write_pos[etype] < quotas[etype]:
                     yield (etype, seed)
                     seed += 1
+                    submitted += 1
+                    if all_quotas_full() or submitted >= max_tasks:
+                        return
 
     # Track stats
     failed_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
     accepted_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
+    
+    # Track m_base min/max during writes
+    mbase_min = float("inf")
+    mbase_max = float("-inf")
 
     ctx = multiprocessing.get_context('spawn')
 
@@ -741,12 +745,9 @@ def main() -> None:
         ) as pool:
             is_tty = sys.stdout.isatty()
             
-            # Estimate max tasks (for progress bar)
-            max_tasks_estimate = int(n_total * args.oversample)
-            
             iterator = pool.imap_unordered(
                 worker_wrapper,
-                task_stream(),
+                task_stream_limited(),
                 chunksize=MP_CHUNK_SIZE
             )
 
@@ -760,9 +761,16 @@ def main() -> None:
                 desc="Writing"
             )
 
+            done = False
             for res in iterator:
                 if res.get('_failed'):
                     failed_counts[res['_type']] += 1
+                    # Update progress bar to show failures
+                    pbar.set_postfix({
+                        "F_fail": failed_counts['flat'],
+                        "P_fail": failed_counts['pspl'],
+                        "B_fail": failed_counts['binary'],
+                    })
                     continue
 
                 etype = res['params']['type']
@@ -776,8 +784,13 @@ def main() -> None:
                 # Write to HDF5
                 ds_flux[row] = res['flux']
                 ds_dt[row] = res['delta_t']
-                ds_labels[row] = label_map[etype]
-                ds_mbase[row] = res['params']['m_base']
+                ds_labels[row] = int(res['label'])  # Use returned label directly
+                
+                # Track m_base min/max during writes
+                mb = float(res['params']['m_base'])
+                ds_mbase[row] = mb
+                mbase_min = min(mbase_min, mb)
+                mbase_max = max(mbase_max, mb)
 
                 # Write params with NaNs for unused fields
                 p = res['params']
@@ -797,13 +810,38 @@ def main() -> None:
 
                 # Check if done
                 if all_quotas_full():
-                    pool.terminate()
+                    done = True
                     break
 
             pbar.close()
 
+            # Cleaner termination
+            if done:
+                pool.terminate()
+
+        # CRITICAL: Verify quotas were met
+        if not all_quotas_full():
+            shortfalls = {k: quotas[k] - write_pos[k] for k in quotas if write_pos[k] < quotas[k]}
+            print("\n" + "=" * 60)
+            print("ERROR: Quotas not filled within oversample cap")
+            print("=" * 60)
+            print(f"Shortfalls: {shortfalls}")
+            print(f"Max tasks: {max_tasks:,}")
+            print(f"Accepted: {accepted_counts}")
+            print(f"Failed: {failed_counts}")
+            print("\nSuggestions:")
+            print(f"  1. Increase --oversample (currently {args.oversample})")
+            print(f"  2. Relax acceptance criteria in simulate.py")
+            print(f"  3. Check for VBBinaryLensing errors in logs")
+            print("=" * 60)
+            
+            # Mark file incomplete for debugging
+            f.attrs['incomplete'] = True
+            f.attrs['shortfalls'] = str(shortfalls)
+            f.attrs['max_tasks_attempted'] = max_tasks
+            sys.exit(2)
+
         # Save metadata
-        mbase_data = ds_mbase[:]
         metadata = {
             'n_events': int(n_total),
             'n_flat': int(args.n_flat),
@@ -813,6 +851,7 @@ def main() -> None:
             'require_caustic': BinaryPresets.PRESETS[args.binary_preset]['require_caustic'],
             'seed': int(args.seed),
             'oversample_factor': float(args.oversample),
+            'max_tasks_submitted': max_tasks,
             'season_duration_days': float(ROMAN_SEASON_DURATION_DAYS),
             'n_points': int(n_points),
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
@@ -821,8 +860,8 @@ def main() -> None:
             'time_grid_end': float(time_grid[-1]),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'm_base_min': float(mbase_data.min()),
-            'm_base_max': float(mbase_data.max()),
+            'm_base_min': mbase_min,
+            'm_base_max': mbase_max,
         }
         f.attrs.update(metadata)
 
@@ -830,14 +869,16 @@ def main() -> None:
 
     # Print summary
     print(f"\n{'='*60}")
-    print(f"Saved {n_total:,} events to {out_path}")
+    print(f"SUCCESS: {n_total:,} events -> {out_path}")
     print(f"Accepted: Flat={accepted_counts['flat']:,}, PSPL={accepted_counts['pspl']:,}, Binary={accepted_counts['binary']:,}")
     
     total_failed = sum(failed_counts.values())
     if total_failed > 0:
         print(f"Failed: Flat={failed_counts['flat']}, PSPL={failed_counts['pspl']}, Binary={failed_counts['binary']}")
+        acceptance_rate = n_total / (n_total + total_failed) * 100
+        print(f"Acceptance rate: {acceptance_rate:.1f}%")
     
-    print(f"m_base: [{metadata['m_base_min']:.2f}, {metadata['m_base_max']:.2f}] mag")
+    print(f"m_base: [{mbase_min:.2f}, {mbase_max:.2f}] mag")
     print(f"Size: {file_size_gb:.2f} GB")
     print(f"{'='*60}")
 
