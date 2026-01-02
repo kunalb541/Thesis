@@ -855,11 +855,12 @@ def train_epoch(
             
             if hierarchical:
                 n_batches = batch_idx + 1
+                n = max(total_samples_gpu.item(), 1)
                 pbar.set_postfix({
                     'loss': f'{current_loss:.4f}',
                     'acc': f'{100*current_acc:.2f}%',
-                    's1': f'{total_stage1_loss.item()/n_batches:.3f}',
-                    's2': f'{total_stage2_loss.item()/n_batches:.3f}',
+                    's1': f'{total_stage1_loss.item()/n:.3f}',
+                    's2': f'{total_stage2_loss.item()/n:.3f}',
                     'lr': f'{scheduler.get_last_lr()[0]:.2e}'
                 })
             else:
