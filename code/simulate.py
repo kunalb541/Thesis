@@ -1,152 +1,8 @@
 #!/usr/bin/env python3
 """
 Roman Microlensing Event Simulator
-==================================
-
-Parallel simulation pipeline for generating realistic gravitational
-microlensing light curves for the Nancy Grace Roman Space Telescope. Designed
-for large-scale dataset generation, parameter inference experiments, and
-training machine-learning models for event classification and regression.
-
-Key Technical Features
-----------------------
-    * Fully vectorized NumPy/Numba hot loops for PSPL and noise models
-    * Binary microlensing magnification via VBBinaryLensing with strict tolerances
-    * Roman WFI F146 detector model: AB magnitudes, flux conversions, photon noise
-    * Realistic Roman cadence masks, noise floors, sky contribution
-    * Clean multiprocessing with reproducible seeds
-    * Unified interface producing mag, delta_t, labels, timestamps, and metadata
-    * HDF5 output with compressed datasets for large-volume workflows
-
-VERSION 4.1.0 - MEMORY OPTIMIZATION
-------------------------------------
-This version fixes a critical save performance issue:
-
-Fixes Applied (v4.1.0):
-    * CRITICAL FIX: Chunked HDF5 save - previous version allocated ~41 GB RAM
-      before writing, causing multi-minute hangs. New version writes in 10K
-      event chunks using ~500 MB RAM, completing in <30 seconds.
-    * MODERATE: Progress bar during save operation
-    * MODERATE: File size reported after save
-
-VERSION 4.0.0 - BUG FIX UPDATE
--------------------------------
-This version fixes several bugs identified in v3.1.0:
-
-Fixes Applied (v4.0.0):
-    * CRITICAL FIX: Time grid now uses np.arange for exact 15-minute cadence
-      (was np.linspace which produces non-uniform spacing at endpoints)
-    * CRITICAL FIX: u0 caustic sampling bounds check to prevent collapsed intervals
-      when caustic_size is tiny (planetary regime)
-    * CRITICAL FIX: VBBinaryLensing return type normalized to np.ndarray immediately
-    * MODERATE FIX: Removed bogus parallel=True from compute_delta_t_numba
-      (first loop is inherently serial, parallel gave no benefit and added fragility)
-    * MODERATE FIX: MIN_MAGNIFICATION_CLIP increased from 0.1 to 0.5 for physical realism
-    * MODERATE FIX: Removed redundant double-clipping of A_noisy
-    * CLEANUP: noise_scale parameter documented as reserved for future use
-    * CLEANUP: Marked flux_to_mag functions as diagnostic/legacy utilities
-
-VERSION 3.1.0 - REALISTIC ROMAN SEASON UPDATE
-----------------------------------------------
-This version updates to realistic Roman observing parameters:
-
-    * CRITICAL: Changed to 72-day Roman Galactic Bulge observing season
-    * CRITICAL: Exact 15-minute cadence (6912 observations per season)
-    * CRITICAL: Global m_base array saved in HDF5 (aligned with shuffled data)
-    * CRITICAL: t0/tE constraints ensure complete events within season
-    * Backward compatible: params_{class} arrays still saved
-
-VERSION 3.0.0 - COMPREHENSIVE UPDATE
--------------------------------------
-This version synchronizes with train.py v3.0.0 and model.py v3.0.0.
-
-Fixes Applied (v3.0.0):
-    * VERSION SYNC: All components now v3.0.0 for consistency
-    * VALIDATION FIX: Added --oversample argument validation (must be >= 1.0)
-    * SAFETY FIX: Moved set_start_method inside if __name__ == '__main__' guard
-    * SAFETY FIX: Narrowed exception handling - MemoryError now propagates
-    * CONSTANTS FIX: All magic numbers moved to module-level constants
-    * DOCUMENTATION: Enhanced docstrings with v3.0.0 compatibility notes
-
-Fixes Applied (v2.8.1 - Failure Tracking & Caustic Forcing)
------------------------------------------------------------
-    * CRITICAL FIX: worker_wrapper now returns event type on failure, preventing
-      PSPL failures from being retried as Binary events (class distribution bug)
-    * CRITICAL FIX: Added has_caustic_signature() to force detectable binary features
-    * CRITICAL FIX: Added estimate_caustic_size() for physics-based u0 constraints
-    * MAJOR FIX: Oversample/subsample approach guarantees exact class balance
-    * MAJOR FIX: 'distinct' preset u0_range now uses SHARED_U0 (was hardcoded)
-    * MAJOR FIX: 'stellar' preset q_range fixed to (0.1, 1.0) (was 0.3-3, convention q≤1)
-    * MAJOR FIX: 'baseline' preset s_range fixed to (0.3, 3.0) (was 0.01-3.0, too small)
-    * Added --oversample CLI argument for configurable oversampling factor
-    * Added require_caustic flag per preset for caustic crossing enforcement
-
-Fixes Applied (v2.8 - Bias Removal)
-------------------------------------
-    * CRITICAL FIX: Aligned u0 ranges between PSPL and Binary to prevent
-      "high magnification = binary" shortcut learning. All presets now use
-      SHARED_U0_MIN/MAX identical to PSPLParams.
-    * CRITICAL FIX: Extended t0 range from 20%-80% to 10%-90% of mission
-      duration for better coverage of edge cases (partial events).
-    * CRITICAL FIX: Added PSPL acceptance criteria (retry loop) to match
-      Binary filtering, preventing "strong/detectable event = Binary" bias.
-    * MAJOR: All presets now use shared parameter constants for t0, tE, u0.
-
-Fixes Applied (v2.6)
---------------------
-    * CRITICAL FIX: Binary generation now returns None on failure instead of
-      mislabeling PSPL fallback as Binary (S0-1)
-    * CRITICAL FIX: Binary metadata only set after successful generation (S0-2)
-    * MAJOR FIX: Output key renamed from 'flux' to 'mag' for semantic clarity,
-      with backward-compatible 'flux' alias in HDF5 output (S1-1)
-    * MAJOR FIX: Binary parameters initialized before loop to prevent
-      uninitialized variable access (S1-2)
-    * MODERATE FIX: Acceptance criteria constants defined at module level (S2-2)
-    * MODERATE FIX: Eliminated duplicate np.max(A) computation (S2-1)
-    * MODERATE FIX: Complete type hints for all functions (S2-3)
-    * Enhanced docstrings with units and physics references
-
-    Previous fixes (v2.5):
-    * Enhanced: Complete docstring coverage for all functions (100%)
-    * Enhanced: Comprehensive parameter documentation with units
-    * Enhanced: Physics references added to key constants
-    * Verified: Numba acceleration working correctly
-    * Verified: VBBinaryLensing integration robust
-
-    Previous fixes (v2.4):
-    * CRITICAL: Fixed PSPL extreme magnifications by capping u0 and A
-    * CRITICAL: Fixed binary flat events by strengthening acceptance criteria
-    * Magnification now capped at 100x for physical realism
-
-This module powers downstream ML pipelines such as CNN-GRU classifiers.
-
-IMPORTANT: OUTPUT FORMAT (v2.7+ / v3.0.0 / v4.0.0 - CNN-OPTIMIZED)
--------------------------------------------------------------------
-The 'flux' array in HDF5 files contains NORMALIZED MAGNIFICATION:
-    - Baseline (unmagnified source): A = 1.0
-    - Magnified 2x: A = 2.0
-    - Magnified 10x: A = 10.0
-    - Masked/missing observations: A = 0.0
-
-This is CNN-ready! Photon noise is applied as relative noise in magnification space,
-preserving physical realism while maintaining numerical stability for neural networks.
-
-Previous versions stored absolute flux in Jansky (~1e-5), which caused CNN training
-instability due to tiny numerical values.
-
-NOISE MODEL NOTE (v4.0.0):
---------------------------
-The noise model is physically correct for training and plotting:
-    1. Noise is computed in flux space (Jansky) using Roman detector model
-    2. Applied to true flux: flux_noisy = flux_true + N(0, sigma_flux)
-    3. Converted back to magnification: A_noisy = flux_noisy / f_base
-
-When converting to magnitudes for plotting: mag = m_base - 2.5 * log10(A_noisy)
-This correctly produces heteroscedastic errors (larger mag scatter at lower A/fainter obs).
-
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 4.0.0
 Date: January 2025
 """
 from __future__ import annotations
@@ -159,14 +15,14 @@ import sys
 import warnings
 from multiprocessing import Pool, cpu_count, set_start_method
 from pathlib import Path
-from typing import Any, Dict, Final, List, Optional, Tuple, Union
+from typing import Any, Dict, Final, Iterator, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "4.1.0"
+__version__: Final[str] = "7.2.0"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -176,8 +32,7 @@ try:
     import VBBinaryLensing
     HAS_VBB: Final[bool] = True
 except ImportError:
-    print("CRITICAL: VBBinaryLensing not found. Install via: pip install VBBinaryLensing")
-    print("Binary microlensing simulation requires this library. Exiting.")
+    print("ERROR: VBBinaryLensing not found. Install via: pip install VBBinaryLensing")
     sys.exit(1)
 
 try:
@@ -185,116 +40,78 @@ try:
     HAS_NUMBA: Final[bool] = True
 except ImportError:
     HAS_NUMBA: Final[bool] = False
-    print("Warning: Numba not found. Simulation will be slower (~50x).")
-    print("Install via: pip install numba")
+    print("WARNING: Numba not found. Install for 50x speedup: pip install numba")
 
 # =============================================================================
-# PHYSICAL CONSTANTS (Roman Space Telescope F146 Filter)
+# PHYSICAL CONSTANTS
 # =============================================================================
 
-# AB magnitude system zero-point flux
-# Reference: Oke & Gunn (1983), ApJ 266, 713
 ROMAN_ZP_FLUX_JY: Final[float] = 3631.0
-
-# Roman WFI F146 filter characteristics
-# Reference: Spergel et al. (2015), arXiv:1503.03757
-ROMAN_LIMITING_MAG_AB: Final[float] = 27.5  # 5-sigma point source detection limit
-ROMAN_SKY_MAG_AB: Final[float] = 22.0       # Typical sky background in F146
-ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0   # Bright limit (saturation)
-ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0   # Faint limit for good S/N
-ROMAN_CADENCE_MINUTES: Final[float] = 15.0  # v3.1.0: Exact Roman cadence
-
-# =============================================================================
-# v3.1.0: ROMAN GALACTIC BULGE TIME DOMAIN SURVEY PARAMETERS
-# Reference: Penny et al. (2019), ApJS, 241, 3
-# =============================================================================
-
-# Roman can only observe the Galactic bulge for ~72 days per season
-# due to Sun angle constraints. 6 seasons over 5-year mission.
+ROMAN_LIMITING_MAG_AB: Final[float] = 27.5
+ROMAN_SKY_MAG_AB: Final[float] = 22.0
+ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0
+ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0
+ROMAN_CADENCE_MINUTES: Final[float] = 15.0
 ROMAN_SEASON_DURATION_DAYS: Final[float] = 72.0
-
-# Number of observations per season at 15-minute cadence
-# 72 days * 24 hours * 4 observations/hour = 6912
 ROMAN_SEASON_N_POINTS: Final[int] = int(ROMAN_SEASON_DURATION_DAYS * 24 * 60 / ROMAN_CADENCE_MINUTES)
-
-# Legacy constant - now points to season duration for single-season simulation
-ROMAN_MISSION_DURATION_DAYS: Final[float] = ROMAN_SEASON_DURATION_DAYS
-ROMAN_LIMITING_SNR: Final[float] = 5.0      # Detection threshold
-
-# v4.0.0: Cadence step in days for proper time grid generation
+ROMAN_LIMITING_SNR: Final[float] = 5.0
 ROMAN_CADENCE_DAYS: Final[float] = ROMAN_CADENCE_MINUTES / (24.0 * 60.0)
 
 # =============================================================================
-# BINARY EVENT ACCEPTANCE CRITERIA
-# Reference: Empirically tuned for distinguishable binary features
+# EVENT ACCEPTANCE CRITERIA
 # =============================================================================
 
-BINARY_MIN_MAGNIFICATION: Final[float] = 1.5    # Minimum peak magnification for detection
-BINARY_MAX_MAGNIFICATION: Final[float] = 100.0  # Physical upper limit (avoid numerical issues)
-BINARY_MIN_MAG_RANGE: Final[float] = 0.3        # Minimum magnitude variation for caustic features
-BINARY_MAX_ATTEMPTS: Final[int] = 10            # Maximum retry attempts per event
+BINARY_MIN_MAGNIFICATION: Final[float] = 1.5
+BINARY_MAX_MAGNIFICATION: Final[float] = 100.0
+BINARY_MIN_MAG_RANGE: Final[float] = 0.3
+BINARY_MAX_ATTEMPTS: Final[int] = 10
 
-# PSPL magnification cap to avoid unrealistic values
 PSPL_MAX_MAGNIFICATION: Final[float] = 100.0
+PSPL_MIN_MAGNIFICATION: Final[float] = 1.3
+PSPL_MIN_MAG_RANGE: Final[float] = 0.1
+PSPL_MAX_ATTEMPTS: Final[int] = 10
+
+CAUSTIC_SPIKE_THRESHOLD: Final[float] = 5.0
+CAUSTIC_MIN_SPIKES: Final[int] = 1
+CAUSTIC_ASYMMETRY_THRESHOLD: Final[float] = 0.15
+CAUSTIC_MIN_ANALYSIS_LENGTH: Final[int] = 20
+CAUSTIC_PEAK_THRESHOLD: Final[float] = 1.1
+CAUSTIC_STRONG_PEAK_THRESHOLD: Final[float] = 1.3
+CAUSTIC_MIN_COMPARISON_POINTS: Final[int] = 5
+CAUSTIC_MAX_COMPARISON_WINDOW: Final[int] = 50
 
 # =============================================================================
-# v2.8+: PSPL EVENT ACCEPTANCE CRITERIA (to match Binary filtering)
-# Without this, PSPL could include weak events that Binary filters out,
-# creating a bias where "strong event = Binary" shortcut learning occurs
+# OTHER CONSTANTS
 # =============================================================================
 
-PSPL_MIN_MAGNIFICATION: Final[float] = 1.3      # Slightly lower than Binary (PSPL has smoother curves)
-PSPL_MIN_MAG_RANGE: Final[float] = 0.1          # Lower than Binary (no caustic features needed)
-PSPL_MAX_ATTEMPTS: Final[int] = 10              # Maximum retry attempts per event
-
-# =============================================================================
-# v2.8.1+: CAUSTIC DETECTION PARAMETERS
-# =============================================================================
-
-CAUSTIC_SPIKE_THRESHOLD: Final[float] = 5.0     # N-sigma threshold for spike detection
-CAUSTIC_MIN_SPIKES: Final[int] = 1              # Minimum spike features for caustic crossing
-CAUSTIC_ASYMMETRY_THRESHOLD: Final[float] = 0.15  # 15% asymmetry threshold
-
-# =============================================================================
-# v3.0.0: ADDITIONAL CONSTANTS (previously magic numbers)
-# =============================================================================
-
-# Caustic detection analysis parameters
-CAUSTIC_MIN_ANALYSIS_LENGTH: Final[int] = 20    # Minimum light curve length for caustic analysis
-CAUSTIC_PEAK_THRESHOLD: Final[float] = 1.1      # 10% above baseline for peak detection
-CAUSTIC_STRONG_PEAK_THRESHOLD: Final[float] = 1.3  # 30% above baseline for strong peak
-CAUSTIC_MIN_COMPARISON_POINTS: Final[int] = 5   # Minimum points for asymmetry comparison
-CAUSTIC_MAX_COMPARISON_WINDOW: Final[int] = 50  # Maximum window size for asymmetry check
-
-# Noise floor for invalid flux values
 NOISE_FLOOR_FACTOR: Final[float] = 1e-5
-
-# v4.0.0 FIX: Increased from 0.1 to 0.5 for physical realism
-# Microlensing magnification should not drop far below baseline even with noise
-# 0.5 allows for ~2-sigma negative noise fluctuations on baseline
 MIN_MAGNIFICATION_CLIP: Final[float] = 0.5
-
-# Default oversample factor
-DEFAULT_OVERSAMPLE_FACTOR: Final[float] = 1.3
-
-# Minimum valid u0 offset for caustic forcing
+DEFAULT_OVERSAMPLE_FACTOR: Final[float] = 1.5
 MIN_U0_OFFSET: Final[float] = 0.01
-
-# Caustic size multiplier for u0 constraint
 CAUSTIC_U0_MULTIPLIER: Final[float] = 2.0
 
-# HDF5 compression settings
-HDF5_COMPRESSION: Final[str] = 'lzf'
-HDF5_COMPRESSION_LEVEL: Final[int] = None  # lzf doesn't use levels
-
-# Multiprocessing chunk size
 MP_CHUNK_SIZE: Final[int] = 1000
-
-# Progress bar update interval
 TQDM_MIN_INTERVAL: Final[float] = 5.0
 TQDM_SMOOTHING: Final[float] = 0.01
 TQDM_NCOLS_TTY: Final[int] = 100
 TQDM_NCOLS_NON_TTY: Final[int] = 80
+
+# =============================================================================
+# GLOBAL WORKER STATE
+# =============================================================================
+
+_WORK_TIME_GRID: Optional[np.ndarray] = None
+_WORK_MASK_PROB: Optional[float] = None
+_WORK_PRESET: Optional[str] = None
+
+
+def _init_worker(time_grid: np.ndarray, mask_prob: float, preset: str) -> None:
+    """Initialize worker process with shared data."""
+    global _WORK_TIME_GRID, _WORK_MASK_PROB, _WORK_PRESET
+    _WORK_TIME_GRID = time_grid
+    _WORK_MASK_PROB = mask_prob
+    _WORK_PRESET = preset
+
 
 # =============================================================================
 # NUMBA ACCELERATED FUNCTIONS
@@ -302,58 +119,8 @@ TQDM_NCOLS_NON_TTY: Final[int] = 80
 
 if HAS_NUMBA:
     @njit(fastmath=True, cache=True, parallel=True)
-    def flux_to_mag_numba(flux_jy: np.ndarray) -> np.ndarray:
-        """
-        Convert flux (Jansky) to AB magnitude using Numba acceleration.
-
-        Formula: m_AB = -2.5 * log10(f_nu / 3631 Jy)
-
-        NOTE (v4.0.0): This function is provided for diagnostic and post-processing
-        use. The main simulation pipeline outputs normalized magnification, not
-        AB magnitudes. Use this when converting to magnitudes for plotting.
-
-        Parameters
-        ----------
-        flux_jy : np.ndarray
-            Flux array in Jansky units.
-
-        Returns
-        -------
-        np.ndarray
-            AB magnitude array. Invalid fluxes (<=0) return NaN.
-        """
-        n = len(flux_jy)
-        mag = np.empty(n, dtype=np.float32)
-        zp = ROMAN_ZP_FLUX_JY
-        for i in prange(n):
-            f = flux_jy[i]
-            if f > 0:
-                mag[i] = -2.5 * math.log10(f / zp)
-            else:
-                mag[i] = np.nan
-        return mag
-
-    @njit(fastmath=True, cache=True, parallel=True)
     def compute_photon_noise_numba(flux_jy: np.ndarray) -> np.ndarray:
-        """
-        Compute photon noise using Roman detector model with Numba acceleration.
-
-        Implements realistic photon noise including source flux, sky background,
-        and detector characteristics for the Roman F146 filter.
-
-        Noise model: sigma = k * sqrt(f_source + f_sky)
-        where k is calibrated to match the limiting magnitude SNR.
-
-        Parameters
-        ----------
-        flux_jy : np.ndarray
-            Flux array in Jansky units.
-
-        Returns
-        -------
-        np.ndarray
-            Noise sigma array in Jansky units.
-        """
+        """Compute photon noise using Roman detector model."""
         n = len(flux_jy)
         sigma = np.empty(n, dtype=np.float32)
         zp = ROMAN_ZP_FLUX_JY
@@ -367,24 +134,12 @@ if HAS_NUMBA:
             if f_total > 0:
                 sigma[i] = k_noise * math.sqrt(f_total)
             else:
-                sigma[i] = k_noise * NOISE_FLOOR_FACTOR  # Floor for invalid flux
+                sigma[i] = k_noise * NOISE_FLOOR_FACTOR
         return sigma
 
     @njit(fastmath=True, cache=True)
     def single_mag_to_flux(mag: float) -> float:
-        """
-        Convert single AB magnitude to flux in Jansky.
-
-        Parameters
-        ----------
-        mag : float
-            AB magnitude value.
-
-        Returns
-        -------
-        float
-            Flux in Jansky units.
-        """
+        """Convert single AB magnitude to flux in Jansky."""
         return ROMAN_ZP_FLUX_JY * 10**(-0.4 * mag)
 
     @njit(fastmath=True, cache=True, parallel=True)
@@ -394,36 +149,7 @@ if HAS_NUMBA:
         u_0: float,
         t_0: float
     ) -> np.ndarray:
-        """
-        Compute PSPL magnification using Numba acceleration.
-
-        Implements the Paczynski (1986) formula for point-source point-lens
-        magnification with parallel execution across time points.
-
-        Formula: A(u) = (u^2 + 2) / (u * sqrt(u^2 + 4))
-        where u^2 = u_0^2 + ((t - t_0) / t_E)^2
-
-        Parameters
-        ----------
-        t : np.ndarray
-            Time array in days.
-        t_E : float
-            Einstein crossing time in days.
-        u_0 : float
-            Impact parameter in Einstein radii.
-        t_0 : float
-            Time of peak magnification in days.
-
-        Returns
-        -------
-        np.ndarray
-            Magnification array (dimensionless, >= 1).
-
-        References
-        ----------
-        Paczynski, B. (1986). "Gravitational microlensing by the galactic halo"
-        ApJ 304, 1-5
-        """
+        """Compute PSPL magnification with Numba acceleration."""
         n = len(t)
         A = np.ones(n, dtype=np.float32)
         inv_tE = 1.0 / t_E
@@ -435,42 +161,13 @@ if HAS_NUMBA:
             A[i] = (u_sq + 2.0) / (u_sqrt * np.sqrt(u_sq + 4.0))
         return A
 
-    # v4.0.0 FIX: Removed parallel=True - the forward pass is inherently serial
-    # (each iteration depends on the previous), so parallel gives no benefit
-    # and can cause subtle issues with shared array writes in Numba
     @njit(fastmath=True, cache=True)
     def compute_delta_t_numba(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """
-        Compute time differences between consecutive valid observations.
-
-        For each valid observation, computes the time since the previous
-        valid observation. First valid observation gets delta_t = 0.
-
-        Parameters
-        ----------
-        times : np.ndarray
-            Time array in days.
-        mask : np.ndarray
-            Boolean mask indicating valid observations (True = valid).
-
-        Returns
-        -------
-        np.ndarray
-            Delta_t array in days. Masked points have delta_t = 0.
-
-        Notes
-        -----
-        v4.0.0 FIX: Removed parallel=True. The forward pass to find previous
-        valid indices is inherently serial (each step depends on the last).
-        The second loop could theoretically parallelize, but the overhead
-        exceeds any benefit for typical light curve lengths.
-        """
+        """Compute time differences between consecutive valid observations."""
         n = len(times)
         delta_t = np.zeros(n, dtype=np.float32)
         prev_valid = np.full(n, -1, dtype=np.int32)
 
-        # Forward pass to find previous valid index for each position
-        # This loop is inherently serial - cannot be parallelized
         last = -1
         for i in range(n):
             if mask[i]:
@@ -479,7 +176,6 @@ if HAS_NUMBA:
             else:
                 prev_valid[i] = last
 
-        # Compute delta_t (could parallelize but overhead not worth it)
         for i in range(n):
             if mask[i] and prev_valid[i] != -1:
                 delta_t[i] = times[i] - times[prev_valid[i]]
@@ -487,45 +183,11 @@ if HAS_NUMBA:
 
 
 # =============================================================================
-# PURE NUMPY FALLBACK FUNCTIONS (when Numba unavailable)
+# PURE NUMPY FALLBACK FUNCTIONS
 # =============================================================================
 
-def flux_to_mag_numpy(flux_jy: np.ndarray) -> np.ndarray:
-    """
-    Convert flux to AB magnitude using pure NumPy.
-
-    NOTE (v4.0.0): This function is provided for diagnostic and post-processing
-    use. The main simulation pipeline outputs normalized magnification.
-
-    Parameters
-    ----------
-    flux_jy : np.ndarray
-        Flux array in Jansky units.
-
-    Returns
-    -------
-    np.ndarray
-        AB magnitude array.
-    """
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mag = -2.5 * np.log10(flux_jy / ROMAN_ZP_FLUX_JY)
-    return mag.astype(np.float32)
-
-
 def compute_photon_noise_numpy(flux_jy: np.ndarray) -> np.ndarray:
-    """
-    Compute photon noise using Roman detector model with pure NumPy.
-
-    Parameters
-    ----------
-    flux_jy : np.ndarray
-        Flux array in Jansky units.
-
-    Returns
-    -------
-    np.ndarray
-        Noise sigma array in Jansky units.
-    """
+    """Compute photon noise using Roman detector model with pure NumPy."""
     f_lim = ROMAN_ZP_FLUX_JY * 10**(-0.4 * ROMAN_LIMITING_MAG_AB)
     f_sky = ROMAN_ZP_FLUX_JY * 10**(-0.4 * ROMAN_SKY_MAG_AB)
     sigma_lim = f_lim / ROMAN_LIMITING_SNR
@@ -543,46 +205,14 @@ def pspl_magnification_numpy(
     u_0: float,
     t_0: float
 ) -> np.ndarray:
-    """
-    Compute PSPL magnification using pure NumPy.
-
-    Parameters
-    ----------
-    t : np.ndarray
-        Time array in days.
-    t_E : float
-        Einstein crossing time in days.
-    u_0 : float
-        Impact parameter in Einstein radii.
-    t_0 : float
-        Time of peak magnification in days.
-
-    Returns
-    -------
-    np.ndarray
-        Magnification array (dimensionless).
-    """
+    """Compute PSPL magnification using pure NumPy."""
     u = np.sqrt(u_0**2 + ((t - t_0) / t_E)**2)
     A = (u**2 + 2) / (u * np.sqrt(u**2 + 4))
     return A.astype(np.float32)
 
 
 def compute_delta_t_numpy(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """
-    Compute time differences between consecutive valid observations.
-
-    Parameters
-    ----------
-    times : np.ndarray
-        Time array in days.
-    mask : np.ndarray
-        Boolean mask indicating valid observations.
-
-    Returns
-    -------
-    np.ndarray
-        Delta_t array in days.
-    """
+    """Compute time differences between consecutive valid observations."""
     valid_idx = np.where(mask)[0]
     dt = np.zeros_like(times, dtype=np.float32)
     if len(valid_idx) > 1:
@@ -592,103 +222,25 @@ def compute_delta_t_numpy(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 # =============================================================================
-# DETECTOR AND CONFIGURATION CLASSES
+# DETECTOR AND CONFIGURATION
 # =============================================================================
 
 class RomanWFI_F146:
-    """
-    Roman Wide Field Instrument F146 filter detector model.
-
-    Implements the photometric conversion and noise model for the
-    Roman Space Telescope's F146 wide filter.
-
-    Methods
-    -------
-    flux_to_mag(flux_jy)
-        Convert flux array to AB magnitudes.
-    compute_photon_noise(flux_jy)
-        Compute photon noise for given flux values.
-    """
-
-    @staticmethod
-    def flux_to_mag(flux_jy: np.ndarray) -> np.ndarray:
-        """
-        Convert flux (Jansky) to AB magnitude.
-
-        NOTE (v4.0.0): Provided for diagnostic/post-processing use.
-        Main pipeline outputs normalized magnification.
-
-        Parameters
-        ----------
-        flux_jy : np.ndarray
-            Flux array in Jansky units.
-
-        Returns
-        -------
-        np.ndarray
-            AB magnitude array.
-        """
-        if HAS_NUMBA:
-            return flux_to_mag_numba(flux_jy)
-        return flux_to_mag_numpy(flux_jy)
+    """Roman WFI F146 filter detector model."""
 
     @staticmethod
     def compute_photon_noise(flux_jy: np.ndarray) -> np.ndarray:
-        """
-        Compute photon noise for Roman detector.
-
-        Parameters
-        ----------
-        flux_jy : np.ndarray
-            Flux array in Jansky units.
-
-        Returns
-        -------
-        np.ndarray
-            Noise sigma array in Jansky units.
-        """
+        """Compute photon noise for Roman detector."""
         if HAS_NUMBA:
             return compute_photon_noise_numba(flux_jy)
         return compute_photon_noise_numpy(flux_jy)
 
 
 class SimConfig:
-    """
-    Simulation configuration parameters.
-
-    Defines the observational setup for Roman Space Telescope
-    microlensing survey simulations.
-
-    v4.0.0 UPDATE: Time grid generation moved to generate_time_grid() function
-    to ensure exact 15-minute cadence using np.arange instead of np.linspace.
-
-    v3.1.0 UPDATE: Now uses realistic Roman season parameters:
-    - 72-day observing window (single Roman season)
-    - 15-minute cadence (6912 observations)
-    - Event parameters constrained to ensure complete rise-peak-fall
-
-    Attributes
-    ----------
-    TIME_MIN : float
-        Start time of observations (days).
-    TIME_MAX : float
-        End time of observations (days). Set to 72 days for one Roman season.
-    N_POINTS : int
-        Number of observation points. 6912 for 15-min cadence over 72 days.
-    VBM_TOLERANCE : float
-        VBBinaryLensing precision tolerance.
-    CADENCE_MASK_PROB : float
-        Probability of missing an observation.
-    BASELINE_MIN : float
-        Minimum source baseline magnitude.
-    BASELINE_MAX : float
-        Maximum source baseline magnitude.
-    PAD_VALUE : float
-        Value used for masked/missing observations.
-    """
+    """Simulation configuration parameters."""
     TIME_MIN: float = 0.0
-    TIME_MAX: float = ROMAN_SEASON_DURATION_DAYS  # v3.1.0: 72 days
-    N_POINTS: int = ROMAN_SEASON_N_POINTS  # v3.1.0: 6912 points at 15-min cadence
+    TIME_MAX: float = ROMAN_SEASON_DURATION_DAYS
+    N_POINTS: int = ROMAN_SEASON_N_POINTS
     VBM_TOLERANCE: float = 1e-3
     CADENCE_MASK_PROB: float = 0.05
     BASELINE_MIN: float = ROMAN_SOURCE_MAG_MIN
@@ -697,176 +249,46 @@ class SimConfig:
 
 
 def generate_time_grid() -> np.ndarray:
-    """
-    Generate the observation time grid with exact 15-minute cadence.
-
-    v4.0.0 FIX: Uses np.arange instead of np.linspace to ensure uniform
-    spacing. np.linspace can produce non-uniform spacing at endpoints
-    due to floating-point arithmetic.
-
-    Returns
-    -------
-    np.ndarray
-        Time array in days with exact 15-minute (0.01041667 day) spacing.
-
-    Notes
-    -----
-    The time grid starts at TIME_MIN and has exactly N_POINTS observations
-    separated by ROMAN_CADENCE_DAYS (15 minutes = 0.01041667 days).
-
-    For a 72-day season with 15-minute cadence:
-    - N_POINTS = 6912
-    - Last observation at t = 71.9895833... days (just under 72 days)
-    """
+    """Generate observation time grid with exact 15-minute cadence."""
     return SimConfig.TIME_MIN + np.arange(SimConfig.N_POINTS) * ROMAN_CADENCE_DAYS
 
 
 class BinaryPresets:
-    """
-    Binary lens parameter presets for different astrophysical regimes.
-
-    Provides scientifically motivated parameter ranges for simulating
-    different types of binary microlensing events.
-
-    v3.1.0 UPDATE: t0 and tE ranges adjusted for 72-day season to ensure
-    complete event morphology (full rise-peak-fall within observing window).
-
-    Attributes
-    ----------
-    SHARED_T0_MIN : float
-        Minimum peak time (25% of season). Ensures event starts within window.
-    SHARED_T0_MAX : float
-        Maximum peak time (75% of season). Ensures event ends within window.
-    SHARED_TE_MIN : float
-        Minimum Einstein crossing time (3 days).
-    SHARED_TE_MAX : float
-        Maximum Einstein crossing time (18 days). Ensures completion within 72 days.
-    SHARED_U0_MIN : float
-        Minimum impact parameter (Einstein radii). v2.8+: Shared with PSPL to prevent bias.
-    SHARED_U0_MAX : float
-        Maximum impact parameter (Einstein radii). v2.8+: Shared with PSPL to prevent bias.
-    PRESETS : dict
-        Dictionary of preset configurations.
-
-    Notes
-    -----
-    Preset parameter ranges are based on:
-    - Mao & Paczynski (1991) for binary lens geometry
-    - Gaudi (2012) review for planetary microlensing
-    - OGLE and MOA survey statistics for observed events
-
-    v3.1.0: t_E max reduced to 18 days to ensure events complete within
-    72-day window. An event needs ~2*t_E for full rise-peak-fall, so
-    t_E <= 18 days ensures completion even for events peaking at t0_max.
-
-    v2.8 BIAS FIX: Extended t0 range to 10%-90% to include edge cases (partial events).
-    v2.8 BIAS FIX: All presets now use SHARED_U0 range identical to PSPLParams to prevent
-    the model from learning "very high magnification = binary" shortcut.
-
-    v2.8.1 ADDITIONS:
-    - 'require_caustic' flag per preset to force caustic crossing signatures
-    - 'distinct' preset tightened u0_range for better caustic intersection
-    - 'stellar' preset q_range fixed to (0.1, 1.0) per convention q <= 1
-    - 'baseline' preset s_range fixed to (0.3, 3.0), was (0.01, 3.0) which is degenerate
-
-    References
-    ----------
-    Gaudi (2012): "Microlensing Surveys for Exoplanets", ARA&A 50, 411
-    Mao & Paczynski (1991): ApJ 374, L37
-    Gould & Loeb (1992): ApJ 396, 104 (snow line argument)
-    Chung et al. (2005): ApJ 630, 535 (caustic size formulas)
-    """
-    # v3.1.0: Adjusted for 72-day season with complete events
-    # t0 in middle 50% of season ensures event fully observed
-    SHARED_T0_MIN: float = 0.25 * SimConfig.TIME_MAX  # 18 days
-    SHARED_T0_MAX: float = 0.75 * SimConfig.TIME_MAX  # 54 days
-    SHARED_TE_MIN: float = 3.0   # days
-    SHARED_TE_MAX: float = 18.0  # days (ensures completion: 2*18 = 36 days < 72-18=54)
-    SHARED_U0_MIN: float = 0.001   # Matches PSPL to prevent bias
-    SHARED_U0_MAX: float = 1.0    # Matches PSPL to prevent bias
+    """Binary lens parameter presets."""
+    
+    SHARED_T0_MIN: float = 0.25 * SimConfig.TIME_MAX
+    SHARED_T0_MAX: float = 0.75 * SimConfig.TIME_MAX
+    SHARED_TE_MIN: float = 3.0
+    SHARED_TE_MAX: float = 18.0
+    SHARED_U0_MIN: float = 0.001
+    SHARED_U0_MAX: float = 1.0
 
     PRESETS: Dict[str, Dict[str, Any]] = {
         'distinct': {
-            # Resonant caustics near s=1, strong binary signatures
-            # Forces caustic crossings via tight u0 and require_caustic flag
-            's_range': (0.8, 1.2),          # Tightened for resonant caustics
-            'q_range': (0.1, 1.0),          # High q = bigger caustic
-            'u0_range': (SHARED_U0_MIN, 0.3),  # Tighter for caustic intersection
-            'rho_range': (1e-3, 1e-2),      # Finite source resolves caustic
+            's_range': (0.8, 1.2),
+            'q_range': (0.1, 1.0),
+            'u0_range': (SHARED_U0_MIN, 0.3),
+            'rho_range': (1e-3, 1e-2),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-            'require_caustic': True         # Force caustic signature detection
+            'require_caustic': True
         },
-        'planetary': {
-            # Exoplanet detection regime (low mass ratio)
-            # Planets have tiny caustics, need small u0 and caustic check
-            's_range': (0.6, 1.6),          # Tighter around snow line
-            'q_range': (1e-4, 1e-2),        # Jupiter to super-Earth
-            'u0_range': (SHARED_U0_MIN, 0.3),  # Planets have tiny caustics
-            'rho_range': (1e-3, 1e-2),      # Need finite source for planets
-            'alpha_range': (0, 2*math.pi),
-            't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
-            'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-            'require_caustic': False         # Planets can have subtle anomalies
-        },
-        'stellar': {
-            # Binary star systems (high mass ratio)
-            # Some stellar binaries are smooth (no caustic crossing)
-            's_range': (0.3, 3.0),          # Wide range of separations
-            'q_range': (0.1, 1.0),          # FIX v2.8.1: was (0.3, 3), convention q <= 1
-            'u0_range': (SHARED_U0_MIN, 0.5),
-            'rho_range': (1e-3, 5e-2),      # Larger sources for stellar
-            'alpha_range': (0, 2*math.pi),
-            't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
-            'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-            'require_caustic': False        # Allow smooth binaries
-        },
-        'baseline': {
-            # Full realistic parameter space for general training
-            's_range': (0.3, 3.0),          # FIX v2.8.1: was (0.01, 3.0), too small
-            'q_range': (1e-4, 1.0),         # Full range: planets to binaries
+        'general': {
+            's_range': (0.3, 3.0),
+            'q_range': (1e-4, 1.0),
             'u0_range': (SHARED_U0_MIN, SHARED_U0_MAX),
             'rho_range': (1e-4, 0.05),
             'alpha_range': (0, 2*math.pi),
             't0_range': (SHARED_T0_MIN, SHARED_T0_MAX),
             'tE_range': (SHARED_TE_MIN, SHARED_TE_MAX),
-            'require_caustic': False        # Full parameter space includes non-crossing
+            'require_caustic': False
         }
     }
 
 
 class PSPLParams:
-    """
-    PSPL (Point Source Point Lens) parameter ranges.
-
-    Defines the parameter space for single-lens microlensing events.
-
-    Attributes
-    ----------
-    T0_MIN : float
-        Minimum peak time in days.
-    T0_MAX : float
-        Maximum peak time in days.
-    TE_MIN : float
-        Minimum Einstein crossing time in days.
-    TE_MAX : float
-        Maximum Einstein crossing time in days.
-    U0_MIN : float
-        Minimum impact parameter (Einstein radii).
-    U0_MAX : float
-        Maximum impact parameter (Einstein radii).
-
-    Notes
-    -----
-    v2.6: u0 range tightened to (0.01, 0.5) to avoid:
-    - Extreme magnifications at very low u0 (numerical instability)
-    - Undetectable events at high u0 (weak signal)
-
-    v2.8 BIAS FIX: Now uses SHARED_U0 from BinaryPresets to ensure identical
-    u0 distribution between PSPL and Binary, preventing the model from learning
-    "very high magnification = binary" shortcut.
-    """
+    """PSPL parameter ranges."""
     T0_MIN: float = BinaryPresets.SHARED_T0_MIN
     T0_MAX: float = BinaryPresets.SHARED_T0_MAX
     TE_MIN: float = BinaryPresets.SHARED_TE_MIN
@@ -876,146 +298,58 @@ class PSPLParams:
 
 
 # =============================================================================
-# CAUSTIC DETECTION AND SIZE ESTIMATION (v2.8.1+)
+# CAUSTIC DETECTION
 # =============================================================================
 
 def estimate_caustic_size(s: float, q: float) -> float:
-    """
-    Estimate central caustic half-width in Einstein radii.
-
-    Provides approximate caustic size for constraining impact parameter
-    to ensure trajectory intersects the caustic structure.
-
-    Parameters
-    ----------
-    s : float
-        Binary separation in Einstein radii.
-    q : float
-        Mass ratio (secondary/primary, q <= 1 by convention).
-
-    Returns
-    -------
-    float
-        Estimated caustic half-width in Einstein radii.
-
-    Notes
-    -----
-    Approximations used:
-    - Resonant caustic (s ~ 1): size ~ 4q / (1+q)^2
-    - Close binary (s < 1): size ~ q * s^4
-    - Wide binary (s > 1): size ~ q / s^4
-
-    These are order-of-magnitude estimates. Actual caustic shapes are
-    complex and depend on all parameters.
-
-    References
-    ----------
-    Chung et al. (2005): ApJ 630, 535
-    Gaudi (2012): ARA&A 50, 411 (Section 2.2)
-    """
+    """Estimate central caustic half-width in Einstein radii."""
     if 0.7 < s < 1.3:
-        # Resonant caustic (central + planetary merged)
         return 4.0 * q / (1.0 + q)**2
     elif s <= 0.7:
-        # Close binary - central caustic dominates
         return q * s**4
     else:
-        # Wide binary - two separate caustics
         return q / s**4
 
 
 def has_caustic_signature(A: np.ndarray, min_spikes: int = CAUSTIC_MIN_SPIKES) -> bool:
-    """
-    Detect caustic crossing signatures in light curve.
-
-    Caustic crossings produce sharp spikes with large second derivatives,
-    multiple peaks, or asymmetric profiles that distinguish binaries from PSPL.
-
-    Parameters
-    ----------
-    A : np.ndarray
-        Magnification array.
-    min_spikes : int, optional
-        Minimum number of spike features required. Default is CAUSTIC_MIN_SPIKES.
-
-    Returns
-    -------
-    bool
-        True if caustic crossing signature detected.
-
-    Notes
-    -----
-    Three detection methods are used:
-
-    1. **Spike detection**: Caustic crossings have very large |d^2A/dt^2|.
-       PSPL is smooth with d^2A peaks at ~2-3x mean.
-       Caustic crossings peak at 10-100x mean.
-
-    2. **Multiple peaks**: W-shaped or multi-peak light curves indicate
-       multiple caustic crossings or cusp approaches.
-
-    3. **Asymmetry**: PSPL is symmetric around peak. Caustic crossings
-       break this symmetry due to caustic geometry.
-
-    v3.0.0: All magic numbers replaced with module-level constants.
-
-    References
-    ----------
-    Gaudi (2012): ARA&A 50, 411 (Figure 4 shows characteristic signatures)
-    """
-    # Require minimum length for meaningful analysis
+    """Detect caustic crossing signatures in light curve."""
     if len(A) < CAUSTIC_MIN_ANALYSIS_LENGTH:
         return False
 
-    # Method 1: Check for rapid magnification changes (spikes)
     dA = np.diff(A)
-    d2A = np.diff(dA)  # Second derivative
-
-    # Caustic crossings have very large |d^2A/dt^2|
+    d2A = np.diff(dA)
     std_d2A = np.std(d2A)
-    if std_d2A > 1e-8:  # Avoid division by zero
+    if std_d2A > 1e-8:
         d2A_normalized = np.abs(d2A) / std_d2A
         n_spikes = np.sum(d2A_normalized > CAUSTIC_SPIKE_THRESHOLD)
-
         if n_spikes >= min_spikes:
             return True
 
-    # Method 2: Check for multiple local maxima (W-shaped, etc.)
-    # Find peaks: points higher than both neighbors
     peaks = []
     for i in range(1, len(A) - 1):
         if A[i] > A[i-1] and A[i] > A[i+1] and A[i] > CAUSTIC_PEAK_THRESHOLD:
             peaks.append(i)
 
-    # Multiple significant peaks indicate caustic structure
     if len(peaks) >= 2:
-        # Check that peaks are actually separated (not noise)
         peak_mags = [A[p] for p in peaks]
         if max(peak_mags) > CAUSTIC_STRONG_PEAK_THRESHOLD:
             return True
 
-    # Method 3: Check for asymmetry around peak
     if len(peaks) >= 1:
-        # Find the highest peak
         peak_idx = peaks[np.argmax([A[p] for p in peaks])]
-
-        # Compare shape before vs after peak
         n_compare = min(peak_idx, len(A) - peak_idx - 1, CAUSTIC_MAX_COMPARISON_WINDOW)
         if n_compare > CAUSTIC_MIN_COMPARISON_POINTS * 2:
             before = A[peak_idx - n_compare:peak_idx]
-            after = A[peak_idx + 1:peak_idx + n_compare + 1][::-1]  # Reverse for comparison
+            after = A[peak_idx + 1:peak_idx + n_compare + 1][::-1]
 
-            # Ensure same length
             min_len = min(len(before), len(after))
             if min_len > CAUSTIC_MIN_COMPARISON_POINTS:
                 before = before[-min_len:]
                 after = after[:min_len]
 
-                # Asymmetry metric: mean absolute difference normalized by amplitude
                 mean_amplitude = np.mean(A[peak_idx - n_compare:peak_idx + n_compare])
                 if mean_amplitude > 1.0:
                     asymmetry = np.mean(np.abs(before - after)) / (mean_amplitude - 1.0 + 1e-8)
-
                     if asymmetry > CAUSTIC_ASYMMETRY_THRESHOLD:
                         return True
 
@@ -1032,32 +366,7 @@ def pspl_magnification(
     u_0: float,
     t_0: float
 ) -> np.ndarray:
-    """
-    Compute Point Source Point Lens magnification.
-
-    Implements the Paczynski (1986) formula for gravitational lensing
-    magnification by a point mass.
-
-    Parameters
-    ----------
-    t : np.ndarray
-        Time array in days.
-    t_E : float
-        Einstein crossing time in days.
-    u_0 : float
-        Impact parameter in Einstein radii.
-    t_0 : float
-        Time of peak magnification in days.
-
-    Returns
-    -------
-    np.ndarray
-        Magnification array (dimensionless, >= 1).
-
-    References
-    ----------
-    Paczynski, B. (1986). ApJ 304, 1-5
-    """
+    """Compute Point Source Point Lens magnification."""
     if HAS_NUMBA:
         return pspl_magnification_fast(t, t_E, u_0, t_0)
     return pspl_magnification_numpy(t, t_E, u_0, t_0)
@@ -1073,50 +382,7 @@ def binary_magnification_vbb(
     alpha: float,
     rho: float
 ) -> np.ndarray:
-    """
-    Compute binary lens magnification using VBBinaryLensing.
-
-    Uses the VBBinaryLensing library for accurate finite-source
-    binary lens magnification calculations with contour integration.
-
-    Parameters
-    ----------
-    t : np.ndarray
-        Time array in days.
-    t_E : float
-        Einstein crossing time in days.
-    u_0 : float
-        Impact parameter in Einstein radii.
-    t_0 : float
-        Time of peak magnification in days.
-    s : float
-        Projected binary separation in Einstein radii.
-    q : float
-        Mass ratio (secondary/primary).
-    alpha : float
-        Source trajectory angle in radians.
-    rho : float
-        Source radius in Einstein radii.
-
-    Returns
-    -------
-    np.ndarray
-        Magnification array (dimensionless), always as np.ndarray.
-
-    Raises
-    ------
-    RuntimeError
-        If VBBinaryLensing computation fails completely.
-
-    Notes
-    -----
-    v4.0.0 FIX: Return type is now always normalized to np.ndarray
-    immediately after VBB call to prevent dtype inconsistencies.
-
-    References
-    ----------
-    Bozza, V. (2010). MNRAS, 408, 2188-2196
-    """
+    """Compute binary lens magnification using VBBinaryLensing."""
     VBB = VBBinaryLensing.VBBinaryLensing()
     VBB.Tol = SimConfig.VBM_TOLERANCE
 
@@ -1125,14 +391,9 @@ def binary_magnification_vbb(
     u2 = u_0 * math.cos(alpha) + tau * math.sin(alpha)
 
     try:
-        # Try vectorized computation first (faster)
         result = VBB.BinaryMag(s, q, u1, u2, rho)
-        # v4.0.0 FIX: Normalize return type immediately
-        # VBB can return float, list, or ndarray depending on version/input
         return np.asarray(result, dtype=np.float32)
-    except (RuntimeError, ValueError, TypeError) as e:
-        # Fallback to point-by-point computation
-        # v3.0.0 FIX: Do NOT catch MemoryError - let it propagate
+    except (RuntimeError, ValueError, TypeError):
         n = len(t)
         mag = np.ones(n, dtype=np.float32)
         for i in range(n):
@@ -1141,7 +402,6 @@ def binary_magnification_vbb(
                 if val > 0 and np.isfinite(val):
                     mag[i] = val
             except (RuntimeError, ValueError, TypeError):
-                # Use PSPL approximation for this point
                 u_sq = u1[i]**2 + u2[i]**2
                 u = np.sqrt(u_sq)
                 mag[i] = (u_sq + 2) / (u * np.sqrt(u_sq + 4)) if u > 0 else 1.0
@@ -1149,21 +409,7 @@ def binary_magnification_vbb(
 
 
 def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """
-    Compute time differences between consecutive valid observations.
-
-    Parameters
-    ----------
-    times : np.ndarray
-        Time array in days.
-    mask : np.ndarray
-        Boolean mask indicating valid observations.
-
-    Returns
-    -------
-    np.ndarray
-        Delta_t array in days (0 for first valid observation and masked points).
-    """
+    """Compute time differences between consecutive valid observations."""
     if HAS_NUMBA:
         return compute_delta_t_numba(times, mask)
     return compute_delta_t_numpy(times, mask)
@@ -1174,76 +420,24 @@ def compute_delta_t(times: np.ndarray, mask: np.ndarray) -> np.ndarray:
 # =============================================================================
 
 def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Simulate a single microlensing event.
-
-    Generates a complete light curve including magnification, photometric
-    noise, cadence masking, and computes all auxiliary quantities needed
-    for machine learning pipelines.
-
-    Parameters
-    ----------
-    params : dict
-        Dictionary containing:
-        - type: Event type ('flat', 'pspl', 'binary')
-        - time_grid: Array of observation times
-        - mask_prob: Probability of missing an observation
-        - noise_scale: Noise amplitude scaling factor (reserved for future use)
-        - preset: Binary lens preset name (for binary events)
-
-    Returns
-    -------
-    dict or None
-        Dictionary containing:
-        - flux: Observed magnitude array (AB magnitudes, 0 for masked)
-        - delta_t: Time differences between observations
-        - label: Class label (0=flat, 1=pspl, 2=binary)
-        - params: Dictionary of physical parameters
-
-        Returns None if binary event generation fails after all attempts.
-
-    Notes
-    -----
-    The 'flux' key contains NORMALIZED MAGNIFICATION (A=1.0 baseline) for
-    backward compatibility and CNN numerical stability.
-
-    v4.0.0 FIX: Removed redundant double-clipping of A_noisy.
-    v4.0.0 NOTE: noise_scale parameter is reserved for future use (amplitude scaling).
-
-    v2.6 FIX: Binary events that fail to generate distinguishable caustic
-    features now return None instead of falling back to mislabeled PSPL.
-
-    v2.8 FIX: PSPL events now have acceptance criteria matching Binary to
-    prevent "strong event = Binary" bias.
-
-    v2.8.1 FIX: Binary events can optionally require caustic crossing signatures
-    via the 'require_caustic' preset flag.
-
-    v3.0.0: All magic numbers replaced with module-level constants.
-    """
+    """Simulate a single microlensing event."""
     etype = params['type']
     t_grid = params['time_grid']
     n = len(t_grid)
 
-    # Generate baseline magnitude
     m_base = np.random.uniform(SimConfig.BASELINE_MIN, SimConfig.BASELINE_MAX)
     if HAS_NUMBA:
         f_base = single_mag_to_flux(m_base)
     else:
         f_base = ROMAN_ZP_FLUX_JY * 10**(-0.4 * m_base)
 
-    # Initialize metadata
     meta: Dict[str, Any] = {'type': etype, 'm_base': float(m_base)}
 
-    # Generate magnification based on event type
     if etype == 'flat':
         A = np.ones(n, dtype=np.float32)
         label = 0
 
     elif etype == 'pspl':
-        # v2.8 BIAS FIX: PSPL now has acceptance criteria like Binary
-        # This ensures PSPL events are similarly detectable, preventing
-        # the model from learning "strong/detectable event = Binary" shortcut
         generation_success = False
         t0: Optional[float] = None
         tE: Optional[float] = None
@@ -1256,21 +450,18 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             u0 = np.random.uniform(PSPLParams.U0_MIN, PSPLParams.U0_MAX)
             A_candidate = pspl_magnification(t_grid, tE, u0, t0)
 
-            # Cap extreme magnifications for physical realism
             A_candidate = np.minimum(A_candidate, PSPL_MAX_MAGNIFICATION)
 
             max_mag = np.max(A_candidate)
             min_mag = np.min(A_candidate)
             mag_range = max_mag - min_mag
 
-            # v2.8: Apply acceptance criteria (similar to Binary but slightly relaxed)
             if (PSPL_MIN_MAGNIFICATION < max_mag < PSPL_MAX_MAGNIFICATION
                     and mag_range > PSPL_MIN_MAG_RANGE):
                 A = A_candidate
                 generation_success = True
                 break
 
-        # v2.8: Return None if PSPL generation failed (consistent with Binary behavior)
         if not generation_success or A is None:
             return None
 
@@ -1279,13 +470,11 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     elif etype == 'binary':
         p = BinaryPresets.PRESETS[params['preset']]
-        preset_name = params['preset']
         require_caustic = p.get('require_caustic', False)
 
         t0 = np.random.uniform(*p['t0_range'])
         tE = np.random.uniform(*p['tE_range'])
 
-        # Initialize binary parameters to None to detect failure
         s: Optional[float] = None
         q: Optional[float] = None
         u0: Optional[float] = None
@@ -1294,24 +483,16 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         A: Optional[np.ndarray] = None
         generation_success = False
 
-        # Try to generate binary event with retries
         for attempt in range(BINARY_MAX_ATTEMPTS):
-            # Sample binary-specific parameters
             s = np.random.uniform(*p['s_range'])
             q = 10**np.random.uniform(np.log10(p['q_range'][0]), np.log10(p['q_range'][1]))
 
-            # v2.8.1: For presets requiring caustic, constrain u0 based on caustic size
             if require_caustic:
                 caustic_size = estimate_caustic_size(s, q)
-                # u0 should be within ~2x caustic size for good crossing probability
                 u0_max_caustic = min(caustic_size * CAUSTIC_U0_MULTIPLIER, p['u0_range'][1])
                 u0_min_caustic = p['u0_range'][0]
 
-                # v4.0.0 FIX: Explicitly check for collapsed bounds
-                # If caustic is tiny (planetary regime), u0_max_caustic can be < u0_min_caustic
-                # which silently distorts the parameter distribution
                 if u0_max_caustic <= u0_min_caustic:
-                    # Caustic too small for this s,q - skip and resample
                     continue
 
                 u0 = np.random.uniform(u0_min_caustic, u0_max_caustic)
@@ -1327,29 +508,22 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 min_mag = np.min(A_candidate)
                 mag_range = max_mag - min_mag
 
-                # Check standard acceptance criteria
                 if not (BINARY_MIN_MAGNIFICATION < max_mag < BINARY_MAX_MAGNIFICATION):
                     continue
                 if mag_range < BINARY_MIN_MAG_RANGE:
                     continue
 
-                # v2.8.1: Additional caustic check for presets that require it
                 if require_caustic:
                     if not has_caustic_signature(A_candidate):
                         continue
 
-                # Passed all checks
                 A = A_candidate
                 generation_success = True
                 break
 
-            except (RuntimeError, ValueError, TypeError) as e:
-                # VBBinaryLensing failed, continue to next attempt
-                # v3.0.0 FIX: Do NOT catch MemoryError - let it propagate
+            except (RuntimeError, ValueError, TypeError):
                 continue
 
-        # v2.6 CRITICAL FIX: Return None if binary generation failed
-        # Do NOT fall back to PSPL with binary label - this poisons training data
         if not generation_success or A is None:
             return None
 
@@ -1366,103 +540,56 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         raise ValueError(f"Unknown event type: {etype}")
 
-    # v2.7+ CRITICAL FIX: Apply photon noise in MAGNIFICATION space
-    # Convert absolute Jansky noise to relative magnification noise
-    # v4.0.0 NOTE: noise_scale from params is reserved for future use
-    # (could multiply noise_jy by params.get('noise_scale', 1.0) if needed)
     flux_true_jy = f_base * A
     noise_jy = RomanWFI_F146.compute_photon_noise(flux_true_jy)
     flux_noisy_jy = flux_true_jy + np.random.normal(0, noise_jy)
 
-    # v4.0.0 FIX: Single clipping operation (removed redundant second clip)
-    # Clip to physical values: magnification shouldn't go far below baseline
-    # MIN_MAGNIFICATION_CLIP = 0.5 allows for ~2-sigma negative noise fluctuations
     A_noisy = np.maximum(flux_noisy_jy / f_base, MIN_MAGNIFICATION_CLIP)
 
-    # Apply cadence mask (random missing observations)
     mask = np.random.random(n) > params['mask_prob']
     A_noisy[~mask] = 0.0
 
-    # Compute time differences between valid observations
     delta_t = compute_delta_t(t_grid, mask)
 
     return {
-        'flux': A_noisy.astype(np.float32),  # v2.7+: NORMALIZED magnification (baseline=1.0)
+        'flux': A_noisy.astype(np.float32),
         'delta_t': delta_t.astype(np.float32),
         'label': label,
         'params': meta
     }
 
 
-def worker_wrapper(args: Tuple[Dict[str, Any], int]) -> Optional[Dict[str, Any]]:
-    """
-    Wrapper for multiprocessing pool.
-
-    Sets the random seed for reproducibility and calls the simulation
-    function. This wrapper is needed for proper seed management in
-    multiprocessing contexts.
-
-    Parameters
-    ----------
-    args : tuple
-        Tuple of (params_dict, random_seed).
-
-    Returns
-    -------
-    dict or None
-        Simulation result dictionary, or failure indicator dict if generation failed.
-
-    Notes
-    -----
-    v2.8.1 FIX: On failure, returns a dict with '_failed' flag and event type
-    so failures can be attributed to the correct class. This prevents the bug
-    where PSPL failures were counted as binary failures and retried as binary
-    events, skewing the class distribution.
-    """
-    param, seed = args
+def worker_wrapper(args: Tuple[str, int]) -> Optional[Dict[str, Any]]:
+    """Worker wrapper for multiprocessing pool."""
+    etype, seed = args
     np.random.seed(seed)
-    result = simulate_event(param)
+    
+    assert _WORK_TIME_GRID is not None, "Worker not initialized"
+    assert _WORK_MASK_PROB is not None, "Worker not initialized"
+    assert _WORK_PRESET is not None, "Worker not initialized"
+    
+    params = {
+        'type': etype,
+        'time_grid': _WORK_TIME_GRID,
+        'mask_prob': _WORK_MASK_PROB,
+        'preset': _WORK_PRESET,
+        'noise_scale': 1.0,
+    }
+    
+    result = simulate_event(params)
 
     if result is None:
-        # v2.8.1 FIX: Return failure info with event type for proper attribution
-        return {'_failed': True, '_type': param['type']}
+        return {'_failed': True, '_type': etype}
 
     return result
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    """
-    Validate command-line arguments.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        Parsed command-line arguments.
-
-    Raises
-    ------
-    ValueError
-        If any argument is invalid.
-
-    Notes
-    -----
-    v3.0.0 FIX: Added validation for --oversample argument.
-    """
+    """Validate command-line arguments."""
     if args.oversample < 1.0:
-        raise ValueError(
-            f"Oversample factor must be >= 1.0, got {args.oversample}. "
-            f"Values < 1.0 would generate fewer events than requested."
-        )
-
-    if args.n_flat < 0:
-        raise ValueError(f"n_flat must be >= 0, got {args.n_flat}")
-
-    if args.n_pspl < 0:
-        raise ValueError(f"n_pspl must be >= 0, got {args.n_pspl}")
-
-    if args.n_binary < 0:
-        raise ValueError(f"n_binary must be >= 0, got {args.n_binary}")
-
+        raise ValueError(f"Oversample factor must be >= 1.0, got {args.oversample}")
+    if args.n_flat < 0 or args.n_pspl < 0 or args.n_binary < 0:
+        raise ValueError("Event counts must be >= 0")
     if args.n_flat + args.n_pspl + args.n_binary == 0:
         raise ValueError("At least one event type must have n > 0")
 
@@ -1472,346 +599,252 @@ def validate_args(args: argparse.Namespace) -> None:
 # =============================================================================
 
 def main() -> None:
-    """
-    Main simulation pipeline.
-
-    Parses command-line arguments, generates the specified number of
-    microlensing events, and saves results to an HDF5 file with
-    compressed datasets and metadata.
-
-    v4.0.0 FIX: Time grid now generated with generate_time_grid() for exact cadence.
-
-    v2.8.1 FIX: Properly tracks failures by event type and uses
-    oversample/subsample approach for guaranteed class balance.
-
-    v3.0.0 FIX: Added argument validation and improved error handling.
-
-    Failed events (returning None) are tracked by type and the
-    oversample/subsample approach ensures exact class distribution
-    matching the requested counts.
-    """
+    """Main simulation pipeline with streaming HDF5 writes."""
     parser = argparse.ArgumentParser(
-        description="Roman Microlensing Event Simulator",
+        description="Roman Microlensing Event Simulator v7.2.0",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--n_flat', type=int, default=1000,
-                        help="Number of flat (baseline) events")
-    parser.add_argument('--n_pspl', type=int, default=1000,
-                        help="Number of PSPL events")
-    parser.add_argument('--n_binary', type=int, default=1000,
-                        help="Number of binary events")
-    parser.add_argument('--binary_preset', type=str, default='baseline',
-                        choices=['distinct', 'planetary', 'stellar', 'baseline'],
-                        help="Binary lens parameter preset")
-    parser.add_argument('--output', type=str, required=True,
-                        help="Output HDF5 file path")
-    parser.add_argument('--num_workers', type=int, default=None,
-                        help="Number of worker processes (default: CPU count)")
-    parser.add_argument('--seed', type=int, default=42,
-                        help="Random seed for reproducibility")
-    parser.add_argument('--oversample', type=float, default=DEFAULT_OVERSAMPLE_FACTOR,
-                        help="Oversample factor to account for failures (must be >= 1.0)")
+    parser.add_argument('--n_flat', type=int, default=1000)
+    parser.add_argument('--n_pspl', type=int, default=1000)
+    parser.add_argument('--n_binary', type=int, default=1000)
+    parser.add_argument('--binary_preset', type=str, default='general',
+                        choices=['distinct', 'general'])
+    parser.add_argument('--output', type=str, required=True)
+    parser.add_argument('--num_workers', type=int, default=None)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--oversample', type=float, default=DEFAULT_OVERSAMPLE_FACTOR)
 
     args = parser.parse_args()
-
-    # v3.0.0 FIX: Validate arguments before proceeding
     validate_args(args)
 
-    # Setup output directory
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # v4.0.0 FIX: Generate time grid with exact 15-minute cadence
-    # Uses np.arange instead of np.linspace for uniform spacing
     time_grid = generate_time_grid()
 
-    # Base parameters
-    # NOTE: noise_scale is reserved for future use (amplitude scaling)
-    base_params: Dict[str, Any] = {
-        'time_grid': time_grid,
-        'mask_prob': SimConfig.CADENCE_MASK_PROB,
-        'noise_scale': 1.0,  # Reserved for future use
-        'preset': args.binary_preset
-    }
+    n_total = args.n_flat + args.n_pspl + args.n_binary
+    n_points = SimConfig.N_POINTS
 
-    # v2.8.1+ FIX: Oversample to guarantee enough events of each type
-    OVERSAMPLE_FACTOR = args.oversample
-
-    n_flat_gen = int(args.n_flat * OVERSAMPLE_FACTOR)
-    n_pspl_gen = int(args.n_pspl * OVERSAMPLE_FACTOR)
-    n_binary_gen = int(args.n_binary * OVERSAMPLE_FACTOR)
-
-    # Generate task list
-    tasks: List[Dict[str, Any]] = []
-    tasks.extend([{'type': 'flat', **base_params} for _ in range(n_flat_gen)])
-    tasks.extend([{'type': 'pspl', **base_params} for _ in range(n_pspl_gen)])
-    tasks.extend([{'type': 'binary', **base_params} for _ in range(n_binary_gen)])
-
-    total_gen = len(tasks)
     print("=" * 60)
-    print("Roman Microlensing Event Simulator v4.1.0")
+    print("Roman Microlensing Simulator v7.2.0 (Streaming)")
     print("=" * 60)
-    print(f"Configuration:")
-    print(f"  Season duration: {SimConfig.TIME_MAX:.1f} days")
-    print(f"  Cadence: {ROMAN_CADENCE_MINUTES:.1f} minutes ({ROMAN_CADENCE_DAYS:.8f} days)")
-    print(f"  Observations per season: {SimConfig.N_POINTS}")
-    print(f"  Time grid: [{time_grid[0]:.4f}, {time_grid[-1]:.4f}] days")
-    print(f"  Flat events: {args.n_flat} (generating {n_flat_gen})")
-    print(f"  PSPL events: {args.n_pspl} (generating {n_pspl_gen})")
-    print(f"  Binary events: {args.n_binary} (generating {n_binary_gen})")
-    print(f"  Binary preset: {args.binary_preset}")
-    print(f"    require_caustic: {BinaryPresets.PRESETS[args.binary_preset].get('require_caustic', False)}")
-    print(f"  Oversample factor: {OVERSAMPLE_FACTOR}")
-    print(f"  Output: {out_path}")
-    print(f"  Seed: {args.seed}")
-    print(f"  Numba acceleration: {'ENABLED' if HAS_NUMBA else 'DISABLED'}")
+    print(f"Season: {SimConfig.TIME_MAX:.1f} days, {n_points} obs")
+    print(f"Cadence: {ROMAN_CADENCE_MINUTES:.1f} min")
+    print(f"Target: Flat={args.n_flat}, PSPL={args.n_pspl}, Binary={args.n_binary}")
+    print(f"Total: {n_total:,} events")
+    print(f"Preset: {args.binary_preset}")
+    print(f"Caustic: {BinaryPresets.PRESETS[args.binary_preset]['require_caustic']}")
+    print(f"Oversample: {args.oversample}x (safety margin, early stop when full)")
+    print(f"Output: {out_path}")
+    print(f"Seed: {args.seed}")
+    print(f"Numba: {'ON' if HAS_NUMBA else 'OFF'}")
     print("=" * 60)
 
-    # Shuffle tasks for balanced workload
-    np.random.seed(args.seed)
-    np.random.shuffle(tasks)
-
-    # Prepare inputs with unique seeds
-    task_inputs: List[Tuple[Dict[str, Any], int]] = [
-        (t, args.seed + i) for i, t in enumerate(tasks)
-    ]
-
-    # Multiprocessing setup
     workers = args.num_workers or cpu_count()
     print(f"Using {workers} workers...")
 
-    # v2.8.1+ FIX: Track results and failures by type
-    results_by_type: Dict[str, List[Dict[str, Any]]] = {
-        'flat': [], 'pspl': [], 'binary': []
+    # Pre-allocate HDF5 datasets
+    comp_args = {
+        'compression': 'lzf',
+        'chunks': (min(1000, n_total), n_points)
     }
-    failed_by_type: Dict[str, int] = {'flat': 0, 'pspl': 0, 'binary': 0}
+    comp_args_1d = {
+        'compression': 'lzf',
+        'chunks': (min(1000, n_total),)
+    }
+
+    # Define unified params dtype (NaN for unused fields)
+    dtype_params = np.dtype([
+        ('m_base', 'f4'),
+        ('t0', 'f4'),
+        ('tE', 'f4'),
+        ('u0', 'f4'),
+        ('s', 'f4'),
+        ('q', 'f4'),
+        ('alpha', 'f4'),
+        ('rho', 'f4'),
+    ])
+
+    # Track quotas and write positions
+    quotas = {
+        'flat': args.n_flat,
+        'pspl': args.n_pspl,
+        'binary': args.n_binary
+    }
+    
+    write_pos = {
+        'flat': 0,
+        'pspl': 0,
+        'binary': 0
+    }
+    
+    row_offsets = {
+        'flat': 0,
+        'pspl': args.n_flat,
+        'binary': args.n_flat + args.n_pspl
+    }
+    
+    label_map = {
+        'flat': 0,
+        'pspl': 1,
+        'binary': 2
+    }
+
+    def all_quotas_full() -> bool:
+        """Check if all quotas are filled."""
+        return all(write_pos[k] >= quotas[k] for k in quotas)
+
+    def get_row_for(etype: str) -> Optional[int]:
+        """Get next row index for event type, or None if quota full."""
+        if write_pos[etype] >= quotas[etype]:
+            return None
+        row = row_offsets[etype] + write_pos[etype]
+        write_pos[etype] += 1
+        return row
+
+    # Infinite task generator (only yields types still needed)
+    def task_stream() -> Iterator[Tuple[str, int]]:
+        """Generate tasks until all quotas filled."""
+        seed = args.seed
+        while not all_quotas_full():
+            # Round-robin through types that still need events
+            for etype in ['flat', 'pspl', 'binary']:
+                if write_pos[etype] < quotas[etype]:
+                    yield (etype, seed)
+                    seed += 1
+
+    # Track stats
+    failed_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
+    accepted_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
 
     ctx = multiprocessing.get_context('spawn')
 
-    with ctx.Pool(workers) as pool:
-        is_tty = sys.stdout.isatty()
-        iterator = pool.imap_unordered(worker_wrapper, task_inputs, chunksize=MP_CHUNK_SIZE)
-
-        for res in tqdm(iterator,
-                        total=total_gen,
-                        mininterval=TQDM_MIN_INTERVAL,
-                        smoothing=TQDM_SMOOTHING,
-                        ascii=not is_tty,
-                        ncols=TQDM_NCOLS_NON_TTY if not is_tty else TQDM_NCOLS_TTY,
-                        unit="evt"):
-            if res is None:
-                # Should not happen with new worker_wrapper, but handle gracefully
-                failed_by_type['binary'] += 1
-            elif '_failed' in res:
-                # v2.8.1 FIX: Properly attribute failure to correct type
-                failed_by_type[res['_type']] += 1
-            else:
-                event_type = res['params']['type']
-                results_by_type[event_type].append(res)
-
-    # Report failures
-    total_failures = sum(failed_by_type.values())
-    if total_failures > 0:
-        print(f"\nFailures by type:")
-        for etype, count in failed_by_type.items():
-            if count > 0:
-                generated = len(results_by_type[etype])
-                print(f"  {etype}: {count} failed, {generated} succeeded")
-
-    # v2.8.1+ FIX: Subsample to exact targets for guaranteed class balance
-    print("\nBalancing class distribution to exact targets...")
-    final_results = []
-    shortfalls = {}
-
-    for event_type, target in [('flat', args.n_flat),
-                               ('pspl', args.n_pspl),
-                               ('binary', args.n_binary)]:
-        available = results_by_type[event_type]
-
-        if len(available) >= target:
-            indices = np.random.choice(len(available), size=target, replace=False)
-            selected = [available[i] for i in indices]
-            final_results.extend(selected)
-            print(f"  {event_type}: {len(available)} available -> {target} selected")
-        else:
-            final_results.extend(available)
-            shortfall = target - len(available)
-            shortfalls[event_type] = shortfall
-            print(f"  {event_type}: {len(available)} available, {shortfall} short")
-
-    if shortfalls:
-        print(f"\nWarning: Some classes have fewer events than requested.")
-        print(f"Consider increasing --oversample (currently {OVERSAMPLE_FACTOR})")
-        print(f"or adjusting acceptance criteria in simulate.py")
-
-    # Shuffle final results
-    np.random.shuffle(final_results)
-
-    # ==========================================================================
-    # v4.1.0: CHUNKED HDF5 SAVE - Memory efficient for large datasets
-    # Previous version allocated ~41 GB in RAM before writing.
-    # This version writes in 10K-event chunks, using ~500 MB RAM.
-    # ==========================================================================
-    
-    n_res = len(final_results)
-    n_points = SimConfig.N_POINTS
-    
-    # Count final class distribution (quick pass)
-    final_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
-    for r in final_results:
-        if r['label'] == 0:
-            final_counts['flat'] += 1
-        elif r['label'] == 1:
-            final_counts['pspl'] += 1
-        else:
-            final_counts['binary'] += 1
-    
-    print(f"\nSaving to {out_path}...")
-    print(f"  Events: {n_res:,}")
-    print(f"  Points per event: {n_points:,}")
-    est_size_gb = n_res * n_points * 4 * 4 / 1e9
-    print(f"  Estimated size: {est_size_gb:.1f} GB (uncompressed)")
-    
-    # Chunk size for writing (balance memory vs I/O)
-    SAVE_CHUNK_SIZE = 10000
-    
-    # HDF5 settings with chunking for efficient partial writes
-    comp_args = {
-        'compression': 'lzf',
-        'chunks': (min(SAVE_CHUNK_SIZE, n_res), n_points)
-    }
-    comp_args_1d = {
-        'compression': 'lzf', 
-        'chunks': (min(SAVE_CHUNK_SIZE, n_res),)
-    }
-    
-    # Collect parameters by class
-    params_by_class: Dict[str, List[Dict[str, Any]]] = {
-        'flat': [], 'pspl': [], 'binary': []
-    }
-    
-    # Track m_base range without storing full array
-    mbase_min, mbase_max = float('inf'), float('-inf')
+    print("\nGenerating and streaming to HDF5...")
     
     with h5py.File(out_path, 'w') as f:
-        # Pre-allocate datasets (creates file structure, no data yet)
-        ds_flux = f.create_dataset('flux', shape=(n_res, n_points), dtype='f4', **comp_args)
-        ds_dt = f.create_dataset('delta_t', shape=(n_res, n_points), dtype='f4', **comp_args)
-        ds_labels = f.create_dataset('labels', shape=(n_res,), dtype='i4')
-        ds_ts = f.create_dataset('timestamps', shape=(n_res, n_points), dtype='f4', **comp_args)
-        ds_mbase = f.create_dataset('m_base', shape=(n_res,), dtype='f4', **comp_args_1d)
+        # Pre-allocate all datasets
+        ds_flux = f.create_dataset('flux', shape=(n_total, n_points), dtype='f4', **comp_args)
+        ds_dt = f.create_dataset('delta_t', shape=(n_total, n_points), dtype='f4', **comp_args)
+        ds_labels = f.create_dataset('labels', shape=(n_total,), dtype='i4')
+        ds_mbase = f.create_dataset('m_base', shape=(n_total,), dtype='f4', **comp_args_1d)
+        ds_params = f.create_dataset('params', shape=(n_total,), dtype=dtype_params, **comp_args_1d)
         
-        # Write data in chunks with progress bar
-        print("  Writing chunks...")
-        for start_idx in tqdm(range(0, n_res, SAVE_CHUNK_SIZE), 
-                              desc="  Saving", ncols=80, unit="chunk"):
-            end_idx = min(start_idx + SAVE_CHUNK_SIZE, n_res)
-            chunk_size = end_idx - start_idx
+        # Save time_grid once (1D)
+        f.create_dataset('time_grid', data=time_grid.astype(np.float32), compression='lzf')
+
+        # Stream write as results arrive
+        with ctx.Pool(
+            workers,
+            initializer=_init_worker,
+            initargs=(time_grid, SimConfig.CADENCE_MASK_PROB, args.binary_preset),
+        ) as pool:
+            is_tty = sys.stdout.isatty()
             
-            # Build chunk arrays (small, ~500 MB max)
-            flux_chunk = np.zeros((chunk_size, n_points), dtype=np.float32)
-            dt_chunk = np.zeros((chunk_size, n_points), dtype=np.float32)
-            labels_chunk = np.zeros(chunk_size, dtype=np.int32)
-            mbase_chunk = np.zeros(chunk_size, dtype=np.float32)
+            # Estimate max tasks (for progress bar)
+            max_tasks_estimate = int(n_total * args.oversample)
             
-            for i, r in enumerate(final_results[start_idx:end_idx]):
-                flux_chunk[i] = r['flux']
-                dt_chunk[i] = r['delta_t']
-                labels_chunk[i] = r['label']
-                mbase_chunk[i] = r['params']['m_base']
-                params_by_class[r['params']['type']].append(r['params'])
-            
-            # Track m_base range
-            mbase_min = min(mbase_min, mbase_chunk.min())
-            mbase_max = max(mbase_max, mbase_chunk.max())
-            
-            # Write chunk to HDF5
-            ds_flux[start_idx:end_idx] = flux_chunk
-            ds_dt[start_idx:end_idx] = dt_chunk
-            ds_labels[start_idx:end_idx] = labels_chunk
-            ds_mbase[start_idx:end_idx] = mbase_chunk
-        
-        # Timestamps are identical for all events - write efficiently
-        print("  Writing timestamps...")
-        ts_row = time_grid.astype(np.float32)
-        for start_idx in range(0, n_res, SAVE_CHUNK_SIZE):
-            end_idx = min(start_idx + SAVE_CHUNK_SIZE, n_res)
-            ds_ts[start_idx:end_idx] = np.tile(ts_row, (end_idx - start_idx, 1))
-        
-        # Save parameters as structured arrays (backward compatibility)
-        print("  Writing parameters...")
-        for class_name, class_params in params_by_class.items():
-            if not class_params:
-                continue
-            
-            all_fields: set = set()
-            for p in class_params:
-                all_fields.update(
-                    k for k, v in p.items()
-                    if isinstance(v, (int, float, np.number))
-                )
-            
-            if not all_fields:
-                continue
-            
-            sorted_fields = sorted(all_fields)
-            dtype_list = [(field, 'f8') for field in sorted_fields]
-            struct_arr = np.zeros(len(class_params), dtype=dtype_list)
-            
-            for i, p in enumerate(class_params):
-                for field in sorted_fields:
-                    if field in p:
-                        struct_arr[i][field] = p[field]
-            
-            f.create_dataset(f'params_{class_name}', data=struct_arr, compression='lzf')
-        
+            iterator = pool.imap_unordered(
+                worker_wrapper,
+                task_stream(),
+                chunksize=MP_CHUNK_SIZE
+            )
+
+            pbar = tqdm(
+                total=n_total,
+                mininterval=TQDM_MIN_INTERVAL,
+                smoothing=TQDM_SMOOTHING,
+                ascii=not is_tty,
+                ncols=TQDM_NCOLS_NON_TTY if not is_tty else TQDM_NCOLS_TTY,
+                unit="evt",
+                desc="Writing"
+            )
+
+            for res in iterator:
+                if res.get('_failed'):
+                    failed_counts[res['_type']] += 1
+                    continue
+
+                etype = res['params']['type']
+                
+                # Get row for this event type
+                row = get_row_for(etype)
+                if row is None:
+                    # Quota already full for this type
+                    continue
+
+                # Write to HDF5
+                ds_flux[row] = res['flux']
+                ds_dt[row] = res['delta_t']
+                ds_labels[row] = label_map[etype]
+                ds_mbase[row] = res['params']['m_base']
+
+                # Write params with NaNs for unused fields
+                p = res['params']
+                rowp = np.zeros((), dtype=dtype_params)
+                rowp['m_base'] = p['m_base']
+                rowp['t0'] = p.get('t0', np.nan)
+                rowp['tE'] = p.get('tE', np.nan)
+                rowp['u0'] = p.get('u0', np.nan)
+                rowp['s'] = p.get('s', np.nan)
+                rowp['q'] = p.get('q', np.nan)
+                rowp['alpha'] = p.get('alpha', np.nan)
+                rowp['rho'] = p.get('rho', np.nan)
+                ds_params[row] = rowp
+
+                accepted_counts[etype] += 1
+                pbar.update(1)
+
+                # Check if done
+                if all_quotas_full():
+                    pool.terminate()
+                    break
+
+            pbar.close()
+
         # Save metadata
+        mbase_data = ds_mbase[:]
         metadata = {
-            'n_events': int(n_res),
-            'n_flat': final_counts['flat'],
-            'n_pspl': final_counts['pspl'],
-            'n_binary': final_counts['binary'],
-            'n_flat_requested': int(args.n_flat),
-            'n_pspl_requested': int(args.n_pspl),
-            'n_binary_requested': int(args.n_binary),
+            'n_events': int(n_total),
+            'n_flat': int(args.n_flat),
+            'n_pspl': int(args.n_pspl),
+            'n_binary': int(args.n_binary),
             'binary_preset': args.binary_preset,
-            'require_caustic': BinaryPresets.PRESETS[args.binary_preset].get('require_caustic', False),
+            'require_caustic': BinaryPresets.PRESETS[args.binary_preset]['require_caustic'],
             'seed': int(args.seed),
-            'oversample_factor': float(OVERSAMPLE_FACTOR),
+            'oversample_factor': float(args.oversample),
             'season_duration_days': float(ROMAN_SEASON_DURATION_DAYS),
-            'mission_duration_days': float(ROMAN_MISSION_DURATION_DAYS),
-            'n_points': int(SimConfig.N_POINTS),
+            'n_points': int(n_points),
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
             'cadence_days': float(ROMAN_CADENCE_DAYS),
             'time_grid_start': float(time_grid[0]),
             'time_grid_end': float(time_grid[-1]),
             'numba_enabled': HAS_NUMBA,
             'version': __version__,
-            'note': 'v4.1.0: Chunked HDF5 save for memory efficiency'
+            'm_base_min': float(mbase_data.min()),
+            'm_base_max': float(mbase_data.max()),
         }
         f.attrs.update(metadata)
-    
-    # Get file size
+
     file_size_gb = out_path.stat().st_size / 1e9
-    
+
+    # Print summary
     print(f"\n{'='*60}")
-    print(f"Successfully saved {n_res:,} events to {out_path}")
-    print(f"Class distribution: Flat={final_counts['flat']:,}, "
-          f"PSPL={final_counts['pspl']:,}, Binary={final_counts['binary']:,}")
-    print(f"Season: {SimConfig.TIME_MAX:.1f} days, {SimConfig.N_POINTS} observations")
-    print(f"Time grid: [{time_grid[0]:.4f}, {time_grid[-1]:.4f}] days")
-    print(f"m_base range: [{mbase_min:.2f}, {mbase_max:.2f}] mag")
-    print(f"File size: {file_size_gb:.2f} GB")
+    print(f"Saved {n_total:,} events to {out_path}")
+    print(f"Accepted: Flat={accepted_counts['flat']:,}, PSPL={accepted_counts['pspl']:,}, Binary={accepted_counts['binary']:,}")
+    
+    total_failed = sum(failed_counts.values())
+    if total_failed > 0:
+        print(f"Failed: Flat={failed_counts['flat']}, PSPL={failed_counts['pspl']}, Binary={failed_counts['binary']}")
+    
+    print(f"m_base: [{metadata['m_base_min']:.2f}, {metadata['m_base_max']:.2f}] mag")
+    print(f"Size: {file_size_gb:.2f} GB")
     print(f"{'='*60}")
 
 
 if __name__ == '__main__':
-    # v3.0.0 FIX: Moved set_start_method inside main guard
-    # This prevents modification of global multiprocessing state when
-    # importing simulate.py as a module
     try:
         set_start_method('spawn')
     except RuntimeError:
-        pass  # Already set
+        pass
     main()
