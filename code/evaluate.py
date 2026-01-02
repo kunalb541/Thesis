@@ -37,7 +37,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "7.0.0"
+__version__: Final[str] = "7.1.0"  # Bumped for interface fix
 
 # =============================================================================
 # CONSTANTS
@@ -580,14 +580,17 @@ def load_and_prepare_data(
     logger: Optional[logging.Logger] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     """
-    Load and normalize data from HDF5 file with sequence compaction.
+    Load and normalize data from HDF5 file.
+    
+    FIXED: Normalization now matches train.py - only valid observations are
+    normalized, padded zeros remain as zeros so model mask inference works.
 
     Returns
     -------
     flux_norm : np.ndarray
-        Normalized flux [n_samples, seq_len]
+        Normalized flux [n_samples, seq_len]. Padded positions = 0.0.
     delta_t_norm : np.ndarray
-        Normalized delta_t [n_samples, seq_len]
+        Normalized delta_t [n_samples, seq_len]. Padded positions = 0.0.
     labels : np.ndarray
         Class labels [n_samples]
     timestamps : np.ndarray
@@ -675,9 +678,10 @@ def load_and_prepare_data(
         labels = labels[indices]
         timestamps = timestamps[indices]
 
-    # Sequence compaction
+    # Compute valid lengths and normalize ONLY valid observations
+    # This matches train.py's MicrolensingDataset behavior
     if logger:
-        logger.info("Applying sequence compaction")
+        logger.info("Computing valid lengths and normalizing (train-compatible)")
 
     n_total, seq_len = flux.shape
     flux_mean = stats['flux_mean']
@@ -685,34 +689,28 @@ def load_and_prepare_data(
     delta_t_mean = stats['delta_t_mean']
     delta_t_std = stats['delta_t_std']
 
-    flux_compact = np.zeros_like(flux)
-    delta_t_compact = np.zeros_like(delta_t)
-    ts_compact = np.full_like(timestamps, INVALID_TIMESTAMP)
     valid_lengths = np.zeros(n_total, dtype=np.int32)
+    
+    # Create output arrays - start with copies
+    flux_norm = flux.astype(np.float32).copy()
+    delta_t_norm = delta_t.astype(np.float32).copy()
 
     for i in range(n_total):
+        # Identify valid observations (non-zero flux)
         valid_mask = (flux[i] != 0.0)
         n_valid = valid_mask.sum()
-
-        if n_valid == 0:
-            n_valid = 1
-            flux_compact[i, 0] = flux_mean
-            delta_t_compact[i, 0] = 0.0
-            ts_compact[i, 0] = timestamps[i, 0] if timestamps[i, 0] != INVALID_TIMESTAMP else 0.0
-        else:
-            flux_compact[i, :n_valid] = flux[i, valid_mask]
-            delta_t_compact[i, :n_valid] = delta_t[i, valid_mask]
-            ts_compact[i, :n_valid] = timestamps[i, valid_mask]
-
-        valid_lengths[i] = n_valid
+        valid_lengths[i] = max(n_valid, 1)  # At least 1 to avoid edge cases
+        
+        # Normalize ONLY valid observations, leave zeros as zeros
+        # This matches train.py's MicrolensingDataset.__getitem__
+        if n_valid > 0:
+            flux_norm[i, valid_mask] = (flux[i, valid_mask] - flux_mean) / (flux_std + EPS)
+            delta_t_norm[i, valid_mask] = (delta_t[i, valid_mask] - delta_t_mean) / (delta_t_std + EPS)
+        # Padded positions remain 0.0 (already copied from original)
 
     if logger:
         logger.info(f"Valid lengths: min={valid_lengths.min()}, max={valid_lengths.max()}, "
                    f"mean={valid_lengths.mean():.1f}")
-
-    # Normalize
-    flux_norm = (flux_compact - flux_mean) / (flux_std + EPS)
-    delta_t_norm = (delta_t_compact - delta_t_mean) / (delta_t_std + EPS)
 
     if logger:
         logger.info(f"Loaded {len(flux_norm)} samples")
@@ -720,7 +718,7 @@ def load_and_prepare_data(
             cnt = (labels == c).sum()
             logger.info(f"  {name}: {cnt} ({100*cnt/len(labels):.1f}%)")
 
-    return flux_norm, delta_t_norm, labels, ts_compact, valid_lengths, selected_indices, data_format
+    return flux_norm, delta_t_norm, labels, timestamps, valid_lengths, selected_indices, data_format
 
 
 # =============================================================================
@@ -736,9 +734,15 @@ def run_inference(
     batch_size: int = 128,
     logger: Optional[logging.Logger] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Run batch inference."""
+    """
+    Run batch inference.
+    
+    FIXED: Now uses observation_mask parameter instead of lengths,
+    matching model.py v7.1.0 forward signature.
+    """
     model.eval()
     n_samples = len(flux)
+    seq_len = flux.shape[1]
     n_batches = (n_samples + batch_size - 1) // batch_size
 
     all_logits = np.zeros((n_samples, NUM_CLASSES), dtype=np.float32)
@@ -752,16 +756,28 @@ def run_inference(
     with torch.no_grad(), torch.inference_mode():
         for i in tqdm(range(0, n_samples, batch_size), desc="Inference", disable=(logger is None)):
             end = min(i + batch_size, n_samples)
+            batch_len = end - i
 
             flux_batch = torch.from_numpy(flux[i:end]).to(device)
             dt_batch = torch.from_numpy(delta_t[i:end]).to(device)
             
+            # Build observation mask from valid_lengths if provided
+            # Otherwise, model will infer from flux != 0.0
             if valid_lengths is not None:
+                # Create mask: True for positions < valid_length
                 len_batch = torch.from_numpy(valid_lengths[i:end]).to(device)
+                positions = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, seq_len]
+                obs_mask = positions < len_batch.unsqueeze(1)  # [batch, seq_len]
+                
+                # Zero out padded positions to be safe
+                # (should already be zero from load_and_prepare_data, but defensive)
+                flux_batch = torch.where(obs_mask, flux_batch, torch.zeros_like(flux_batch))
+                dt_batch = torch.where(obs_mask, dt_batch, torch.zeros_like(dt_batch))
             else:
-                len_batch = None
+                obs_mask = None
 
-            logits = model(flux_batch, dt_batch, lengths=len_batch)
+            # Call model with correct signature: forward(flux, delta_t, observation_mask=None, ...)
+            logits = model(flux_batch, dt_batch, observation_mask=obs_mask)
 
             if is_hierarchical:
                 probs = torch.exp(logits)
@@ -1484,24 +1500,26 @@ class RomanEvaluator:
         probs_evolution = np.zeros((n_steps, NUM_CLASSES))
         times_evolution = np.zeros(n_steps)
 
-        padding_flux = (0.0 - self.flux_mean) / (self.flux_std + EPS)
-        padding_dt = (0.0 - self.delta_t_mean) / (self.delta_t_std + EPS)
+        seq_len = len(flux_norm)
 
         with torch.no_grad(), torch.inference_mode():
             for i, n_obs in enumerate(obs_counts):
                 times_evolution[i] = times[n_obs - 1]
 
-                max_len = len(flux_norm)
-                flux_padded = np.full(max_len, padding_flux, dtype=np.float32)
-                dt_padded = np.full(max_len, padding_dt, dtype=np.float32)
-                flux_padded[:n_obs] = flux_norm[:n_obs]
-                dt_padded[:n_obs] = delta_t_norm[:n_obs]
+                # Create truncated version: zero out positions >= n_obs
+                flux_trunc = flux_norm.copy()
+                dt_trunc = delta_t_norm.copy()
+                flux_trunc[n_obs:] = 0.0
+                dt_trunc[n_obs:] = 0.0
 
-                flux_t = torch.from_numpy(flux_padded[None, :]).to(self.device)
-                dt_t = torch.from_numpy(dt_padded[None, :]).to(self.device)
-                len_t = torch.tensor([n_obs], dtype=torch.long, device=self.device)
+                flux_t = torch.from_numpy(flux_trunc[None, :]).to(self.device)
+                dt_t = torch.from_numpy(dt_trunc[None, :]).to(self.device)
+                
+                # Build observation mask
+                positions = torch.arange(seq_len, device=self.device).unsqueeze(0)
+                obs_mask = positions < n_obs
 
-                logits = self.model(flux_t, dt_t, lengths=len_t)
+                logits = self.model(flux_t, dt_t, observation_mask=obs_mask)
 
                 if is_hierarchical:
                     probs = torch.exp(logits)
@@ -1568,8 +1586,7 @@ class RomanEvaluator:
             return
 
         results = []
-        padding_flux = (0.0 - self.flux_mean) / (self.flux_std + EPS)
-        padding_dt = (0.0 - self.delta_t_mean) / (self.delta_t_std + EPS)
+        seq_len = self.flux_norm.shape[1]
 
         for frac in fractions_ok:
             self.logger.info(f"  Testing {frac*100:.0f}% completeness...")
@@ -1580,17 +1597,20 @@ class RomanEvaluator:
                     n_valid = self.valid_lengths[i]
                     n_use = max(int(n_valid * frac), EARLY_DETECTION_MIN)
 
-                    max_len = self.flux_norm.shape[1]
-                    flux_padded = np.full(max_len, padding_flux, dtype=np.float32)
-                    dt_padded = np.full(max_len, padding_dt, dtype=np.float32)
-                    flux_padded[:n_use] = self.flux_norm[i, :n_use]
-                    dt_padded[:n_use] = self.delta_t_norm[i, :n_use]
+                    # Create truncated version
+                    flux_trunc = self.flux_norm[i].copy()
+                    dt_trunc = self.delta_t_norm[i].copy()
+                    flux_trunc[n_use:] = 0.0
+                    dt_trunc[n_use:] = 0.0
 
-                    flux_t = torch.from_numpy(flux_padded[None, :]).to(self.device)
-                    dt_t = torch.from_numpy(dt_padded[None, :]).to(self.device)
-                    len_t = torch.tensor([n_use], dtype=torch.long, device=self.device)
+                    flux_t = torch.from_numpy(flux_trunc[None, :]).to(self.device)
+                    dt_t = torch.from_numpy(dt_trunc[None, :]).to(self.device)
+                    
+                    # Build observation mask
+                    positions = torch.arange(seq_len, device=self.device).unsqueeze(0)
+                    obs_mask = positions < n_use
 
-                    logits = self.model(flux_t, dt_t, lengths=len_t)
+                    logits = self.model(flux_t, dt_t, observation_mask=obs_mask)
                     preds_trunc.append(logits.argmax(dim=-1).cpu().item())
 
             preds_trunc = np.array(preds_trunc)
