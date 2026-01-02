@@ -7,7 +7,7 @@
 #SBATCH -t 12:00:00
 #SBATCH -o logs/datagen_%j.out
 #SBATCH -e logs/datagen_%j.err
-#SBATCH --job-name=datagen_v735
+#SBATCH --job-name=datagen
 #SBATCH --mail-user=kunal29bhatia@gmail.com
 #SBATCH --mail-type=ALL
 
@@ -34,11 +34,11 @@ N_TRAIN_FLAT=250000
 N_TRAIN_PSPL=125000
 N_TRAIN_BINARY=125000
 
-N_TEST_FLAT=50000
-N_TEST_PSPL=50000
-N_TEST_BINARY=50000
+N_TEST_FLAT=100000
+N_TEST_PSPL=100000
+N_TEST_BINARY=100000
 
-OVERSAMPLE=1.5
+OVERSAMPLE=1.1
 N_WORKERS=32
 
 SEED_GENERAL_TRAIN=42
@@ -69,15 +69,3 @@ run_one "$RAW_DIR/general_train.h5"   "$N_TRAIN_FLAT" "$N_TRAIN_PSPL" "$N_TRAIN_
 run_one "$RAW_DIR/distinct_train.h5"  "$N_TRAIN_FLAT" "$N_TRAIN_PSPL" "$N_TRAIN_BINARY" "distinct" "$SEED_DISTINCT_TRAIN"
 run_one "$TEST_DIR/general_test.h5"   "$N_TEST_FLAT"  "$N_TEST_PSPL"  "$N_TEST_BINARY"  "general"  "$SEED_GENERAL_TEST"
 run_one "$TEST_DIR/distinct_test.h5"  "$N_TEST_FLAT"  "$N_TEST_PSPL"  "$N_TEST_BINARY"  "distinct" "$SEED_DISTINCT_TEST"
-
-python - <<'PY'
-import h5py, glob, os
-def summarize(path):
-    with h5py.File(path, "r") as f:
-        n = len(f["labels"])
-        return os.path.basename(path), n
-for p in sorted(glob.glob(os.path.expanduser("~/Thesis/data/raw/*.h5"))):
-    print("RAW", *summarize(p))
-for p in sorted(glob.glob(os.path.expanduser("~/Thesis/data/test/*.h5"))):
-    print("TEST", *summarize(p))
-PY
