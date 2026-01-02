@@ -402,7 +402,7 @@ class RomanMicrolensingClassifier(nn.Module):
         delta_t : Tensor
             Time differences [B, T].
         observation_mask : Optional[Tensor]
-            Boolean mask [B, T] where True = valid. Inferred from flux > 0.5 if None.
+            Boolean mask [B, T] where True = valid. Inferred from flux != 0.0 if None.
         return_intermediates : bool
             Return HierarchicalOutput with all intermediate values.
         
