@@ -838,10 +838,13 @@ def train_epoch(
             # Model returns log_probs, convert to probs
             probs = torch.exp(log_probs)
             preds = probs.argmax(dim=1)
+            loss_unscaled = loss.detach() * accumulation_steps
             
-            total_loss_gpu += loss.detach() * accumulation_steps
+            total_loss_gpu += loss_unscaled * labels.size(0)
             total_correct_gpu += (preds == labels).sum()
             total_samples_gpu += labels.size(0)
+            
+
         
         if batch_idx % PROGRESS_UPDATE_FREQ == 0:
             current_loss = total_loss_gpu.item() / max(total_samples_gpu.item(), 1)
