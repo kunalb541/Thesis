@@ -1,27 +1,3 @@
-#!/usr/bin/env python3
-"""
-Roman Microlensing Event Classifier - Neural Network Architecture
-=================================================================
-
-V7.0.1 - LSTM UPGRADE 
-----------------------
-
-FIXES:
-    - Replaced BatchNorm with GroupNorm (stable with variable-length padding)
-    - Applied locked dropout properly (post-LSTM variational dropout)
-    - Fixed stage2_temperature application (now correctly applied at inference only)
-    - Fixed GroupNorm validation (num_groups <= d_model constraint)
-    - Fixed log-prob clamping (removed max clamp)
-    - Added probability normalization for numerical stability
-    - Disabled lstm_proj_size (incompatible with current architecture)
-    - Renamed logits → log_probs for semantic clarity
-
-Author: Kunal Bhatia
-Institution: University of Heidelberg
-Version: 7.0.1
-Date: January 2025
-"""
-
 from __future__ import annotations
 
 import math
