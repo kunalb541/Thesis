@@ -5,22 +5,23 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=128G
 #SBATCH -t 12:00:00
-#SBATCH -o logs/datagen_%j.out
-#SBATCH -e logs/datagen_%j.err
 #SBATCH --job-name=datagen
 #SBATCH --mail-user=kunal29bhatia@gmail.com
 #SBATCH --mail-type=ALL
+#SBATCH --chdir=/home/hd/hd_hd/hd_vm305/Thesis/code
+#SBATCH -o logs/datagen_%j.out
+#SBATCH -e logs/datagen_%j.err
 
 set -euo pipefail
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate microlens
-cd ~/Thesis/code
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMBA_NUM_THREADS=1
+
 export PYTHONUNBUFFERED=1
 export PYTHONWARNINGS="ignore"
 
@@ -28,6 +29,8 @@ DATA_DIR="$HOME/Thesis/data"
 RAW_DIR="$DATA_DIR/raw"
 TEST_DIR="$DATA_DIR/test"
 LOG_DIR="$HOME/Thesis/code/logs"
+
+# Safe even if they already exist
 mkdir -p "$RAW_DIR" "$TEST_DIR" "$LOG_DIR"
 
 N_TRAIN_FLAT=250000
@@ -39,7 +42,8 @@ N_TEST_PSPL=100000
 N_TEST_BINARY=100000
 
 OVERSAMPLE=1.5
-N_WORKERS=32
+
+N_WORKERS="${SLURM_CPUS_PER_TASK:-32}"
 
 SEED_GENERAL_TRAIN=42
 SEED_GENERAL_TEST=999
