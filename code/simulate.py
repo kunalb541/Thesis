@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import argparse
 import h5py
 import math
@@ -7,15 +8,16 @@ import sys
 import threading
 import time
 import warnings
-from multiprocessing import Pool, cpu_count, set_start_method
+from multiprocessing import cpu_count, set_start_method
 from pathlib import Path
 from typing import Any, Dict, Final, Iterator, Optional, Tuple
+
 import numpy as np
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "7.3.6"
+__version__: Final[str] = "7.3.7"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -80,7 +82,6 @@ CAUSTIC_MAX_COMPARISON_WINDOW: Final[int] = 50
 NOISE_FLOOR_FACTOR: Final[float] = 1e-5
 MIN_MAGNIFICATION_CLIP: Final[float] = 0.5
 DEFAULT_OVERSAMPLE_FACTOR: Final[float] = 1.5
-MIN_U0_OFFSET: Final[float] = 0.01
 CAUSTIC_U0_MULTIPLIER: Final[float] = 2.0
 
 MP_CHUNK_SIZE: Final[int] = 25
@@ -566,8 +567,7 @@ def worker_wrapper(args: Tuple[str, int]) -> Dict[str, Any]:
         'type': etype,
         'time_grid': _WORK_TIME_GRID,
         'mask_prob': _WORK_MASK_PROB,
-        'preset': _WORK_PRESET,
-        'noise_scale': 1.0,
+        'preset': _WORK_PRESET
     }
     
     # Full try/except to catch any uncaught exceptions
@@ -602,7 +602,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     """Main simulation pipeline with streaming HDF5 writes."""
     parser = argparse.ArgumentParser(
-        description="Roman Microlensing Event Simulator v7.3.6 (Final Bulletproof)",
+        description="Roman Microlensing Event Simulator v7.3.7 (Final Bulletproof)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -630,7 +630,7 @@ def main() -> None:
     max_tasks = int(np.ceil(n_total * args.oversample))
 
     print("=" * 60)
-    print("Roman Microlensing Simulator v7.3.6 (Final Bulletproof)")
+    print("Roman Microlensing Simulator v7.3.7 (Final Bulletproof)")
     print("=" * 60)
     print(f"Season: {SimConfig.TIME_MAX:.1f} days, {n_points} obs")
     print(f"Cadence: {ROMAN_CADENCE_MINUTES:.1f} min")
@@ -706,11 +706,23 @@ def main() -> None:
         
         IMPORTANT: etype_task must be a valid type from inflight dict.
         Malformed results should be handled before calling this function.
+        Inflight underflow is FATAL (indicates double-finalize or pool weirdness).
         """
         with state_lock:
-            # Decrement per-type inflight
-            if etype_task in inflight and inflight[etype_task] > 0:
-                inflight[etype_task] -= 1
+            # FATAL: invalid etype_task
+            if etype_task not in inflight:
+                print(f"\nFATAL: finalize called with invalid etype_task={etype_task}")
+                print(f"  inflight: {dict(inflight)}")
+                sys.exit(3)
+
+            # FATAL: inflight underflow (double-finalize, duplicated result, pool weirdness)
+            if inflight[etype_task] <= 0:
+                print(f"\nFATAL: inflight underflow for etype_task={etype_task}")
+                print(f"  inflight:  {dict(inflight)}")
+                print(f"  write_pos: {dict(write_pos)}")
+                sys.exit(3)
+
+            inflight[etype_task] -= 1
 
             if not is_success:
                 # Check completion anyway
@@ -824,97 +836,112 @@ def main() -> None:
             )
 
             done = False
-            for res in iterator:
-                # FATAL: Malformed result corrupts inflight accounting
-                if (res is None) or (not isinstance(res, dict)):
-                    pbar.close()
-                    print("\nFATAL: Malformed result from pool; inflight accounting compromised.")
-                    with state_lock:
-                        print(f"  write_pos: {dict(write_pos)}")
-                        print(f"  inflight:  {dict(inflight)}")
-                        print(f"  quotas:    {dict(quotas)}")
-                    pool.terminate()
-                    pool.join()
-                    sys.exit(3)
+            try:
+                for res in iterator:
+                    # FATAL: Malformed result corrupts inflight accounting
+                    if (res is None) or (not isinstance(res, dict)):
+                        pbar.close()
+                        print("\nFATAL: Malformed result from pool; inflight accounting compromised.")
+                        with state_lock:
+                            print(f"  write_pos: {dict(write_pos)}")
+                            print(f"  inflight:  {dict(inflight)}")
+                            print(f"  quotas:    {dict(quotas)}")
+                        pool.terminate()
+                        pool.join()
+                        sys.exit(3)
 
-                # _type is source of truth for inflight accounting
-                etype_task = res.get('_type', None)
-                
-                # FATAL: Missing _type corrupts inflight accounting
-                if etype_task is None or etype_task not in inflight:
-                    pbar.close()
-                    print(f"\nFATAL: Result missing valid _type; inflight accounting compromised.")
-                    print(f"  Got _type: {etype_task}")
-                    print(f"  Result keys: {list(res.keys())}")
-                    with state_lock:
-                        print(f"  write_pos: {dict(write_pos)}")
-                        print(f"  inflight:  {dict(inflight)}")
-                    pool.terminate()
-                    pool.join()
-                    sys.exit(3)
-
-                # Failure case - atomically handle inflight decrement
-                if res.get('_failed'):
-                    finalize_task_and_maybe_reserve_row(etype_task, is_success=False)
-                    failed_counts[etype_task] = failed_counts.get(etype_task, 0) + 1
+                    # _type is source of truth for inflight accounting
+                    etype_task = res.get('_type', None)
                     
-                    # Track exception types if present
-                    if '_err' in res:
-                        err_key = res['_err'][:50]  # Truncate long errors
-                        error_counts[err_key] = error_counts.get(err_key, 0) + 1
+                    # FATAL: Missing _type corrupts inflight accounting
+                    if etype_task is None or etype_task not in inflight:
+                        pbar.close()
+                        print(f"\nFATAL: Result missing valid _type; inflight accounting compromised.")
+                        print(f"  Got _type: {etype_task}")
+                        print(f"  Result keys: {list(res.keys())}")
+                        with state_lock:
+                            print(f"  write_pos: {dict(write_pos)}")
+                            print(f"  inflight:  {dict(inflight)}")
+                        pool.terminate()
+                        pool.join()
+                        sys.exit(3)
+
+                    # Failure case - atomically handle inflight decrement
+                    if res.get('_failed'):
+                        finalize_task_and_maybe_reserve_row(etype_task, is_success=False)
+                        failed_counts[etype_task] = failed_counts.get(etype_task, 0) + 1
+                        
+                        # Track exception types if present
+                        if '_err' in res:
+                            err_key = res['_err'][:50]  # Truncate long errors
+                            error_counts[err_key] = error_counts.get(err_key, 0) + 1
+                        
+                        with state_lock:
+                            pbar.set_postfix({
+                                "Ff": failed_counts.get('flat', 0),
+                                "Pf": failed_counts.get('pspl', 0),
+                                "Bf": failed_counts.get('binary', 0),
+                                "Fi": inflight['flat'],
+                                "Pi": inflight['pspl'],
+                                "Bi": inflight['binary'],
+                            })
+                        continue
+
+                    # Validate params['type'] matches _type (accounting source of truth)
+                    ptype = res.get('params', {}).get('type', None)
+                    if ptype != etype_task:
+                        finalize_task_and_maybe_reserve_row(etype_task, is_success=False)
+                        failed_counts['unknown'] = failed_counts.get('unknown', 0) + 1
+                        error_counts['type_mismatch'] = error_counts.get('type_mismatch', 0) + 1
+                        continue
                     
-                    with state_lock:
-                        pbar.set_postfix({
-                            "Ff": failed_counts.get('flat', 0),
-                            "Pf": failed_counts.get('pspl', 0),
-                            "Bf": failed_counts.get('binary', 0),
-                            "Fi": inflight['flat'],
-                            "Pi": inflight['pspl'],
-                            "Bi": inflight['binary'],
-                        })
-                    continue
+                    # Atomically decrement inflight AND reserve row (using _type as source of truth)
+                    row = finalize_task_and_maybe_reserve_row(etype_task, is_success=True)
+                    if row is None:
+                        # Quota already full for this type; just discard
+                        continue
 
-                # Validate params['type'] matches _type (accounting source of truth)
-                ptype = res.get('params', {}).get('type', None)
-                if ptype != etype_task:
-                    finalize_task_and_maybe_reserve_row(etype_task, is_success=False)
-                    failed_counts['unknown'] = failed_counts.get('unknown', 0) + 1
-                    error_counts['type_mismatch'] = error_counts.get('type_mismatch', 0) + 1
-                    continue
-                
-                # Atomically decrement inflight AND reserve row (using _type as source of truth)
-                row = finalize_task_and_maybe_reserve_row(etype_task, is_success=True)
-                if row is None:
-                    # Quota already full for this type; just discard
-                    continue
+                    # HDF5 writes wrapped in try/except for clean shutdown on failure
+                    try:
+                        ds_flux[row] = res['flux']
+                        ds_dt[row] = res['delta_t']
+                        ds_labels[row] = int(res['label'])
+                        
+                        mb = float(res['params']['m_base'])
+                        ds_mbase[row] = mb
+                        mbase_min = min(mbase_min, mb)
+                        mbase_max = max(mbase_max, mb)
 
-                ds_flux[row] = res['flux']
-                ds_dt[row] = res['delta_t']
-                ds_labels[row] = int(res['label'])
-                
-                mb = float(res['params']['m_base'])
-                ds_mbase[row] = mb
-                mbase_min = min(mbase_min, mb)
-                mbase_max = max(mbase_max, mb)
+                        p = res['params']
+                        rowp = np.zeros((), dtype=dtype_params)
+                        rowp['m_base'] = p['m_base']
+                        rowp['t0'] = p.get('t0', np.nan)
+                        rowp['tE'] = p.get('tE', np.nan)
+                        rowp['u0'] = p.get('u0', np.nan)
+                        rowp['s'] = p.get('s', np.nan)
+                        rowp['q'] = p.get('q', np.nan)
+                        rowp['alpha'] = p.get('alpha', np.nan)
+                        rowp['rho'] = p.get('rho', np.nan)
+                        ds_params[row] = rowp
+                    except Exception as e:
+                        pbar.close()
+                        pool.terminate()
+                        pool.join()
+                        print(f"\nFATAL: HDF5 write failed at row {row}: {repr(e)}")
+                        sys.exit(3)
 
-                p = res['params']
-                rowp = np.zeros((), dtype=dtype_params)
-                rowp['m_base'] = p['m_base']
-                rowp['t0'] = p.get('t0', np.nan)
-                rowp['tE'] = p.get('tE', np.nan)
-                rowp['u0'] = p.get('u0', np.nan)
-                rowp['s'] = p.get('s', np.nan)
-                rowp['q'] = p.get('q', np.nan)
-                rowp['alpha'] = p.get('alpha', np.nan)
-                rowp['rho'] = p.get('rho', np.nan)
-                ds_params[row] = rowp
+                    accepted_counts[etype_task] += 1
+                    pbar.update(1)
 
-                accepted_counts[etype_task] += 1
-                pbar.update(1)
-
-                if done_event.is_set():
-                    done = True
-                    break
+                    if done_event.is_set():
+                        done = True
+                        break
+            except Exception as e:
+                pbar.close()
+                pool.terminate()
+                pool.join()
+                print(f"\nFATAL: Iterator loop failed: {repr(e)}")
+                sys.exit(3)
 
             pbar.close()
 
