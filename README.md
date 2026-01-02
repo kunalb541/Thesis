@@ -43,7 +43,7 @@ python simulate.py \
     --n_flat 100000 \
     --n_pspl 100000 \
     --n_binary 100000 \
-    --binary_preset baseline \
+    --binary_preset general \
     --output ../data/raw/train.h5 \
     --num_workers 32 \
     --seed 42
@@ -53,10 +53,8 @@ python simulate.py \
 
 | Preset | Mass Ratio (q) | Separation (s) | Impact (u₀) | Description |
 |--------|----------------|----------------|-------------|-------------|
-| `baseline` | 10⁻⁴ – 1.0 | 0.3 – 3.0 | 0.001 – 1.0 | Full parameter space |
+| `general` | 10⁻⁴ – 1.0 | 0.3 – 3.0 | 0.001 – 1.0 | Full parameter space |
 | `distinct` | 0.1 – 1.0 | 0.8 – 1.2 | 0.001 – 0.3 | Caustic-crossing events |
-| `planetary` | 10⁻⁴ – 10⁻² | 0.6 – 1.6 | 0.001 – 0.3 | Exoplanet regime |
-| `stellar` | 0.1 – 1.0 | 0.3 – 3.0 | 0.001 – 0.5 | Binary stars |
 
 **Output format** (HDF5):
 - `flux`: Magnification values (A=1.0 baseline, A>1 magnified, A=0 masked)
