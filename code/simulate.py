@@ -1,28 +1,21 @@
-#!/usr/bin/env python3
-"""
-Roman Microlensing Event Simulator
-Author: Kunal Bhatia
-Institution: University of Heidelberg
-Date: January 2025
-"""
 from __future__ import annotations
-
 import argparse
 import h5py
 import math
 import multiprocessing
 import sys
+import threading
+import time
 import warnings
 from multiprocessing import Pool, cpu_count, set_start_method
 from pathlib import Path
 from typing import Any, Dict, Final, Iterator, Optional, Tuple
-
 import numpy as np
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "7.3.0"
+__version__: Final[str] = "7.3.6"
 
 # =============================================================================
 # DEPENDENCY CHECKS
@@ -90,7 +83,8 @@ DEFAULT_OVERSAMPLE_FACTOR: Final[float] = 1.5
 MIN_U0_OFFSET: Final[float] = 0.01
 CAUSTIC_U0_MULTIPLIER: Final[float] = 2.0
 
-MP_CHUNK_SIZE: Final[int] = 1000
+MP_CHUNK_SIZE: Final[int] = 25
+MAX_TASKS_PER_CHILD: Final[int] = 200
 TQDM_MIN_INTERVAL: Final[float] = 5.0
 TQDM_SMOOTHING: Final[float] = 0.01
 TQDM_NCOLS_TTY: Final[int] = 100
@@ -559,14 +553,14 @@ def simulate_event(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def worker_wrapper(args: Tuple[str, int]) -> Optional[Dict[str, Any]]:
-    """Worker wrapper for multiprocessing pool."""
+def worker_wrapper(args: Tuple[str, int]) -> Dict[str, Any]:
+    """Worker wrapper for multiprocessing pool (never raises, always returns _type)."""
     etype, seed = args
     np.random.seed(seed)
     
-    assert _WORK_TIME_GRID is not None, "Worker not initialized"
-    assert _WORK_MASK_PROB is not None, "Worker not initialized"
-    assert _WORK_PRESET is not None, "Worker not initialized"
+    # Explicit initialization check (no asserts - they're ignorable under -O)
+    if _WORK_TIME_GRID is None or _WORK_MASK_PROB is None or _WORK_PRESET is None:
+        return {'_failed': True, '_type': etype, '_seed': seed, '_err': 'worker_not_initialized'}
     
     params = {
         'type': etype,
@@ -576,11 +570,18 @@ def worker_wrapper(args: Tuple[str, int]) -> Optional[Dict[str, Any]]:
         'noise_scale': 1.0,
     }
     
-    result = simulate_event(params)
+    # Full try/except to catch any uncaught exceptions
+    try:
+        result = simulate_event(params)
+    except Exception as e:
+        return {'_failed': True, '_type': etype, '_seed': seed, '_err': repr(e)}
 
     if result is None:
-        return {'_failed': True, '_type': etype}
+        return {'_failed': True, '_type': etype, '_seed': seed}
 
+    # Always include _type even on success for robust inflight tracking
+    result['_type'] = etype
+    result['_seed'] = seed
     return result
 
 
@@ -601,7 +602,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     """Main simulation pipeline with streaming HDF5 writes."""
     parser = argparse.ArgumentParser(
-        description="Roman Microlensing Event Simulator v7.3.0",
+        description="Roman Microlensing Event Simulator v7.3.6 (Final Bulletproof)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -626,11 +627,10 @@ def main() -> None:
     n_total = args.n_flat + args.n_pspl + args.n_binary
     n_points = SimConfig.N_POINTS
 
-    # CRITICAL: Hard-cap submitted tasks using oversample
     max_tasks = int(np.ceil(n_total * args.oversample))
 
     print("=" * 60)
-    print("Roman Microlensing Simulator v7.3.0 (Production)")
+    print("Roman Microlensing Simulator v7.3.6 (Final Bulletproof)")
     print("=" * 60)
     print(f"Season: {SimConfig.TIME_MAX:.1f} days, {n_points} obs")
     print(f"Cadence: {ROMAN_CADENCE_MINUTES:.1f} min")
@@ -645,9 +645,8 @@ def main() -> None:
     print("=" * 60)
 
     workers = args.num_workers or cpu_count()
-    print(f"Using {workers} workers...")
+    print(f"Using {workers} workers (max {MAX_TASKS_PER_CHILD} tasks/worker)...")
 
-    # Pre-allocate HDF5 datasets
     comp_args = {
         'compression': 'lzf',
         'chunks': (min(1000, n_total), n_points)
@@ -657,7 +656,6 @@ def main() -> None:
         'chunks': (min(1000, n_total),)
     }
 
-    # Define unified params dtype
     dtype_params = np.dtype([
         ('m_base', 'f4'),
         ('t0', 'f4'),
@@ -669,7 +667,6 @@ def main() -> None:
         ('rho', 'f4'),
     ])
 
-    # Track quotas and write positions
     quotas = {
         'flat': args.n_flat,
         'pspl': args.n_pspl,
@@ -682,43 +679,110 @@ def main() -> None:
         'binary': 0
     }
     
+    # Track in-flight tasks per event type
+    inflight = {
+        'flat': 0,
+        'pspl': 0,
+        'binary': 0
+    }
+    
     row_offsets = {
         'flat': 0,
         'pspl': args.n_flat,
         'binary': args.n_flat + args.n_pspl
     }
 
-    def all_quotas_full() -> bool:
-        """Check if all quotas are filled."""
-        return all(write_pos[k] >= quotas[k] for k in quotas)
+    # Thread-safe state management
+    state_lock = threading.Lock()
+    done_event = threading.Event()
+    submitted_holder = {'n': 0}
 
-    def get_row_for(etype: str) -> Optional[int]:
-        """Get next row index for event type, or None if quota full."""
-        if write_pos[etype] >= quotas[etype]:
-            return None
-        row = row_offsets[etype] + write_pos[etype]
-        write_pos[etype] += 1
-        return row
+    def finalize_task_and_maybe_reserve_row(etype_task: str, is_success: bool) -> Optional[int]:
+        """
+        Atomically:
+          - decrement inflight for the completed task
+          - if is_success and quota not full, reserve a row (increment write_pos) and return it
+          - set done_event if quotas filled
+        
+        IMPORTANT: etype_task must be a valid type from inflight dict.
+        Malformed results should be handled before calling this function.
+        """
+        with state_lock:
+            # Decrement per-type inflight
+            if etype_task in inflight and inflight[etype_task] > 0:
+                inflight[etype_task] -= 1
 
-    # CRITICAL: Limited task generator with hard cap
+            if not is_success:
+                # Check completion anyway
+                if all(write_pos[k] >= quotas[k] for k in quotas):
+                    done_event.set()
+                return None
+
+            # Reserve row only if quota still available
+            if etype_task not in quotas or write_pos[etype_task] >= quotas[etype_task]:
+                # Check completion anyway
+                if all(write_pos[k] >= quotas[k] for k in quotas):
+                    done_event.set()
+                return None
+
+            row = row_offsets[etype_task] + write_pos[etype_task]
+            write_pos[etype_task] += 1
+
+            if all(write_pos[k] >= quotas[k] for k in quotas):
+                done_event.set()
+
+            return row
+
     def task_stream_limited() -> Iterator[Tuple[str, int]]:
-        """Generate tasks until quotas full or max_tasks reached."""
+        """Generate tasks until quotas full or cap reached (quota + inflight aware)."""
         seed = args.seed
-        submitted = 0
-        while (not all_quotas_full()) and (submitted < max_tasks):
-            for etype in ('flat', 'pspl', 'binary'):
-                if write_pos[etype] < quotas[etype]:
-                    yield (etype, seed)
-                    seed += 1
-                    submitted += 1
-                    if all_quotas_full() or submitted >= max_tasks:
-                        return
+        etypes = ('flat', 'pspl', 'binary')
+        rr = 0
 
-    # Track stats
-    failed_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
+        while True:
+            with state_lock:
+                if done_event.is_set() or submitted_holder['n'] >= max_tasks:
+                    return
+                
+                # Only submit if (already written + already in-flight) still below quota
+                needed = [
+                    t for t in etypes 
+                    if (write_pos[t] + inflight[t]) < quotas[t]
+                ]
+                
+                if needed:
+                    etype = needed[rr % len(needed)]
+                    rr += 1
+                    submitted_holder['n'] += 1
+                    inflight[etype] += 1
+                    task = (etype, seed)
+                    seed += 1
+                else:
+                    # Check if anything is actually in-flight
+                    inflight_total = sum(inflight.values())
+                    if inflight_total <= 0:
+                        # Nothing in-flight and nothing needed: either done or true stall
+                        if all(write_pos[k] >= quotas[k] for k in quotas):
+                            done_event.set()
+                            return
+                        # True stall - shouldn't happen, but fail fast
+                        print(f"\nWARNING: Stall detected - no tasks in-flight, quotas not met")
+                        print(f"  write_pos: {dict(write_pos)}")
+                        print(f"  inflight: {dict(inflight)}")
+                        print(f"  quotas: {dict(quotas)}")
+                        return
+                    task = None
+
+            if task is not None:
+                yield task
+            else:
+                # Everything remaining is currently in-flight; wait for results.
+                time.sleep(0.01)
+
+    failed_counts: Dict[str, int] = {}
+    error_counts: Dict[str, int] = {}  # Track exception types
     accepted_counts = {'flat': 0, 'pspl': 0, 'binary': 0}
     
-    # Track m_base min/max during writes
     mbase_min = float("inf")
     mbase_max = float("-inf")
 
@@ -727,21 +791,19 @@ def main() -> None:
     print("\nGenerating and streaming to HDF5...")
     
     with h5py.File(out_path, 'w') as f:
-        # Pre-allocate all datasets
         ds_flux = f.create_dataset('flux', shape=(n_total, n_points), dtype='f4', **comp_args)
         ds_dt = f.create_dataset('delta_t', shape=(n_total, n_points), dtype='f4', **comp_args)
         ds_labels = f.create_dataset('labels', shape=(n_total,), dtype='i4')
         ds_mbase = f.create_dataset('m_base', shape=(n_total,), dtype='f4', **comp_args_1d)
         ds_params = f.create_dataset('params', shape=(n_total,), dtype=dtype_params, **comp_args_1d)
         
-        # Save time_grid once (1D)
         f.create_dataset('time_grid', data=time_grid.astype(np.float32), compression='lzf')
 
-        # Stream write as results arrive
         with ctx.Pool(
             workers,
             initializer=_init_worker,
             initargs=(time_grid, SimConfig.CADENCE_MASK_PROB, args.binary_preset),
+            maxtasksperchild=MAX_TASKS_PER_CHILD,
         ) as pool:
             is_tty = sys.stdout.isatty()
             
@@ -763,36 +825,78 @@ def main() -> None:
 
             done = False
             for res in iterator:
-                if res.get('_failed'):
-                    failed_counts[res['_type']] += 1
-                    # Update progress bar to show failures
-                    pbar.set_postfix({
-                        "F_fail": failed_counts['flat'],
-                        "P_fail": failed_counts['pspl'],
-                        "B_fail": failed_counts['binary'],
-                    })
-                    continue
+                # FATAL: Malformed result corrupts inflight accounting
+                if (res is None) or (not isinstance(res, dict)):
+                    pbar.close()
+                    print("\nFATAL: Malformed result from pool; inflight accounting compromised.")
+                    with state_lock:
+                        print(f"  write_pos: {dict(write_pos)}")
+                        print(f"  inflight:  {dict(inflight)}")
+                        print(f"  quotas:    {dict(quotas)}")
+                    pool.terminate()
+                    pool.join()
+                    sys.exit(3)
 
-                etype = res['params']['type']
+                # _type is source of truth for inflight accounting
+                etype_task = res.get('_type', None)
                 
-                # Get row for this event type
-                row = get_row_for(etype)
-                if row is None:
-                    # Quota already full for this type
+                # FATAL: Missing _type corrupts inflight accounting
+                if etype_task is None or etype_task not in inflight:
+                    pbar.close()
+                    print(f"\nFATAL: Result missing valid _type; inflight accounting compromised.")
+                    print(f"  Got _type: {etype_task}")
+                    print(f"  Result keys: {list(res.keys())}")
+                    with state_lock:
+                        print(f"  write_pos: {dict(write_pos)}")
+                        print(f"  inflight:  {dict(inflight)}")
+                    pool.terminate()
+                    pool.join()
+                    sys.exit(3)
+
+                # Failure case - atomically handle inflight decrement
+                if res.get('_failed'):
+                    finalize_task_and_maybe_reserve_row(etype_task, is_success=False)
+                    failed_counts[etype_task] = failed_counts.get(etype_task, 0) + 1
+                    
+                    # Track exception types if present
+                    if '_err' in res:
+                        err_key = res['_err'][:50]  # Truncate long errors
+                        error_counts[err_key] = error_counts.get(err_key, 0) + 1
+                    
+                    with state_lock:
+                        pbar.set_postfix({
+                            "Ff": failed_counts.get('flat', 0),
+                            "Pf": failed_counts.get('pspl', 0),
+                            "Bf": failed_counts.get('binary', 0),
+                            "Fi": inflight['flat'],
+                            "Pi": inflight['pspl'],
+                            "Bi": inflight['binary'],
+                        })
                     continue
 
-                # Write to HDF5
+                # Validate params['type'] matches _type (accounting source of truth)
+                ptype = res.get('params', {}).get('type', None)
+                if ptype != etype_task:
+                    finalize_task_and_maybe_reserve_row(etype_task, is_success=False)
+                    failed_counts['unknown'] = failed_counts.get('unknown', 0) + 1
+                    error_counts['type_mismatch'] = error_counts.get('type_mismatch', 0) + 1
+                    continue
+                
+                # Atomically decrement inflight AND reserve row (using _type as source of truth)
+                row = finalize_task_and_maybe_reserve_row(etype_task, is_success=True)
+                if row is None:
+                    # Quota already full for this type; just discard
+                    continue
+
                 ds_flux[row] = res['flux']
                 ds_dt[row] = res['delta_t']
-                ds_labels[row] = int(res['label'])  # Use returned label directly
+                ds_labels[row] = int(res['label'])
                 
-                # Track m_base min/max during writes
                 mb = float(res['params']['m_base'])
                 ds_mbase[row] = mb
                 mbase_min = min(mbase_min, mb)
                 mbase_max = max(mbase_max, mb)
 
-                # Write params with NaNs for unused fields
                 p = res['params']
                 rowp = np.zeros((), dtype=dtype_params)
                 rowp['m_base'] = p['m_base']
@@ -805,43 +909,48 @@ def main() -> None:
                 rowp['rho'] = p.get('rho', np.nan)
                 ds_params[row] = rowp
 
-                accepted_counts[etype] += 1
+                accepted_counts[etype_task] += 1
                 pbar.update(1)
 
-                # Check if done
-                if all_quotas_full():
+                if done_event.is_set():
                     done = True
                     break
 
             pbar.close()
 
-            # Cleaner termination
+            # Explicit cleanup
             if done:
                 pool.terminate()
+                pool.join()
 
-        # CRITICAL: Verify quotas were met
-        if not all_quotas_full():
+        # Verify quotas were met
+        with state_lock:
+            all_full = all(write_pos[k] >= quotas[k] for k in quotas)
+        
+        if not all_full:
             shortfalls = {k: quotas[k] - write_pos[k] for k in quotas if write_pos[k] < quotas[k]}
             print("\n" + "=" * 60)
             print("ERROR: Quotas not filled within oversample cap")
             print("=" * 60)
             print(f"Shortfalls: {shortfalls}")
-            print(f"Max tasks: {max_tasks:,}")
+            print(f"Max tasks cap: {max_tasks:,}")
+            print(f"Tasks submitted: {submitted_holder['n']:,}")
             print(f"Accepted: {accepted_counts}")
-            print(f"Failed: {failed_counts}")
+            print(f"Failed: {dict(failed_counts)}")
+            if error_counts:
+                print(f"Exceptions: {dict(error_counts)}")
             print("\nSuggestions:")
             print(f"  1. Increase --oversample (currently {args.oversample})")
             print(f"  2. Relax acceptance criteria in simulate.py")
             print(f"  3. Check for VBBinaryLensing errors in logs")
             print("=" * 60)
             
-            # Mark file incomplete for debugging
             f.attrs['incomplete'] = True
             f.attrs['shortfalls'] = str(shortfalls)
-            f.attrs['max_tasks_attempted'] = max_tasks
+            f.attrs['max_tasks_cap'] = max_tasks
+            f.attrs['tasks_submitted'] = int(submitted_holder['n'])
             sys.exit(2)
 
-        # Save metadata
         metadata = {
             'n_events': int(n_total),
             'n_flat': int(args.n_flat),
@@ -851,7 +960,8 @@ def main() -> None:
             'require_caustic': BinaryPresets.PRESETS[args.binary_preset]['require_caustic'],
             'seed': int(args.seed),
             'oversample_factor': float(args.oversample),
-            'max_tasks_submitted': max_tasks,
+            'max_tasks_cap': max_tasks,
+            'tasks_submitted': int(submitted_holder['n']),
             'season_duration_days': float(ROMAN_SEASON_DURATION_DAYS),
             'n_points': int(n_points),
             'cadence_minutes': float(ROMAN_CADENCE_MINUTES),
@@ -867,17 +977,19 @@ def main() -> None:
 
     file_size_gb = out_path.stat().st_size / 1e9
 
-    # Print summary
     print(f"\n{'='*60}")
     print(f"SUCCESS: {n_total:,} events -> {out_path}")
     print(f"Accepted: Flat={accepted_counts['flat']:,}, PSPL={accepted_counts['pspl']:,}, Binary={accepted_counts['binary']:,}")
     
     total_failed = sum(failed_counts.values())
     if total_failed > 0:
-        print(f"Failed: Flat={failed_counts['flat']}, PSPL={failed_counts['pspl']}, Binary={failed_counts['binary']}")
+        print(f"Failed: {dict(failed_counts)}")
         acceptance_rate = n_total / (n_total + total_failed) * 100
         print(f"Acceptance rate: {acceptance_rate:.1f}%")
+        if error_counts:
+            print(f"Exceptions: {dict(error_counts)}")
     
+    print(f"Tasks submitted: {submitted_holder['n']:,}")
     print(f"m_base: [{mbase_min:.2f}, {mbase_max:.2f}] mag")
     print(f"Size: {file_size_gb:.2f} GB")
     print(f"{'='*60}")
