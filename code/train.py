@@ -837,8 +837,7 @@ def train_epoch(
         
         with torch.no_grad():
             
-            probs = torch.exp(log_probs)
-            preds = probs.argmax(dim=1)
+            preds = log_probs.argmax(dim=1)
         
 
             loss_unscaled = loss.detach() * accumulation_steps         
