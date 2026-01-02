@@ -132,7 +132,7 @@ python evaluate.py \
 
 For HPC:
 ```bash
-sbatch eval.sbatch all  # Run all four cross-evaluations
+sbatch evaluate.sbatch all  # Run all four cross-evaluations
 ```
 
 **Generated outputs**:
@@ -239,7 +239,7 @@ Thesis/
 │   ├── evaluate.py       # Evaluation suite
 │   ├── simulate.sbatch   # HPC job: simulation
 │   ├── train.sbatch      # HPC job: training
-│   └── eval.sbatch       # HPC job: evaluation
+│   └── evaluate.sbatch   # HPC job: evaluation
 ├── data/
 │   ├── raw/              # Training data
 │   └── test/             # Test data
