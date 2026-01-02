@@ -210,7 +210,7 @@ CI_LOWER_PERCENTILE: Final[float] = 2.5
 CI_UPPER_PERCENTILE: Final[float] = 97.5
 
 # u0 dependency analysis
-U0_BINS: Final[np.ndarray] = np.array([0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0])
+U0_BINS: Final[np.ndarray] = np.linspace(0, 1.0, 50)
 U0_REFERENCE_LINE: Final[float] = 0.3
 
 # Probability threshold for random classifier
