@@ -3,86 +3,22 @@
 Roman Microlensing Event Classifier - Neural Network Architecture
 =================================================================
 
-Strictly causal CNN-GRU architecture for Nancy Grace Roman Space Telescope
-gravitational microlensing event classification.
+V7.0.1 - LSTM UPGRADE 
+----------------------
 
-ARCHITECTURE DESIGN:
-    - Strictly causal convolutions with left-padding only
-    - Depthwise separable convolutions for efficiency
-    - Multi-layer GRU with optional gradient checkpointing
-    - Flash attention pooling for sequence aggregation 
-    - Hierarchical classification with proper probability computation
-    - Residual connections and layer normalization
-
-VERSION 4.0.0 - CRITICAL FIXES
--------------------------------
-This version fixes five critical issues identified in v3.0.0:
-
-FIXES APPLIED (v4.0.0):
-    * CRITICAL FIX 1: Replaced @torch.compiler.disable with @torch._dynamo.disable
-    * CRITICAL FIX 2: Split Q/KV projections in FlashAttentionPooling (separate q_proj, kv_proj)
-    * CRITICAL FIX 3: Fixed attention mask shape for flash attention (proper broadcasting)
-    * CRITICAL FIX 4: Removed frozen dataclass mutation in ModelConfig.__post_init__
-    * CRITICAL FIX 5: Fixed residual causality violation in CNN block (moved before conv)
-
-VERSION 3.0.0 - COMPREHENSIVE UPDATE
--------------------------------------
-This version synchronizes with train.py v3.0.0 and includes all fixes.
-
-FIXES APPLIED (v3.0.0):
-    * VERSION SYNC: All components now v3.0.0 for consistency
-    * INIT FIX: Increased head weight init std from 0.1 to 0.15 (closer to Xavier)
-    * TYPE HINTS: 100% coverage maintained
-    * DOCUMENTATION: Enhanced docstrings with version notes
-    * COMPATIBILITY: Full compatibility with train.py v3.0.0 hierarchical loss
-
-FIXES APPLIED (v2.7 - HIERARCHICAL COLLAPSE FIX):
-    * CRITICAL FIX: Proper initialization of Stage 2 head (bias=0 for 50/50 prior)
-    * CRITICAL FIX: Added auxiliary direct 3-class head for gradient flow stability
-    * CRITICAL FIX: Added return_intermediates option for separate stage losses
-    * CRITICAL FIX: Temperature scaling option for Stage 2 to strengthen gradients
-    * MAJOR FIX: Gradient flow validation during initialization
-
-PERFORMANCE OPTIMIZATIONS (v2.6):
-    - Flash attention via F.scaled_dot_product_attention (PyTorch 2.0+)
-    - Zero graph breaks - No .item() calls in forward pass
-    - No GPU->CPU synchronization in hot path
-    - torch.compile fully compatible (no dynamic control flow)
-    - Fused operations throughout
-    - Optimal memory layout with explicit contiguity
-    - Device-safe operations for DDP (all tensors created on correct device)
-    - Validation moved outside training loop
-    - Fixed weight initialization for SiLU activation (Kaiming)
-    - Implemented gradient checkpointing for GRU
-    - Complete type hints and docstrings (100% coverage)
-    - Pre-allocated attention mask constants for efficiency
-
-FIXES APPLIED (v2.6):
-    * S2 FIX: Pre-allocated tensor constants in FlashAttentionPooling for efficiency
-    * S2 FIX: Added migration warning when loading old checkpoint formats
-    * Documentation: Version string consistency
-
-FIXES APPLIED (v2.5):
-    * CRITICAL FIX: Hierarchical classification now uses proper probability
-      computation: P(PSPL) = P(Deviation) × P(PSPL|Deviation) (S0-1)
-    * CRITICAL FIX: Documented length masking assumption (contiguous prefix) (S0-2)
-    * MAJOR FIX: Removed unused `lengths` parameter from GRU checkpointing (S1-1)
-    * MAJOR FIX: Added epsilon to prevent division by zero in mean pooling (S1-2)
-    * MAJOR FIX: Flash attention mask converted to additive format for all backends (S1-3)
-    * MODERATE FIX: Corrected BN_MOMENTUM comment (higher = slower adaptation) (S2-1)
-    * MODERATE FIX: Added __all__ exports (S2-2)
-    * MODERATE FIX: Removed unsupported 'mlp' feature extraction option (S2-3)
-    * Added MIN_SEQ_LENGTH constant to prevent zero-length edge cases
-
-IMPORTANT ASSUMPTION:
-    The `lengths` parameter represents CONTIGUOUS valid prefixes, not scattered
-    valid observations. Training data should be pre-compacted so that valid
-    observations occupy positions [0, length). This is enforced by the data
-    loading pipeline in train.py.
+FIXES:
+    - Replaced BatchNorm with GroupNorm (stable with variable-length padding)
+    - Applied locked dropout properly (post-LSTM variational dropout)
+    - Fixed stage2_temperature application (now correctly applied at inference only)
+    - Fixed GroupNorm validation (num_groups <= d_model constraint)
+    - Fixed log-prob clamping (removed max clamp)
+    - Added probability normalization for numerical stability
+    - Disabled lstm_proj_size (incompatible with current architecture)
+    - Renamed logits → log_probs for semantic clarity
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 4.0.0
+Version: 7.0.1
 Date: January 2025
 """
 
@@ -90,70 +26,53 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Final, List, Optional, Tuple, Union, NamedTuple
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Final, Optional, Tuple, Union, NamedTuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-__version__: Final[str] = "4.0.0"
+__version__: Final[str] = "7.0.1"
 
 __all__ = [
-    # Configuration
     "ModelConfig",
-    # Main model
     "RomanMicrolensingClassifier",
-    # Output types
     "HierarchicalOutput",
-    # Factory functions
     "create_model",
     "load_checkpoint",
-    # Utilities
     "validate_inputs",
     "validate_batch_size_for_ddp",
     "get_mask_value",
-    # Components (for advanced users)
     "CausalConv1d",
     "DepthwiseSeparableConv1d",
     "CausalFeatureExtractor",
     "FlashAttentionPooling",
 ]
 
-
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
-# Mask values for different dtypes to prevent numerical overflow
 MASK_VALUE_FP32: Final[float] = -1e9
-MASK_VALUE_FP16: Final[float] = -6e4  # float16 max is ~65504
+MASK_VALUE_FP16: Final[float] = -6e4
 MASK_VALUE_BF16: Final[float] = -1e9
 
-# Minimum valid sequence length (must be >= receptive field)
 MIN_VALID_SEQ_LEN: Final[int] = 1
-
-# Epsilon for numerical stability
 EPS: Final[float] = 1e-8
 
-# Default configuration values
-DEFAULT_D_MODEL: Final[int] = 16
-DEFAULT_N_LAYERS: Final[int] = 2
+DEFAULT_D_MODEL: Final[int] = 32
+DEFAULT_N_LAYERS: Final[int] = 4
 DEFAULT_DROPOUT: Final[float] = 0.3
 DEFAULT_N_CLASSES: Final[int] = 3
 
-# BatchNorm momentum: Higher values give MORE weight to running statistics,
-# resulting in SLOWER adaptation to current batch statistics.
-# PyTorch default is 0.1. We use 0.2 for more stable running statistics.
-# Reference: Ioffe & Szegedy (2015). "Batch Normalization"
-BN_MOMENTUM: Final[float] = 0.2
-
-# v3.0.0 FIX: Weight initialization standard deviation for hierarchical heads
-# Xavier init for fan_in=64, fan_out=1: std = sqrt(2/(64+1)) ≈ 0.175
-# We use 0.15 as a compromise between stability (0.1) and expressiveness (0.175)
+# GroupNorm default (replaces BN_MOMENTUM)
+DEFAULT_NUM_GROUPS: Final[int] = 8
 HEAD_INIT_STD: Final[float] = 0.15
 
+# Locked dropout safety threshold
+MAX_SAFE_LOCKED_DROPOUT: Final[float] = 0.95
 
 # =============================================================================
 # OUTPUT TYPES
@@ -163,44 +82,20 @@ class HierarchicalOutput(NamedTuple):
     """
     Output container for hierarchical classification.
     
-    Contains all intermediate values needed for separate stage losses
-    as implemented in train.py v3.0.0's compute_hierarchical_loss().
+    Note: p_deviation and p_pspl_given_deviation are raw probabilities
+    WITHOUT temperature scaling. Temperature is only applied during
+    inference via the predict() method.
     
-    Attributes
-    ----------
-    logits : Tensor
-        Final log-probabilities [batch, 3] for NLLLoss compatibility.
-        These are LOG of the final class probabilities.
-    stage1_logit : Tensor
-        Raw logit for Stage 1 (Flat vs Deviation) [batch, 1].
-        Used directly with BCE loss in train.py v3.0.0.
-    stage2_logit : Tensor
-        Raw logit for Stage 2 (PSPL vs Binary given Deviation) [batch, 1].
-        Used directly with BCE loss in train.py v3.0.0.
-    aux_logits : Tensor or None
-        Auxiliary direct 3-class logits [batch, 3] if aux head enabled.
-        Used with CrossEntropyLoss for gradient stability.
-    p_deviation : Tensor
-        Probability of deviation (non-flat) [batch, 1].
-        sigmoid(stage1_logit).
-    p_pspl_given_deviation : Tensor
-        Probability of PSPL given deviation [batch, 1].
-        sigmoid(stage2_logit / temperature).
-    
-    Notes
-    -----
-    v3.0.0: This output structure is designed to work with the separate
-    BCE losses in train.py v3.0.0's compute_hierarchical_loss() function.
-    The stage1_logit and stage2_logit are raw logits (not probabilities)
-    that are passed directly to binary_cross_entropy_with_logits.
+    IMPORTANT: Field naming changed from 'logits' to 'log_probs' in v7.0.1
+    to prevent confusion. These are log-probabilities (normalized), NOT
+    raw logits. Use with NLLLoss, not CrossEntropyLoss.
     """
-    logits: Tensor
-    stage1_logit: Tensor
-    stage2_logit: Tensor
-    aux_logits: Optional[Tensor]
-    p_deviation: Tensor
-    p_pspl_given_deviation: Tensor
-
+    log_probs: Tensor  # Log-probabilities (NOT raw logits) for NLLLoss
+    stage1_logit: Tensor  # Raw logit for Stage 1 (deviation vs flat)
+    stage2_logit: Tensor  # Raw logit for Stage 2 (PSPL vs binary), NO temperature
+    aux_logits: Optional[Tensor]  # Auxiliary 3-class logits (if enabled)
+    p_deviation: Tensor  # P(deviation) without temperature
+    p_pspl_given_deviation: Tensor  # P(PSPL|deviation) without temperature
 
 # =============================================================================
 # CONFIGURATION
@@ -209,70 +104,57 @@ class HierarchicalOutput(NamedTuple):
 @dataclass(frozen=True)
 class ModelConfig:
     """
-    Model architecture configuration with validation.
+    Model configuration with LSTM architecture.
     
-    This dataclass is frozen to ensure configuration immutability after creation,
-    which is critical for reproducibility in scientific experiments.
+    CRITICAL FIXES:
+        - lstm_proj_size disabled (dimension mismatch with downstream layers)
+        - num_groups added for GroupNorm (replaces bn_momentum)
+        - locked_dropout now properly applied (variational dropout across time)
     
     Attributes
     ----------
     d_model : int
-        Hidden dimension size (must be even, >= 8).
+        Hidden dimension (must be even, ≥8).
     n_layers : int
-        Number of GRU layers.
+        Number of LSTM layers.
     dropout : float
-        Dropout probability for regularization.
+        Dropout probability.
     window_size : int
-        Convolution kernel size for causal feature extraction.
+        Convolution kernel size.
     max_seq_len : int
-        Maximum sequence length for memory allocation.
+        Maximum sequence length.
     n_classes : int
-        Number of output classes (3 for Flat/PSPL/Binary).
+        Number of output classes (3).
     hierarchical : bool
-        Use hierarchical classification with proper probability computation:
-        - Stage 1: P(Flat) vs P(Deviation) using sigmoid
-        - Stage 2: P(PSPL|Deviation) vs P(Binary|Deviation) using sigmoid
-        - Final: P(Flat), P(PSPL) = P(Deviation) × P(PSPL|Deviation),
-                 P(Binary) = P(Deviation) × P(Binary|Deviation)
+        Use hierarchical classification.
     use_aux_head : bool
-        Add auxiliary direct 3-class head for gradient flow stability.
-        Only used when hierarchical=True.
+        Add auxiliary 3-class head.
     stage2_temperature : float
-        Temperature for Stage 2 sigmoid (lower = sharper, stronger gradients).
+        Temperature for Stage 2 (applied at inference only).
     use_residual : bool
-        Add residual connections around feature extraction.
+        Add residual connections.
     use_layer_norm : bool
-        Use layer normalization after GRU.
+        Use layer norm after LSTM.
     feature_extraction : str
-        Feature extraction method ('conv' for depthwise separable CNN).
+        Feature extraction method ('conv').
     use_attention_pooling : bool
-        Use attention pooling vs mean pooling for temporal aggregation.
+        Use attention pooling vs mean pooling.
     use_amp : bool
-        Enable automatic mixed precision (bfloat16/float16).
+        Enable automatic mixed precision.
     use_gradient_checkpointing : bool
-        Enable gradient checkpointing for GRU (trades compute for memory).
+        Enable gradient checkpointing for LSTM.
     use_flash_attention : bool
-        Use flash attention if available (requires PyTorch 2.0+).
+        Use flash attention (PyTorch 2.0+).
     num_attention_heads : int
-        Number of attention heads for pooling.
-    gru_dropout : float
-        Dropout between GRU layers (defaults to `dropout` if 0).
-    bn_momentum : float
-        Batch normalization momentum.
+        Number of attention heads.
+    lstm_dropout : float
+        Dropout between LSTM layers.
+    locked_dropout : float
+        Locked (variational) dropout on LSTM outputs (shared across time).
+    num_groups : int
+        Number of groups for GroupNorm (replaces BN).
     init_scale : float
-        Weight initialization scale factor.
-    
-    Examples
-    --------
-    >>> config = ModelConfig(d_model=32, n_layers=3, dropout=0.2)
-    >>> model = RomanMicrolensingClassifier(config)
-    
-    Notes
-    -----
-    v4.0.0: Fixed frozen dataclass mutation in __post_init__.
-    v3.0.0: This configuration is fully compatible with train.py v3.0.0.
-    The hierarchical mode with use_aux_head=True is recommended for best
-    performance and gradient stability.
+        Weight initialization scale.
     """
     
     # Core architecture
@@ -285,8 +167,8 @@ class ModelConfig:
     
     # Architecture options
     hierarchical: bool = True
-    use_aux_head: bool = True  # v2.7+: Auxiliary head for gradient stability
-    stage2_temperature: float = 1.0  # v2.7+: Temperature scaling for Stage 2
+    use_aux_head: bool = True
+    stage2_temperature: float = 1.0
     use_residual: bool = True
     use_layer_norm: bool = True
     feature_extraction: str = 'conv'
@@ -299,23 +181,13 @@ class ModelConfig:
     
     # Advanced options
     num_attention_heads: int = 2
-    gru_dropout: float = 0.1
-    bn_momentum: float = BN_MOMENTUM
+    lstm_dropout: float = 0.1
+    locked_dropout: float = 0.1
+    num_groups: int = DEFAULT_NUM_GROUPS
     init_scale: float = 1.0
 
     def __post_init__(self) -> None:
-        """
-        Validate configuration parameters.
-        
-        Raises
-        ------
-        ValueError
-            If any parameter violates constraints.
-        
-        Notes
-        -----
-        v4.0.0 CRITICAL FIX: Use object.__setattr__ to modify frozen dataclass.
-        """
+        """Validate configuration."""
         if not isinstance(self.d_model, int) or self.d_model <= 0:
             raise ValueError(f"d_model must be positive int, got {self.d_model}")
         if self.d_model % 2 != 0:
@@ -329,18 +201,14 @@ class ModelConfig:
         if not (0.0 <= self.dropout < 1.0):
             raise ValueError(f"dropout must be in [0, 1), got {self.dropout}")
         
-        # v4.0.0 FIX: Proper frozen dataclass mutation
-        if self.gru_dropout == 0.0 and self.n_layers > 1:
-            object.__setattr__(self, 'gru_dropout', self.dropout)
+        if self.lstm_dropout == 0.0 and self.n_layers > 1:
+            object.__setattr__(self, 'lstm_dropout', self.dropout)
         
         if not isinstance(self.n_classes, int) or self.n_classes <= 0:
             raise ValueError(f"n_classes must be positive int, got {self.n_classes}")
         
-        # Only 'conv' is supported (removed 'mlp' option)
         if self.feature_extraction != 'conv':
-            raise ValueError(
-                f"feature_extraction must be 'conv', got '{self.feature_extraction}'"
-            )
+            raise ValueError(f"feature_extraction must be 'conv', got '{self.feature_extraction}'")
         
         if self.use_attention_pooling:
             if not isinstance(self.num_attention_heads, int) or self.num_attention_heads <= 0:
@@ -351,69 +219,49 @@ class ModelConfig:
                     f"num_attention_heads ({self.num_attention_heads})"
                 )
         
-        # v2.7+: Validate temperature
         if self.stage2_temperature <= 0:
             raise ValueError(f"stage2_temperature must be positive, got {self.stage2_temperature}")
+        
+        if not (0.0 <= self.locked_dropout < 1.0):
+            raise ValueError(f"locked_dropout must be in [0, 1), got {self.locked_dropout}")
+        
+        if self.locked_dropout > 0.5:
+            warnings.warn(
+                f"locked_dropout={self.locked_dropout} is unusually high (>0.5). "
+                f"This may severely limit gradient flow through time. "
+                f"Typical values are 0.1-0.3.",
+                UserWarning
+            )
+        
+        # FIXED: Added constraint that num_groups <= d_model
+        if self.num_groups <= 0 or self.num_groups > self.d_model or self.d_model % self.num_groups != 0:
+            raise ValueError(
+                f"num_groups must be positive, <= d_model, and divide d_model evenly. "
+                f"Got d_model={self.d_model}, num_groups={self.num_groups}"
+            )
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert config to dictionary.
-        
-        Returns
-        -------
-        dict
-            Configuration as dictionary.
-        """
+        """Convert config to dictionary."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'ModelConfig':
-        """
-        Create config from dictionary.
-        
-        Parameters
-        ----------
-        config_dict : dict
-            Configuration dictionary.
-        
-        Returns
-        -------
-        ModelConfig
-            Configuration instance.
-        """
+        """Create config from dictionary."""
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         filtered_dict = {k: v for k, v in config_dict.items() if k in valid_keys}
+        
+        # Handle backward compatibility: recurrent_dropout -> locked_dropout
+        if 'recurrent_dropout' in config_dict and 'locked_dropout' not in filtered_dict:
+            filtered_dict['locked_dropout'] = config_dict['recurrent_dropout']
+        
         return cls(**filtered_dict)
-
 
 # =============================================================================
 # UTILITIES
 # =============================================================================
 
 def get_mask_value(dtype: torch.dtype) -> float:
-    """
-    Get appropriate mask value for dtype to prevent numerical issues.
-    
-    Different precision formats have different dynamic ranges. Using
-    values that are too negative can cause numerical instability.
-    
-    Parameters
-    ----------
-    dtype : torch.dtype
-        Tensor data type.
-    
-    Returns
-    -------
-    float
-        Mask value appropriate for the dtype.
-    
-    Examples
-    --------
-    >>> get_mask_value(torch.float32)
-    -1000000000.0
-    >>> get_mask_value(torch.float16)
-    -60000.0
-    """
+    """Get appropriate mask value for dtype."""
     if dtype == torch.float16:
         return MASK_VALUE_FP16
     elif dtype == torch.bfloat16:
@@ -421,26 +269,8 @@ def get_mask_value(dtype: torch.dtype) -> float:
     else:
         return MASK_VALUE_FP32
 
-
 def validate_batch_size_for_ddp(batch_size: int, world_size: int) -> None:
-    """
-    Validate batch size for distributed training.
-    
-    Issues warning if batch size is too small for effective distributed
-    training. Generally, batch_size >= 4 * world_size is recommended.
-    
-    Parameters
-    ----------
-    batch_size : int
-        Per-GPU batch size.
-    world_size : int
-        Number of distributed processes.
-    
-    Warns
-    -----
-    UserWarning
-        If batch size is suboptimal for distributed training.
-    """
+    """Validate batch size for distributed training."""
     effective_batch = batch_size * world_size
     if effective_batch < 16:
         warnings.warn(
@@ -449,52 +279,72 @@ def validate_batch_size_for_ddp(batch_size: int, world_size: int) -> None:
             UserWarning
         )
 
+def locked_dropout(x: Tensor, p: float, training: bool) -> Tensor:
+    """
+    Apply locked (variational) dropout to RNN outputs.
+    
+    Locked dropout uses a single dropout mask shared across the time dimension,
+    which helps prevent overfitting in recurrent networks by maintaining
+    consistent dropout patterns through time.
+    
+    Parameters
+    ----------
+    x : Tensor
+        Input tensor of shape [T, B, D] (time, batch, features).
+    p : float
+        Dropout probability. Values > 0.5 will trigger a warning as they
+        severely limit gradient flow. Values >= 0.95 are capped for safety.
+    training : bool
+        Whether model is in training mode.
+    
+    Returns
+    -------
+    Tensor
+        Tensor with locked dropout applied.
+    
+    Raises
+    ------
+    ValueError
+        If p >= 1.0 (completely drops all information) or if p is non-finite.
+    """
+    if not training or p <= 0.0:
+        return x
+    
+    # Safety checks for extreme dropout values
+    if p >= 1.0:
+        raise ValueError(
+            f"locked_dropout probability must be < 1.0, got {p}. "
+            f"p=1.0 would drop all information."
+        )
+    
+    # Ensure p is a float and check for non-finite values
+    p = float(p)
+    if not math.isfinite(p):
+        raise ValueError(
+            f"locked_dropout must be finite, got {p}. "
+            f"Check for NaN or Inf values in dropout probability."
+        )
+    
+    # Cap at safe maximum to prevent numerical instability
+    if p > MAX_SAFE_LOCKED_DROPOUT:
+        warnings.warn(
+            f"locked_dropout={p} exceeds safe maximum ({MAX_SAFE_LOCKED_DROPOUT}). "
+            f"Capping to {MAX_SAFE_LOCKED_DROPOUT} to prevent numerical instability.",
+            UserWarning
+        )
+        p = MAX_SAFE_LOCKED_DROPOUT
+    
+    # Create mask with shape [1, B, D] - shared across time dimension
+    mask = x.new_empty(1, x.size(1), x.size(2)).bernoulli_(1 - p)
+    mask = mask.div_(1 - p)
+    return x * mask
 
 # =============================================================================
 # CAUSAL CONVOLUTION LAYERS
 # =============================================================================
 
 class CausalConv1d(nn.Module):
-    """
-    Strictly causal 1D convolution with left-padding only.
-    
-    Ensures that output at time t depends only on inputs up to time t,
-    maintaining strict causality for real-time applications.
-    
-    The left-padding of (kernel_size - 1) * dilation ensures that:
-    - Output at time t uses inputs from times [t - receptive_field + 1, t]
-    - No future information leaks into the computation
-    - First (receptive_field - 1) outputs use zero-padded history
-    
-    Receptive Field Calculation:
-        receptive_field = (kernel_size - 1) * dilation + 1
-    
-    For the first (receptive_field - 1) timesteps, the output incorporates
-    zero-padding since insufficient history is available. This is physically
-    correct for streaming inference where past data is initially unknown.
-    
-    Parameters
-    ----------
-    in_channels : int
-        Number of input channels.
-    out_channels : int
-        Number of output channels.
-    kernel_size : int
-        Convolution kernel size.
-    dilation : int, optional
-        Dilation factor for multi-scale feature extraction. Default is 1.
-    groups : int, optional
-        Number of groups for grouped/depthwise convolution. Default is 1.
-    bias : bool, optional
-        Whether to include bias term. Default is True.
-    
-    Examples
-    --------
-    >>> conv = CausalConv1d(16, 32, kernel_size=5, dilation=2)
-    >>> x = torch.randn(4, 16, 100)  # [batch, channels, time]
-    >>> y = conv(x)
-    >>> assert y.shape == (4, 32, 100)  # Same temporal length
-    """
+    """Strictly causal 1D convolution with left-padding."""
 
     def __init__(
         self,
@@ -520,55 +370,16 @@ class CausalConv1d(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass with causal left-padding.
-        
-        Parameters
-        ----------
-        x : Tensor
-            Input tensor of shape [batch, channels, time].
-        
-        Returns
-        -------
-        Tensor
-            Output tensor of shape [batch, channels, time].
-        """
-        # Left-pad on temporal dimension (dim=2)
-        # F.pad with (left, right) padding for last dimension
+        """Forward pass with causal left-padding."""
         x = F.pad(x, (self.padding, 0))
         return self.conv(x)
 
-
 class DepthwiseSeparableConv1d(nn.Module):
     """
-    Depthwise separable convolution for efficient feature extraction.
+    Depthwise separable convolution with GroupNorm.
     
-    Decomposes standard convolution into:
-    1. Depthwise: Each input channel convolved independently
-    2. Pointwise: 1x1 convolution for channel mixing
-    
-    This reduces parameters from (C_in * C_out * K) to (C_in * K + C_in * C_out)
-    while maintaining representational capacity.
-    
-    Parameters
-    ----------
-    in_channels : int
-        Number of input channels.
-    out_channels : int
-        Number of output channels.
-    kernel_size : int
-        Convolution kernel size.
-    dilation : int, optional
-        Dilation factor. Default is 1.
-    dropout : float, optional
-        Dropout probability after pointwise conv. Default is 0.0.
-    
-    Examples
-    --------
-    >>> conv = DepthwiseSeparableConv1d(16, 32, kernel_size=5, dropout=0.1)
-    >>> x = torch.randn(4, 16, 100)
-    >>> y = conv(x)
-    >>> assert y.shape == (4, 32, 100)
+    CRITICAL FIX: Replaced BatchNorm with GroupNorm for stability
+    with variable-length padded sequences.
     """
 
     def __init__(
@@ -577,11 +388,23 @@ class DepthwiseSeparableConv1d(nn.Module):
         out_channels: int,
         kernel_size: int,
         dilation: int = 1,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        num_groups: int = DEFAULT_NUM_GROUPS
     ) -> None:
         super().__init__()
         
-        # Depthwise: causal conv with groups=in_channels
+        # FIXED: Validate GroupNorm divisibility for both in_channels and out_channels
+        if in_channels % num_groups != 0:
+            raise ValueError(
+                f"in_channels ({in_channels}) must be divisible by "
+                f"num_groups ({num_groups})"
+            )
+        if out_channels % num_groups != 0:
+            raise ValueError(
+                f"out_channels ({out_channels}) must be divisible by "
+                f"num_groups ({num_groups})"
+            )
+        
         self.depthwise = CausalConv1d(
             in_channels, in_channels,
             kernel_size=kernel_size,
@@ -590,163 +413,68 @@ class DepthwiseSeparableConv1d(nn.Module):
             bias=False
         )
         
-        # Batch norm after depthwise
-        self.bn1 = nn.BatchNorm1d(in_channels, momentum=BN_MOMENTUM)
+        # GroupNorm instead of BatchNorm (stable with variable-length sequences)
+        self.gn1 = nn.GroupNorm(num_groups, in_channels)
         
-        # Pointwise: 1x1 conv for channel mixing
         self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
         
-        # Batch norm after pointwise
-        self.bn2 = nn.BatchNorm1d(out_channels, momentum=BN_MOMENTUM)
+        self.gn2 = nn.GroupNorm(num_groups, out_channels)
         
-        # Activation and dropout
         self.activation = nn.SiLU()
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         
-        # Store receptive field from depthwise conv
         self.receptive_field = self.depthwise.receptive_field
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass through depthwise separable convolution.
-        
-        Parameters
-        ----------
-        x : Tensor
-            Input tensor [batch, channels, time].
-        
-        Returns
-        -------
-        Tensor
-            Output tensor [batch, out_channels, time].
-        """
+        """Forward pass."""
         x = self.depthwise(x)
-        x = self.bn1(x)
+        x = self.gn1(x)
         x = self.activation(x)
         
         x = self.pointwise(x)
-        x = self.bn2(x)
+        x = self.gn2(x)
         x = self.activation(x)
         x = self.dropout(x)
         
         return x
 
-
 class CausalFeatureExtractor(nn.Module):
-    """
-    Multi-scale causal feature extraction using depthwise separable convolutions.
-    
-    Applies two sequential depthwise separable convolutions with different
-    dilation rates for multi-scale temporal feature extraction while
-    maintaining strict causality.
-    
-    Total Receptive Field:
-        For window_size=5, dilation=[1,2]:
-        - Conv1: RF = (5-1)*1 + 1 = 5
-        - Conv2: RF = (5-1)*2 + 1 = 9
-        - Total: RF1 + RF2 - 1 = 5 + 9 - 1 = 13 timesteps
-    
-    Parameters
-    ----------
-    d_model : int
-        Hidden dimension size.
-    window_size : int
-        Convolution kernel size.
-    dropout : float, optional
-        Dropout probability. Default is 0.0.
-    
-    Examples
-    --------
-    >>> extractor = CausalFeatureExtractor(64, window_size=5, dropout=0.1)
-    >>> x = torch.randn(4, 64, 100)  # [batch, d_model, time]
-    >>> y = extractor(x)
-    >>> assert y.shape == (4, 64, 100)
-    >>> print(f"Receptive field: {extractor.receptive_field}")
-    
-    Notes
-    -----
-    v4.0.0 CRITICAL FIX: Residual connection moved outside to prevent causality violation.
-    """
+    """Multi-scale causal feature extraction."""
 
     def __init__(
         self,
         d_model: int,
         window_size: int,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        num_groups: int = DEFAULT_NUM_GROUPS
     ) -> None:
         super().__init__()
         
         self.conv1 = DepthwiseSeparableConv1d(
             d_model, d_model, window_size,
-            dilation=1, dropout=dropout
+            dilation=1, dropout=dropout, num_groups=num_groups
         )
         self.conv2 = DepthwiseSeparableConv1d(
             d_model, d_model, window_size,
-            dilation=2, dropout=dropout
+            dilation=2, dropout=dropout, num_groups=num_groups
         )
         
-        # Calculate total receptive field for stacked convolutions
         rf1 = (window_size - 1) * 1 + 1
         rf2 = (window_size - 1) * 2 + 1
         self.receptive_field = rf1 + rf2 - 1
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass through feature extractor.
-        
-        Parameters
-        ----------
-        x : Tensor
-            Input tensor [batch, d_model, time].
-        
-        Returns
-        -------
-        Tensor
-            Extracted features [batch, d_model, time].
-        """
+        """Forward pass."""
         x = self.conv1(x)
         x = self.conv2(x)
         return x
-
 
 # =============================================================================
 # ATTENTION POOLING
 # =============================================================================
 
 class FlashAttentionPooling(nn.Module):
-    """
-    Multi-head attention pooling with flash attention optimization.
-    
-    Uses a learnable query vector to aggregate variable-length sequences
-    into fixed-size representations. 
-    
-    The attention mechanism computes weighted averages where weights are
-    learned based on sequence content and a global query vector.
-    
-    Parameters
-    ----------
-    d_model : int
-        Hidden dimension size.
-    num_heads : int, optional
-        Number of attention heads. Default is 4.
-    dropout : float, optional
-        Dropout probability. Default is 0.0.
-    use_flash : bool, optional
-        Use flash attention if available. Default is True.
-    
-    Examples
-    --------
-    >>> pooling = FlashAttentionPooling(64, num_heads=4)
-    >>> x = torch.randn(4, 100, 64)  # [batch, time, features]
-    >>> lengths = torch.tensor([80, 90, 100, 75])
-    >>> output = pooling(x, lengths)
-    >>> assert output.shape == (4, 64)
-    
-    Notes
-    -----
-    v4.0.0 CRITICAL FIX: Split Q/KV projections for proper separation.
-    v4.0.0 CRITICAL FIX: Fixed attention mask shape for flash attention.
-    """
+    """Multi-head attention pooling with flash attention."""
 
     def __init__(
         self,
@@ -762,18 +490,14 @@ class FlashAttentionPooling(nn.Module):
         self.head_dim = d_model // num_heads
         self.use_flash = use_flash and hasattr(F, 'scaled_dot_product_attention')
         
-        # Learnable query for aggregation
         self.query = nn.Parameter(torch.randn(1, 1, d_model))
         
-        # v4.0.0 CRITICAL FIX: Split Q and KV projections
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.kv_proj = nn.Linear(d_model, 2 * d_model, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
         
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         
-        # v2.6+: Pre-allocate mask constants as buffers for efficiency
-        # These are registered as non-persistent buffers (not saved in state_dict)
         self.register_buffer('_mask_zero', torch.tensor(0.0), persistent=False)
         self.register_buffer('_mask_neg_inf_fp32', torch.tensor(MASK_VALUE_FP32), persistent=False)
         self.register_buffer('_mask_neg_inf_fp16', torch.tensor(MASK_VALUE_FP16), persistent=False)
@@ -785,19 +509,7 @@ class FlashAttentionPooling(nn.Module):
         nn.init.normal_(self.query, std=0.02)
 
     def _get_mask_values(self, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
-        """
-        Get pre-allocated mask values cast to the appropriate dtype.
-        
-        Parameters
-        ----------
-        dtype : torch.dtype
-            Target dtype for mask values.
-        
-        Returns
-        -------
-        Tuple[Tensor, Tensor]
-            (zero_value, negative_infinity_value) for the given dtype.
-        """
+        """Get mask values for dtype."""
         zero = self._mask_zero.to(dtype=dtype)
         
         if dtype == torch.float16:
@@ -810,47 +522,24 @@ class FlashAttentionPooling(nn.Module):
         return zero, neg_inf
 
     def forward(self, x: Tensor, lengths: Optional[Tensor] = None) -> Tensor:
-        """
-        Forward pass through attention pooling.
-        
-        Parameters
-        ----------
-        x : Tensor
-            Input sequence [batch, time, d_model].
-        lengths : Tensor, optional
-            Valid sequence lengths [batch]. If None, uses full sequences.
-            IMPORTANT: Lengths represent contiguous prefixes [0, length).
-        
-        Returns
-        -------
-        Tensor
-            Pooled representation [batch, d_model].
-        """
+        """Forward pass."""
         B, T, D = x.shape
         
-        # Expand query for batch
-        query = self.query.expand(B, 1, D)  # [B, 1, D]
+        query = self.query.expand(B, 1, D)
         
-        # v4.0.0 CRITICAL FIX: Separate Q and KV projections
-        q = self.q_proj(query)  # [B, 1, D]
-        kv = self.kv_proj(x)  # [B, T, 2*D]
-        k, v = kv.chunk(2, dim=-1)  # [B, T, D] each
+        q = self.q_proj(query)
+        kv = self.kv_proj(x)
+        k, v = kv.chunk(2, dim=-1)
         
-        # Reshape for multi-head attention
         q = q.view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # v4.0.0 CRITICAL FIX: Proper attention mask shape for flash attention
-        # Create attention mask if lengths provided
         attn_mask = None
         if lengths is not None:
-            # Create mask: [B, T]
             indices = torch.arange(T, device=x.device)[None, :]
-            valid_mask = indices < lengths[:, None]  # [B, T]
+            valid_mask = indices < lengths[:, None]
             
-            # Convert to additive mask: 0 for valid, -inf for invalid
-            # v4.0.0 FIX: Shape [B, 1, 1, T] for proper broadcasting with [B, H, 1, T]
             zero, neg_inf = self._get_mask_values(q.dtype)
             attn_mask = torch.where(
                 valid_mask[:, None, None, :],
@@ -858,7 +547,6 @@ class FlashAttentionPooling(nn.Module):
                 neg_inf
             )
         
-        # Apply attention
         if self.use_flash:
             out = F.scaled_dot_product_attention(
                 q, k, v,
@@ -867,20 +555,17 @@ class FlashAttentionPooling(nn.Module):
                 is_causal=False
             )
         else:
-            # Standard attention
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
             if attn_mask is not None:
                 scores = scores + attn_mask
             attn_weights = F.softmax(scores, dim=-1)
             out = torch.matmul(attn_weights, v)
         
-        # Reshape and project
         out = out.transpose(1, 2).contiguous().view(B, 1, D)
         out = self.out_proj(out)
         out = self.dropout(out)
         
-        return out.squeeze(1)  # [B, D]
-
+        return out.squeeze(1)
 
 # =============================================================================
 # MAIN CLASSIFIER
@@ -888,109 +573,46 @@ class FlashAttentionPooling(nn.Module):
 
 class RomanMicrolensingClassifier(nn.Module):
     """
-    Strictly causal classifier for Roman Space Telescope microlensing events.
+    Strictly causal CNN-LSTM classifier.
     
-    Three-class classification:
-    - Class 0: Flat (no lensing)
-    - Class 1: PSPL (Point Source Point Lens)
-    - Class 2: Binary lens system
-    
-    Architecture Flow:
-    ------------------
-    Input (flux, delta_t) -> Projection -> Causal CNN -> GRU -> Attention/Mean Pool -> Head -> Logits
-    
-    Key Features:
-    -------------
-    - Strictly causal: No future information leakage
-    - Variable-length sequences via masking (contiguous prefixes)
-    - Optional hierarchical classification with proper probability computation
-    - Optional gradient checkpointing for memory efficiency
-    - Flash attention for 2-3x pooling speedup
-    - DDP-optimized with proper buffer handling
-    
-    Hierarchical Classification (when enabled):
-    -------------------------------------------
-    Stage 1: Binary classifier for P(Deviation) vs P(Flat)
-    Stage 2: Binary classifier for P(PSPL|Deviation) vs P(Binary|Deviation)
-    Final probabilities:
-    - P(Flat) = 1 - P(Deviation)
-    - P(PSPL) = P(Deviation) × P(PSPL|Deviation)
-    - P(Binary) = P(Deviation) × (1 - P(PSPL|Deviation))
-    
-    v4.0.0 CRITICAL FIXES:
-    ----------------------
-    - Fixed torch.compiler.disable -> torch._dynamo.disable
-    - Split Q/KV projections in FlashAttentionPooling
-    - Fixed attention mask shape for flash attention
-    - Fixed frozen dataclass mutation in ModelConfig
-    - Fixed residual causality violation (moved before conv)
-    
-    v3.0.0 UPDATES:
-    ---------------
-    - Version sync with train.py v3.0.0
-    - Improved head initialization (std=0.15 instead of 0.1)
-    - Full compatibility with compute_hierarchical_loss()
-    
-    v2.7 HIERARCHICAL COLLAPSE FIX:
-    -------------------------------
-    - Proper initialization: Stage 2 bias=0 for 50/50 prior
-    - Auxiliary head: Direct 3-class supervision for gradient stability
-    - Temperature scaling: Sharper Stage 2 gradients
-    - return_intermediates: Enable separate stage losses
-    
-    Parameters
-    ----------
-    config : ModelConfig
-        Model configuration object.
-    
-    Attributes
-    ----------
-    receptive_field : int
-        Total receptive field in timesteps.
-    
-    Examples
-    --------
-    >>> config = ModelConfig(d_model=16, n_layers=2)
-    >>> model = RomanMicrolensingClassifier(config)
-    >>> flux = torch.randn(4, 100)
-    >>> delta_t = torch.randn(4, 100)
-    >>> lengths = torch.tensor([80, 90, 100, 75])
-    >>> logits = model(flux, delta_t, lengths)
-    >>> assert logits.shape == (4, 3)
+    CRITICAL FIXES:
+        - GroupNorm replaces BatchNorm (stable with variable-length padding)
+        - Locked dropout properly applied (variational dropout on LSTM outputs)
+        - stage2_temperature correctly applied at inference only
+        - Fixed log-prob clamping (removed max clamp)
+        - Added probability normalization for numerical stability
+        - Output renamed to log_probs (not logits) for clarity
     """
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
         
-        # Input projection
         self.input_proj = nn.Linear(2, config.d_model)
         
-        # Feature extraction
         self.feature_extractor = CausalFeatureExtractor(
             config.d_model,
             config.window_size,
-            config.dropout
+            config.dropout,
+            config.num_groups
         )
         self._receptive_field = self.feature_extractor.receptive_field
         
-        # Recurrent core
-        self.gru = nn.GRU(
+        # LSTM (no projection support - would break downstream layers)
+        self.lstm = nn.LSTM(
             input_size=config.d_model,
             hidden_size=config.d_model,
             num_layers=config.n_layers,
-            batch_first=False,  # Expects [time, batch, features]
-            dropout=config.gru_dropout if config.n_layers > 1 else 0.0,
+            batch_first=False,
+            dropout=config.lstm_dropout if config.n_layers > 1 else 0.0,
             bidirectional=False
         )
         
-        # Layer norm
         if config.use_layer_norm:
             self.layer_norm = nn.LayerNorm(config.d_model)
         else:
             self.layer_norm = nn.Identity()
         
-        # Temporal pooling
         if config.use_attention_pooling:
             self.pooling = FlashAttentionPooling(
                 config.d_model,
@@ -1001,7 +623,6 @@ class RomanMicrolensingClassifier(nn.Module):
         else:
             self.pooling = None
         
-        # Classification head
         self.head_shared = nn.Sequential(
             nn.Linear(config.d_model, config.d_model),
             nn.LayerNorm(config.d_model),
@@ -1010,58 +631,27 @@ class RomanMicrolensingClassifier(nn.Module):
         )
         
         if config.hierarchical:
-            # v2.7+ FIX: Proper hierarchical classification with correct initialization
-            # Stage 1: P(Deviation) - single output with sigmoid
-            self.head_stage1 = nn.Linear(config.d_model, 1)  # P(Deviation)
+            self.head_stage1 = nn.Linear(config.d_model, 1)
+            self.head_stage2 = nn.Linear(config.d_model, 1)
             
-            # Stage 2: P(PSPL|Deviation) - single output with sigmoid
-            self.head_stage2 = nn.Linear(config.d_model, 1)  # P(PSPL|Deviation)
-            
-            # v2.7+ FIX: Auxiliary direct 3-class head for gradient stability
             if config.use_aux_head:
                 self.head_aux = nn.Linear(config.d_model, config.n_classes)
             else:
                 self.head_aux = None
         else:
-            # Flat classification
             self.head_flat = nn.Linear(config.d_model, config.n_classes)
         
-        # Initialize weights
         self._init_weights()
 
     @property
     def receptive_field(self) -> int:
-        """Total receptive field in timesteps."""
+        """Total CNN receptive field in timesteps."""
         return self._receptive_field
 
     def _init_weights(self) -> None:
-        """
-        Initialize model weights using appropriate schemes.
-        
-        v3.0.0 UPDATE: Increased hierarchical head init std from 0.1 to 0.15.
-        v2.7 CRITICAL FIX: Proper initialization for hierarchical heads.
-        - Stage 1 bias: 0 (50/50 prior for flat vs deviation)
-        - Stage 2 bias: 0 (50/50 prior for PSPL vs Binary)
-        - This prevents Stage 2 from collapsing to always-binary
-        
-        Uses Kaiming initialization for SiLU activation and Xavier
-        for other activations. This provides better gradient flow
-        during early training.
-        
-        Weight Initialization Rationale (v3.0.0):
-        -----------------------------------------
-        For hierarchical heads with d_model input and 1 output:
-        - Xavier std = sqrt(2 / (d_model + 1))
-        - For d_model=64: std ≈ 0.175
-        - For d_model=128: std ≈ 0.124
-        - We use HEAD_INIT_STD=0.15 as a good middle ground
-        
-        This is larger than the v2.7 value of 0.1, which was found to be
-        too conservative and could slow initial learning.
-        """
+        """Initialize weights."""
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
-                # Kaiming for SiLU, Xavier for others
                 if 'head' in name or 'proj' in name:
                     nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5), nonlinearity='relu')
                 else:
@@ -1069,7 +659,7 @@ class RomanMicrolensingClassifier(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             
-            elif isinstance(module, nn.GRU):
+            elif isinstance(module, nn.LSTM):
                 for param_name, param in module.named_parameters():
                     if 'weight_ih' in param_name:
                         nn.init.xavier_uniform_(param)
@@ -1077,23 +667,20 @@ class RomanMicrolensingClassifier(nn.Module):
                         nn.init.orthogonal_(param)
                     elif 'bias' in param_name:
                         nn.init.zeros_(param)
+                        # Forget gate bias = 1 (encourage remembering)
+                        hidden_size = param.size(0) // 4
+                        param.data[hidden_size:2*hidden_size].fill_(1.0)
             
-            elif isinstance(module, (nn.BatchNorm1d, nn.LayerNorm)):
+            elif isinstance(module, (nn.GroupNorm, nn.LayerNorm)):
                 if hasattr(module, 'weight') and module.weight is not None:
                     nn.init.ones_(module.weight)
                 if hasattr(module, 'bias') and module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # v2.7+ CRITICAL FIX: Explicit 50/50 prior for hierarchical heads
-        # v3.0.0 UPDATE: Use HEAD_INIT_STD (0.15) instead of 0.1
         if self.config.hierarchical:
-            # Stage 1: P(Deviation) starts at 50%
-            # sigmoid(0) = 0.5, so bias=0 gives 50/50
             nn.init.zeros_(self.head_stage1.bias)
             nn.init.normal_(self.head_stage1.weight, mean=0.0, std=HEAD_INIT_STD)
             
-            # Stage 2: P(PSPL|Deviation) starts at 50%
-            # THIS IS THE CRITICAL FIX - ensures PSPL/Binary are equally likely initially
             nn.init.zeros_(self.head_stage2.bias)
             nn.init.normal_(self.head_stage2.weight, mean=0.0, std=HEAD_INIT_STD)
             
@@ -1101,41 +688,20 @@ class RomanMicrolensingClassifier(nn.Module):
                 nn.init.zeros_(self.head_aux.bias)
                 nn.init.normal_(self.head_aux.weight, mean=0.0, std=HEAD_INIT_STD)
 
-    def _apply_gru_with_checkpointing(self, x: Tensor) -> Tensor:
-        """
-        Apply GRU with optional gradient checkpointing.
-        
-        Gradient checkpointing trades compute for memory by recomputing
-        activations during backward pass instead of storing them.
-        
-        Parameters
-        ----------
-        x : Tensor
-            Input tensor [time, batch, features].
-        
-        Returns
-        -------
-        Tensor
-            GRU output [time, batch, features].
-        
-        Notes
-        -----
-        v2.6 FIX: Removed unused `lengths` parameter. Packed sequences
-        are not currently supported; use masking in pooling instead.
-        """
+    def _apply_lstm_with_checkpointing(self, x: Tensor) -> Tensor:
+        """Apply LSTM with optional gradient checkpointing."""
         if self.config.use_gradient_checkpointing and self.training:
-            # Gradient checkpointing requires a function that takes tensors
-            def gru_forward(x_in: Tensor) -> Tensor:
-                out, _ = self.gru(x_in)
+            def lstm_forward(x_in: Tensor) -> Tensor:
+                out, _ = self.lstm(x_in)
                 return out
             
             x = torch.utils.checkpoint.checkpoint(
-                gru_forward,
+                lstm_forward,
                 x,
                 use_reentrant=False
             )
         else:
-            x, _ = self.gru(x)
+            x, _ = self.lstm(x)
         
         return x
 
@@ -1147,62 +713,26 @@ class RomanMicrolensingClassifier(nn.Module):
         return_intermediates: bool = False
     ) -> Union[Tensor, HierarchicalOutput]:
         """
-        Forward pass through the model.
+        Forward pass.
         
-        Parameters
-        ----------
-        flux : Tensor
-            Normalized flux/magnification observations [batch, time].
-            Note: Named 'flux' for backward compatibility, but data contains
-            normalized magnification values (A=1.0 baseline).
-        delta_t : Tensor
-            Normalized time intervals [batch, time].
-        lengths : Tensor, optional
-            Valid sequence lengths [batch]. If None, uses full sequences.
-            IMPORTANT: Lengths represent contiguous valid prefixes [0, length).
-        return_intermediates : bool, optional
-            If True and hierarchical=True, return HierarchicalOutput with
-            intermediate values for separate stage losses. Default is False.
-            This is required for train.py v3.0.0's compute_hierarchical_loss().
+        CRITICAL: stage2_temperature is NOT applied during forward pass.
+        It should only be applied at inference via predict() method.
         
         Returns
         -------
-        Tensor or HierarchicalOutput
-            If return_intermediates=False:
-                Class logits [batch, n_classes].
-                IMPORTANT: When hierarchical=True, returns LOG-PROBABILITIES (not logits).
-                Use F.nll_loss() instead of F.cross_entropy() for training.
-                When hierarchical=False, returns standard logits for F.cross_entropy().
-            
-            If return_intermediates=True and hierarchical=True:
-                HierarchicalOutput containing all intermediate values for
-                separate stage losses in train.py v3.0.0.
-        
-        Notes
-        -----
-        The first `receptive_field - 1` timesteps use zero-padded history
-        since insufficient causal context is available. This is physically
-        correct for streaming inference.
-        
-        v4.0.0: Fixed residual causality violation - residual added before conv.
-        v3.0.0: The return_intermediates=True mode is designed to work with
-        train.py v3.0.0's compute_hierarchical_loss() function, which uses
-        separate BCE losses for each hierarchical stage.
+        Union[Tensor, HierarchicalOutput]
+            If hierarchical: log-probabilities (NOT raw logits) suitable for NLLLoss.
+            If return_intermediates: HierarchicalOutput with raw stage logits and
+            probabilities (without temperature scaling).
         """
         B, T = flux.shape
         device = flux.device
         
-        # Stack inputs: [B, T, 2]
         x = torch.stack([flux, delta_t], dim=-1)
-        
-        # Input projection: [B, T, d_model]
         x = self.input_proj(x)
         
-        # Permute for conv: [B, d_model, T]
         x = x.transpose(1, 2)
         
-        # v4.0.0 CRITICAL FIX: Residual connection BEFORE feature extraction
-        # to prevent causality violation
         if self.config.use_residual:
             residual = x
             x = self.feature_extractor(x)
@@ -1210,66 +740,54 @@ class RomanMicrolensingClassifier(nn.Module):
         else:
             x = self.feature_extractor(x)
         
-        # Permute for GRU: [T, B, d_model]
         x = x.transpose(1, 2).transpose(0, 1).contiguous()
         
-        # GRU with optional checkpointing
-        x = self._apply_gru_with_checkpointing(x)
+        x = self._apply_lstm_with_checkpointing(x)
+        # FIXED: Apply locked dropout (variational dropout across time)
+        x = locked_dropout(x, self.config.locked_dropout, self.training)
         
-        # Back to [B, T, d_model]
         x = x.transpose(0, 1)
-        
-        # Layer norm
         x = self.layer_norm(x)
         
-        # Temporal pooling
         if self.pooling is not None:
             x = self.pooling(x, lengths)
         else:
-            # Mean pooling with masking
             if lengths is not None:
                 mask = torch.arange(T, device=device)[None, :] < lengths[:, None]
-                mask = mask.float().unsqueeze(-1)  # [B, T, 1]
-                # Add epsilon to prevent division by zero
-                x = (x * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=EPS)
+                mask = mask.float().unsqueeze(-1)
+                x = (x * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(EPS)
             else:
                 x = x.mean(dim=1)
         
-        # Classification head
         x = self.head_shared(x)
         
         if self.config.hierarchical:
-            # v2.7+ FIX: Proper hierarchical probability computation with intermediates
+            stage1_logit = self.head_stage1(x)
+            p_deviation = torch.sigmoid(stage1_logit)
             
-            # Stage 1: P(Deviation) raw logit
-            stage1_logit = self.head_stage1(x)  # [B, 1]
-            p_deviation = torch.sigmoid(stage1_logit)  # [B, 1]
+            # Stage 2: NO temperature in forward (applied in predict() at inference)
+            stage2_logit = self.head_stage2(x)
+            p_pspl_given_deviation = torch.sigmoid(stage2_logit)
             
-            # Stage 2: P(PSPL|Deviation) raw logit with temperature
-            stage2_logit = self.head_stage2(x)  # [B, 1]
-            # Temperature scaling: lower temp = sharper sigmoid = stronger gradients
-            scaled_stage2_logit = stage2_logit / self.config.stage2_temperature
-            p_pspl_given_deviation = torch.sigmoid(scaled_stage2_logit)  # [B, 1]
+            p_flat = 1.0 - p_deviation
+            p_pspl = p_deviation * p_pspl_given_deviation
+            p_binary = p_deviation * (1.0 - p_pspl_given_deviation)
             
-            # Compute final probabilities
-            p_flat = 1.0 - p_deviation  # [B, 1]
-            p_pspl = p_deviation * p_pspl_given_deviation  # [B, 1]
-            p_binary = p_deviation * (1.0 - p_pspl_given_deviation)  # [B, 1]
+            probs = torch.cat([p_flat, p_pspl, p_binary], dim=1)
             
-            # Concatenate and convert to logits
-            probs = torch.cat([p_flat, p_pspl, p_binary], dim=1)  # [B, 3]
+            # FIXED: Normalize probabilities for numerical stability
+            probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(EPS)
             
-            # Convert probabilities to log-probabilities for NLLLoss
-            logits = torch.log(probs.clamp(min=EPS, max=1.0 - EPS))
+            # FIXED: Only clamp min (not max)
+            log_probs = torch.log(probs.clamp_min(EPS))
             
-            # Auxiliary head for direct 3-class supervision
             aux_logits = None
             if self.head_aux is not None:
-                aux_logits = self.head_aux(x)  # [B, 3]
+                aux_logits = self.head_aux(x)
             
             if return_intermediates:
                 return HierarchicalOutput(
-                    logits=logits,
+                    log_probs=log_probs,
                     stage1_logit=stage1_logit,
                     stage2_logit=stage2_logit,
                     aux_logits=aux_logits,
@@ -1277,7 +795,7 @@ class RomanMicrolensingClassifier(nn.Module):
                     p_pspl_given_deviation=p_pspl_given_deviation
                 )
             else:
-                return logits
+                return log_probs
         else:
             logits = self.head_flat(x)
             return logits
@@ -1292,82 +810,68 @@ class RomanMicrolensingClassifier(nn.Module):
         """
         Make predictions without gradients.
         
-        Temporarily sets model to eval mode, runs inference, and
-        restores the original training state.
-        
-        Parameters
-        ----------
-        flux : Tensor
-            Flux/magnification observations [batch, time].
-        delta_t : Tensor
-            Time intervals [batch, time].
-        lengths : Tensor, optional
-            Sequence lengths [batch].
+        FIXED: stage2_temperature is now correctly applied at inference only.
         
         Returns
         -------
-        predictions : Tensor
-            Predicted class indices [batch].
-        probabilities : Tensor
-            Class probabilities [batch, n_classes].
+        Tuple[Tensor, Tensor]
+            (predictions, probabilities) where predictions are class indices
+            and probabilities are normalized class probabilities.
         """
         was_training = self.training
         self.eval()
         
         try:
-            logits = self.forward(flux, delta_t, lengths, return_intermediates=False)
-            
             if self.config.hierarchical:
-                # Logits are already log-probabilities, convert to probabilities
-                probabilities = torch.exp(logits)
-                # Normalize to ensure sum to 1 (handles numerical errors)
-                probabilities = probabilities / probabilities.sum(dim=-1, keepdim=True)
+                # Get intermediate outputs to apply temperature correctly
+                out = self.forward(flux, delta_t, lengths, return_intermediates=True)
+                
+                # Stage 1: P(deviation) - no temperature
+                p_deviation = torch.sigmoid(out.stage1_logit)
+                
+                # Stage 2: P(PSPL | deviation) - FIXED: temperature applied here
+                p_pspl_given_deviation = torch.sigmoid(
+                    out.stage2_logit / self.config.stage2_temperature
+                )
+                
+                # Compute final probabilities
+                p_flat = 1.0 - p_deviation
+                p_pspl = p_deviation * p_pspl_given_deviation
+                p_binary = p_deviation * (1.0 - p_pspl_given_deviation)
+                
+                probabilities = torch.cat([p_flat, p_pspl, p_binary], dim=1)
+                
+                # FIXED: Normalize for numerical stability using clamp_min
+                probabilities = probabilities / probabilities.sum(dim=1, keepdim=True).clamp_min(EPS)
+                
+                predictions = probabilities.argmax(dim=1)
+                return predictions, probabilities
+                
             else:
+                logits = self.forward(flux, delta_t, lengths, return_intermediates=False)
                 probabilities = F.softmax(logits, dim=-1)
-            
-            predictions = probabilities.argmax(dim=-1)
-            return predictions, probabilities
+                predictions = probabilities.argmax(dim=-1)
+                return predictions, probabilities
+                
         finally:
             if was_training:
                 self.train()
 
     def count_parameters(self, trainable_only: bool = True) -> int:
-        """
-        Count model parameters.
-        
-        Parameters
-        ----------
-        trainable_only : bool, optional
-            Count only trainable parameters. Default is True.
-        
-        Returns
-        -------
-        int
-            Number of parameters.
-        """
+        """Count model parameters."""
         if trainable_only:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in self.parameters())
 
     def get_complexity_info(self) -> Dict[str, Any]:
-        """
-        Get model complexity information.
-        
-        Returns
-        -------
-        dict
-            Dictionary containing complexity metrics including parameter
-            counts, receptive field, and architecture configuration.
-        
-        Notes
-        -----
-        v3.0.0: Added version field for tracking.
-        """
+        """Get model complexity information."""
         total_params = self.count_parameters(trainable_only=False)
         trainable_params = self.count_parameters(trainable_only=True)
         
         return {
             'version': __version__,
+            'architecture': 'CNN-LSTM',
+            'normalization': 'GroupNorm',
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
             'non_trainable_parameters': total_params - trainable_params,
@@ -1375,6 +879,9 @@ class RomanMicrolensingClassifier(nn.Module):
             'n_layers': self.config.n_layers,
             'n_classes': self.config.n_classes,
             'dropout': self.config.dropout,
+            'lstm_dropout': self.config.lstm_dropout,
+            'locked_dropout': self.config.locked_dropout,
+            'num_groups': self.config.num_groups,
             'hierarchical': self.config.hierarchical,
             'use_aux_head': self.config.use_aux_head if self.config.hierarchical else False,
             'stage2_temperature': self.config.stage2_temperature if self.config.hierarchical else None,
@@ -1388,9 +895,8 @@ class RomanMicrolensingClassifier(nn.Module):
             'head_init_std': HEAD_INIT_STD,
         }
 
-
 # =============================================================================
-# VALIDATION (OUTSIDE HOT PATH)
+# VALIDATION
 # =============================================================================
 
 @torch._dynamo.disable
@@ -1400,58 +906,24 @@ def validate_inputs(
     lengths: Optional[Tensor],
     receptive_field: int
 ) -> None:
-    """
-    Validate inputs before training starts.
-    
-    CRITICAL: Decorated with @torch._dynamo.disable (v4.0.0 FIX).
-    Call this ONCE when creating the dataset, NOT in the training loop.
-    This prevents .item() calls from breaking the compiled graph.
-    
-    Parameters
-    ----------
-    flux : Tensor
-        Flux/magnification tensor [batch, time].
-    delta_t : Tensor
-        Delta_t tensor [batch, time].
-    lengths : Tensor, optional
-        Length tensor [batch]. Represents contiguous valid prefixes.
-    receptive_field : int
-        Model receptive field.
-    
-    Raises
-    ------
-    ValueError
-        If inputs are invalid or sequences too short.
-    
-    Notes
-    -----
-    v4.0.0 CRITICAL FIX: Changed from @torch.compiler.disable to @torch._dynamo.disable
-    """
+    """Validate inputs before training."""
     B, T = flux.shape
     
     if delta_t.shape != (B, T):
-        raise ValueError(
-            f"delta_t shape {delta_t.shape} must match flux shape {flux.shape}"
-        )
+        raise ValueError(f"delta_t shape {delta_t.shape} must match flux {flux.shape}")
     
     if lengths is not None:
         if lengths.shape != (B,):
             raise ValueError(f"lengths shape {lengths.shape} must be ({B},)")
         
-        # This .item() call is OK because it's outside the training loop
         min_len = lengths.min().item()
         if min_len < receptive_field:
             raise ValueError(
-                f"Minimum sequence length ({min_len}) must be >= "
-                f"receptive field ({receptive_field})"
+                f"Minimum length ({min_len}) must be >= receptive field ({receptive_field})"
             )
         
-        # Check for zero-length sequences
         if min_len < MIN_VALID_SEQ_LEN:
-            raise ValueError(
-                f"Minimum sequence length ({min_len}) must be >= {MIN_VALID_SEQ_LEN}"
-            )
-
+            raise ValueError(f"Minimum length ({min_len}) must be >= {MIN_VALID_SEQ_LEN}")
 
 # =============================================================================
 # FACTORY FUNCTIONS
@@ -1461,26 +933,7 @@ def create_model(
     config: Optional[ModelConfig] = None,
     **kwargs: Any
 ) -> RomanMicrolensingClassifier:
-    """
-    Factory function to create model instance.
-    
-    Parameters
-    ----------
-    config : ModelConfig, optional
-        Model configuration. If None, creates from kwargs.
-    **kwargs : Any
-        Additional config parameters (override config if provided).
-    
-    Returns
-    -------
-    RomanMicrolensingClassifier
-        Model instance.
-    
-    Examples
-    --------
-    >>> model = create_model(d_model=32, n_layers=3)
-    >>> model = create_model(config=ModelConfig(d_model=32))
-    """
+    """Create model instance."""
     if config is None:
         config = ModelConfig(**kwargs)
     elif kwargs:
@@ -1490,56 +943,13 @@ def create_model(
     
     return RomanMicrolensingClassifier(config)
 
-
 def load_checkpoint(
     checkpoint_path: str,
     config: Optional[ModelConfig] = None,
     map_location: Union[str, torch.device] = 'cpu',
     strict: bool = True
 ) -> RomanMicrolensingClassifier:
-    """
-    Load model from checkpoint file.
-    
-    Automatically handles:
-        - DDP wrapper prefix removal (module.)
-        - torch.compile prefix removal (_orig_mod.)
-        - Config extraction from checkpoint
-        - Standardized 'model_config' key
-        - v2.6->v2.7->v3.0->v4.0 hierarchical head migration
-    
-    Parameters
-    ----------
-    checkpoint_path : str
-        Path to checkpoint file.
-    config : ModelConfig, optional
-        Optional config (extracted from checkpoint if None).
-    map_location : str or torch.device, optional
-        Device to map tensors to. Default is 'cpu'.
-    strict : bool, optional
-        Strict state dict loading. Default is True.
-    
-    Returns
-    -------
-    RomanMicrolensingClassifier
-        Loaded model.
-    
-    Raises
-    ------
-    FileNotFoundError
-        If checkpoint doesn't exist.
-    KeyError
-        If checkpoint missing required keys.
-    
-    Examples
-    --------
-    >>> model = load_checkpoint('best_model.pt')
-    >>> model = load_checkpoint('checkpoint.pt', map_location='cuda:0')
-    
-    Notes
-    -----
-    v4.0.0: This function handles migration from all previous versions
-    (v2.6, v2.7, v3.0) to v4.0.0 format automatically.
-    """
+    """Load model from checkpoint."""
     import os
     
     if not os.path.exists(checkpoint_path):
@@ -1552,11 +962,10 @@ def load_checkpoint(
     )
     
     if config is None:
-        # Standardized key: 'model_config'
         if 'model_config' not in checkpoint:
             raise KeyError(
-                f"Checkpoint missing 'model_config' key. "
-                f"Available keys: {list(checkpoint.keys())}"
+                f"Checkpoint missing 'model_config'. "
+                f"Available: {list(checkpoint.keys())}"
             )
         
         config_data = checkpoint['model_config']
@@ -1574,17 +983,23 @@ def load_checkpoint(
     
     state_dict = checkpoint['model_state_dict']
     
-    # Handle DDP prefix (module.)
     if any(k.startswith('module.') for k in state_dict.keys()):
         state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
     
-    # Handle torch.compile prefix (_orig_mod.)
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     
-    # v2.7+/v3.0.0/v4.0.0 FIX: Handle hierarchical head shape changes with warning
-    # Old (v2.6): head_stage1 [d_model, 2], head_stage2 [d_model, 2]
-    # New (v2.7+): head_stage1 [d_model, 1], head_stage2 [d_model, 1]
+    has_gru_weights = any('gru.' in k for k in state_dict.keys())
+    has_lstm_weights = any('lstm.' in k for k in state_dict.keys())
+    
+    if has_gru_weights and not has_lstm_weights:
+        warnings.warn(
+            "Cannot migrate GRU checkpoint to LSTM architecture. "
+            "Retraining required.",
+            UserWarning
+        )
+        strict = False
+    
     if config.hierarchical:
         migrated = False
         for key in ['head_stage1.weight', 'head_stage1.bias',
@@ -1592,29 +1007,23 @@ def load_checkpoint(
             if key in state_dict:
                 old_shape = state_dict[key].shape
                 if 'weight' in key and old_shape[0] == 2:
-                    # Take first row only (P(Deviation) or P(PSPL|Deviation))
                     state_dict[key] = state_dict[key][0:1, :]
                     migrated = True
                 elif 'bias' in key and old_shape[0] == 2:
                     state_dict[key] = state_dict[key][0:1]
                     migrated = True
         
-        # v2.7+/v3.0.0/v4.0.0 FIX: Warn user about migration
         if migrated:
             warnings.warn(
-                "Migrating checkpoint from old hierarchical format (2-output heads) "
-                "to new format (1-output heads). Consider retraining for optimal results.",
+                "Migrated hierarchical heads from 2-output to 1-output format.",
                 UserWarning
             )
         
-        # v2.7+: Handle missing aux head
         if config.use_aux_head and 'head_aux.weight' not in state_dict:
             warnings.warn(
-                "Checkpoint missing auxiliary head weights. Initializing randomly. "
-                "Consider retraining for optimal results.",
+                "Checkpoint missing auxiliary head. Initializing randomly.",
                 UserWarning
             )
-            # Remove aux head from strict loading
             strict = False
     
     model.load_state_dict(state_dict, strict=strict)
