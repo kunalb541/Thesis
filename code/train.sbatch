@@ -69,15 +69,30 @@ export NUMBA_NUM_THREADS=1
 
 export PYTHONUNBUFFERED=1
 export PYTHONWARNINGS="ignore"
+
+# Suppress PyTorch/NCCL warnings
 export TORCH_DISTRIBUTED_DEBUG=OFF
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_DEBUG=WARN
+export NCCL_DEBUG=WARN                          # Keep WARN, not INFO
+
+# FIX: Use new TORCH_ prefixed variables instead of deprecated NCCL_ ones
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1        # Replaces NCCL_ASYNC_ERROR_HANDLING
+export TORCH_NCCL_BLOCKING_WAIT=1               # Replaces NCCL_BLOCKING_WAIT
+unset NCCL_ASYNC_ERROR_HANDLING                 # Remove deprecated
+unset NCCL_BLOCKING_WAIT                        # Remove deprecated
+
+# Remove the expandable_segments warning
+unset PYTORCH_CUDA_ALLOC_CONF                   # Remove unsupported option
+
+# Keep these
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=3
 
 export LOCAL_WORLD_SIZE=4
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=29500
+
+# Suppress Python warnings at runtime
+export PYTHONWARNINGS="ignore::UserWarning,ignore::FutureWarning"
 
 # =============================================================================
 # UTIL
