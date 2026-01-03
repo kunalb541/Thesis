@@ -31,14 +31,14 @@ mkdir -p logs "${OUTPUT_BASE}"
 PROGRESS_FILE="${OUTPUT_BASE}/.train_progress"
 
 # Training hyperparameters
-BATCH_SIZE=512
+BATCH_SIZE=256
 NUM_WORKERS=0
 ACCUMULATION_STEPS=2
-MAX_EPOCHS=100
+MAX_EPOCHS=50
 
 # Model architecture
-D_MODEL=16
-N_LAYERS=6
+D_MODEL=64
+N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=5
 NUM_ATTENTION_HEADS=4
@@ -57,7 +57,7 @@ AUX_WEIGHT=0.5
 NLL_WEIGHT=0.5
 STAGE2_TEMPERATURE=1.0
 
-USE_CLASS_WEIGHTS="false"   # set "true" to enable class weights
+USE_CLASS_WEIGHTS="true"   # set "true" to enable class weights
 
 # =============================================================================
 # ENV
