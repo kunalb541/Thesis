@@ -37,11 +37,11 @@ ACCUMULATION_STEPS=2
 MAX_EPOCHS=50
 
 # Model architecture
-D_MODEL=64
+D_MODEL=32
 N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=5
-NUM_ATTENTION_HEADS=8
+NUM_ATTENTION_HEADS=4
 NUM_GROUPS=8
 
 # Optimization
@@ -57,7 +57,7 @@ AUX_WEIGHT=1
 NLL_WEIGHT=2
 STAGE2_TEMPERATURE=1.0
 
-USE_CLASS_WEIGHTS="false"   # set "true" to enable class weights
+USE_CLASS_WEIGHTS="true"   # set "true" to enable class weights
 
 # =============================================================================
 # ENV
