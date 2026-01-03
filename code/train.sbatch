@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu_a100_short
-#SBATCH -N 6
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 00:30:00
@@ -31,14 +31,14 @@ mkdir -p logs "${OUTPUT_BASE}"
 PROGRESS_FILE="${OUTPUT_BASE}/.train_progress"
 
 # Training hyperparameters
-BATCH_SIZE=256
+BATCH_SIZE=512
 NUM_WORKERS=0
 ACCUMULATION_STEPS=2
 MAX_EPOCHS=100
 
 # Model architecture
-D_MODEL=64
-N_LAYERS=4
+D_MODEL=16
+N_LAYERS=6
 DROPOUT=0.3
 WINDOW_SIZE=5
 NUM_ATTENTION_HEADS=4
