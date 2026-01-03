@@ -1314,11 +1314,19 @@ class RomanEvaluator:
                     continue
 
                 idx = indices[col]
-                flux_norm = self.flux_norm[idx]
+                flux_norm_sample = self.flux_norm[idx]
                 times = self.timestamps[idx]
+                n_valid = int(self.valid_lengths[idx])
 
-                flux = flux_norm * (self.flux_std + EPS) + self.flux_mean
-                valid_mask = (times != INVALID_TIMESTAMP) & (times >= 0) & (flux != 0)
+                # CRITICAL: Detect padding from flux_norm BEFORE denormalization
+                # After denorm, zeros become flux_mean, making them undetectable
+                # Use valid_lengths for robust masking
+                valid_mask = np.zeros(len(flux_norm_sample), dtype=bool)
+                valid_mask[:n_valid] = (flux_norm_sample[:n_valid] != 0.0) & \
+                                       (times[:n_valid] != INVALID_TIMESTAMP) & \
+                                       (times[:n_valid] >= 0)
+
+                flux = flux_norm_sample * (self.flux_std + EPS) + self.flux_mean
 
                 if valid_mask.sum() < MIN_VALID_POINTS:
                     ax.text(0.5, 0.5, 'Insufficient\ndata', ha='center', va='center',
@@ -1532,7 +1540,11 @@ class RomanEvaluator:
         flux_denorm = flux_norm * (self.flux_std + EPS) + self.flux_mean
         times_valid = times[:n_valid]
         flux_valid = flux_denorm[:n_valid]
-        plot_mask = (times_valid >= 0) & (flux_valid > 0) & np.isfinite(flux_valid)
+        flux_norm_valid = flux_norm[:n_valid]
+        
+        # CRITICAL: Use flux_norm (before denorm) to detect true zeros/padding
+        # After denorm, zeros become flux_mean and cannot be filtered
+        plot_mask = (times_valid >= 0) & (flux_norm_valid != 0.0) & np.isfinite(flux_valid)
         times_plot = times_valid[plot_mask]
         flux_plot = flux_valid[plot_mask]
 
