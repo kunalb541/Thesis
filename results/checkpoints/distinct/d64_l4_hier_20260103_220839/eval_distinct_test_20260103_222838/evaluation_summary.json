@@ -1,0 +1,104 @@
+{
+  "experiment": "d64_l4_hier_20260103_220839",
+  "model_path": "../results/checkpoints/distinct/d64_l4_hier_20260103_220839/best.pt",
+  "data_path": "/home/hd/hd_hd/hd_vm305/Thesis/data/test/distinct_test.h5",
+  "data_size": 300000,
+  "class_distribution": {
+    "Flat": 100000,
+    "PSPL": 100000,
+    "Binary": 100000
+  },
+  "normalization": {
+    "flux_mean": 1.2799023389816284,
+    "flux_std": 1.169071912765503,
+    "delta_t_mean": 0.010976988822221756,
+    "delta_t_std": 0.0024517476558685303
+  },
+  "metrics": {
+    "accuracy": 0.9980466666666666,
+    "accuracy_ci_lower": 0.99789325,
+    "accuracy_ci_upper": 0.9981966666666666,
+    "precision_macro": 0.9980580465140941,
+    "recall_macro": 0.9980466666666666,
+    "f1_macro": 0.9980466498973514,
+    "precision_weighted": 0.998058046514094,
+    "recall_weighted": 0.9980466666666666,
+    "f1_weighted": 0.9980466498973514,
+    "precision_Flat": 1.0,
+    "recall_Flat": 1.0,
+    "f1_Flat": 1.0,
+    "precision_PSPL": 0.9941741395422822,
+    "recall_PSPL": 1.0,
+    "f1_PSPL": 0.9970785598197281,
+    "precision_Binary": 1.0,
+    "recall_Binary": 0.99414,
+    "f1_Binary": 0.997061389872326,
+    "roc_auc_macro": 0.9998063076166667,
+    "roc_auc_weighted": 0.9998063076166666,
+    "roc_auc_Flat": 1.0,
+    "roc_auc_PSPL": 0.9997419508,
+    "roc_auc_Binary": 0.9996769720500001,
+    "confusion_matrix": [
+      [
+        100000,
+        0,
+        0
+      ],
+      [
+        0,
+        100000,
+        0
+      ],
+      [
+        0,
+        586,
+        99414
+      ]
+    ],
+    "confusion_matrix_normalized": [
+      [
+        0.9999999999999001,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.9999999999999001,
+        0.0
+      ],
+      [
+        0.0,
+        0.005859999999999414,
+        0.9941399999999007
+      ]
+    ]
+  },
+  "config": {
+    "d_model": 64,
+    "n_layers": 4,
+    "dropout": 0.3,
+    "window_size": 5,
+    "n_classes": 3,
+    "hierarchical": true,
+    "use_aux_head": true,
+    "stage2_temperature": 1.0,
+    "use_residual": true,
+    "use_layer_norm": true,
+    "use_attention_pooling": true,
+    "use_flash_attention": true,
+    "num_attention_heads": 8,
+    "lstm_dropout": 0.15,
+    "locked_dropout": 0.15,
+    "num_groups": 8,
+    "use_gradient_checkpointing": false
+  },
+  "parameters": {
+    "batch_size": 128,
+    "calibration_n_bins": 10,
+    "roc_bootstrap_ci": true,
+    "seed": 42
+  },
+  "has_aux_head": true,
+  "timestamp": "2026-01-03T22:48:49.474252",
+  "version": "7.1.0"
+}

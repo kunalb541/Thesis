@@ -41,7 +41,7 @@ D_MODEL=64
 N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=5
-NUM_ATTENTION_HEADS=4
+NUM_ATTENTION_HEADS=8
 NUM_GROUPS=8
 
 # Optimization
@@ -52,12 +52,12 @@ CLIP_NORM=1.0
 
 # Hierarchical loss weights
 STAGE1_WEIGHT=1.0
-STAGE2_WEIGHT=2.0
-AUX_WEIGHT=0.5
-NLL_WEIGHT=0.5
+STAGE2_WEIGHT=0.8
+AUX_WEIGHT=1
+NLL_WEIGHT=2
 STAGE2_TEMPERATURE=1.0
 
-USE_CLASS_WEIGHTS="true"   # set "true" to enable class weights
+USE_CLASS_WEIGHTS="false"   # set "true" to enable class weights
 
 # =============================================================================
 # ENV
