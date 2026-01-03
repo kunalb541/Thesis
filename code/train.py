@@ -1,5 +1,7 @@
 from __future__ import annotations
-
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 import argparse
 import json
 import logging
