@@ -217,7 +217,7 @@ CI_LOWER_PERCENTILE: Final[float] = 2.5
 CI_UPPER_PERCENTILE: Final[float] = 97.5
 
 # u0 dependency analysis
-U0_BINS: Final[np.ndarray] = np.arange(0.0, 1.001, 0.01)
+U0_BINS: Final[np.ndarray] = np.arange(0.0, 1.001, 0.1)
 U0_REFERENCE_LINE: Final[float] = 0.3
 
 # Probability threshold for random classifier
@@ -2074,13 +2074,16 @@ class RomanEvaluator:
         mag_plot = magnification_to_mag(flux_plot, m_base)
 
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=FIG_EVOLUTION, sharex=True)
-
+        final_pred = int(probs_evolution[-1].argmax())
+        pred_name = CLASS_NAMES[final_pred]
+        true_name = CLASS_NAMES[true_label]
+        correct_str = "✓" if final_pred == true_label else "✗"
+        
         # Panel 1: Light curve
         ax1.scatter(times_plot, mag_plot, s=1, alpha=0.7)
         ax1.invert_yaxis()
         ax1.set_ylabel('AB Magnitude', fontsize=FONT_SIZE_LABEL, fontweight='bold')
-        ax1.set_title(f'Probability Evolution: {class_name} (True={CLASS_NAMES[true_label]})',
-                     fontsize=FONT_SIZE_TITLE, fontweight='bold')
+        ax1.set_title(f'Probability Evolution: Pred={pred_name} {correct_str} (True={true_name})')
         ax1.grid(alpha=0.2)
         ax1.tick_params(labelsize=FONT_SIZE_TICK)
 

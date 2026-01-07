@@ -40,7 +40,7 @@ export PYTHONWARNINGS="ignore"
 # DIRECTORIES
 # =============================================================================
 DATA_DIR="$HOME/Thesis/data"
-TRAIN_DIR="$DATA_DIR/train"
+TRAIN_DIR="$DATA_DIR/raw"
 TEST_DIR="$DATA_DIR/test"
 LOG_DIR="$HOME/Thesis/code/logs"
 mkdir -p "$TRAIN_DIR" "$TEST_DIR" "$LOG_DIR"
@@ -59,7 +59,7 @@ N_TEST_PSPL=100000
 N_TEST_BINARY=100000
 
 # Generation settings
-OVERSAMPLE=1.2
+OVERSAMPLE=1.1
 N_WORKERS=100
 
 # Seeds for reproducibility
