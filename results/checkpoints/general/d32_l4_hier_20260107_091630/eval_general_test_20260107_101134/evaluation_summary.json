@@ -1,0 +1,107 @@
+{
+  "experiment": "d32_l4_hier_20260107_091630",
+  "model_path": "../results/checkpoints/general/d32_l4_hier_20260107_091630/best.pt",
+  "data_path": "/home/hd/hd_hd/hd_vm305/Thesis/data/test/general_test.h5",
+  "data_size": 300000,
+  "class_distribution": {
+    "Flat": 100000,
+    "PSPL": 100000,
+    "Binary": 100000
+  },
+  "normalization": {
+    "flux_mean": 1.2300021648406982,
+    "flux_std": 0.9199849367141724,
+    "delta_t_mean": 0.010949384421110153,
+    "delta_t_std": 0.0024517241399735212
+  },
+  "metrics": {
+    "accuracy": 0.70404,
+    "accuracy_ci_lower": 0.7023591666666666,
+    "accuracy_ci_upper": 0.7056900833333334,
+    "precision_macro": 0.717976016961885,
+    "recall_macro": 0.70404,
+    "f1_macro": 0.6824797609202973,
+    "precision_weighted": 0.717976016961885,
+    "recall_weighted": 0.70404,
+    "f1_weighted": 0.6824797609202973,
+    "precision_Flat": 1.0,
+    "recall_Flat": 1.0,
+    "f1_Flat": 1.0,
+    "precision_PSPL": 0.6170745969426114,
+    "recall_PSPL": 0.29548,
+    "f1_PSPL": 0.3996105055313624,
+    "precision_Binary": 0.5368534539430435,
+    "recall_Binary": 0.81664,
+    "f1_Binary": 0.6478287772295293,
+    "roc_auc_macro": 0.8527492163583333,
+    "roc_auc_weighted": 0.8527492163583333,
+    "roc_auc_Flat": 1.0,
+    "roc_auc_PSPL": 0.7773952623,
+    "roc_auc_Binary": 0.780852386775,
+    "confusion_matrix": [
+      [
+        100000,
+        0,
+        0
+      ],
+      [
+        0,
+        29548,
+        70452
+      ],
+      [
+        0,
+        18336,
+        81664
+      ]
+    ],
+    "confusion_matrix_normalized": [
+      [
+        0.9999999999999001,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.29547999999997043,
+        0.7045199999999295
+      ],
+      [
+        0.0,
+        0.18335999999998168,
+        0.8166399999999183
+      ]
+    ]
+  },
+  "config": {
+    "d_model": 32,
+    "n_layers": 4,
+    "dropout": 0.3,
+    "window_size": 5,
+    "max_seq_len": 7000,
+    "n_classes": 3,
+    "hierarchical": true,
+    "use_aux_head": true,
+    "stage2_temperature": 2.0,
+    "use_residual": true,
+    "use_layer_norm": true,
+    "feature_extraction": "conv",
+    "use_attention_pooling": true,
+    "use_amp": false,
+    "use_gradient_checkpointing": false,
+    "use_flash_attention": true,
+    "num_attention_heads": 4,
+    "gru_dropout": 0.2,
+    "bn_momentum": 0.2,
+    "init_scale": 1.0
+  },
+  "parameters": {
+    "batch_size": 128,
+    "calibration_n_bins": 10,
+    "roc_bootstrap_ci": true,
+    "seed": 42
+  },
+  "has_aux_head": true,
+  "timestamp": "2026-01-07T10:25:52.255320",
+  "version": "4.1.1"
+}
