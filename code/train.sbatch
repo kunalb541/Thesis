@@ -51,7 +51,7 @@ ACCUMULATION_STEPS=2
 MAX_EPOCHS=50
 
 # Model architecture
-D_MODEL=64
+D_MODEL=32
 N_LAYERS=4
 DROPOUT=0.3
 WINDOW_SIZE=5
@@ -65,10 +65,10 @@ CLIP_NORM=1.0
 # Hierarchical loss weights
 # v4.1.0: stage1_weight=0.0 for balanced initial probabilities
 # This prevents "Binary starts high" in evolution plots
-STAGE1_WEIGHT=0.0
-STAGE2_WEIGHT=1.0
-AUX_WEIGHT=0.5
-STAGE2_TEMPERATURE=1.0
+STAGE1_WEIGHT=1.0
+STAGE2_WEIGHT=0.5
+AUX_WEIGHT=0.3
+STAGE2_TEMPERATURE=2.0
 
 USE_CLASS_WEIGHTS="true"
 
