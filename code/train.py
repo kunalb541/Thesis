@@ -116,12 +116,12 @@ def _configure_environment() -> None:
     os.environ.setdefault('NCCL_P2P_LEVEL', '5')
     os.environ.setdefault('NCCL_MIN_NCHANNELS', '16')
     os.environ.setdefault('CUDA_DEVICE_MAX_CONNECTIONS', '1')
-    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-    os.environ.setdefault('TORCH_DISTRIBUTED_DEBUG', 'DETAIL')
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:False')
+    os.environ.setdefault('TORCH_DISTRIBUTED_DEBUG', 'OFF')
     os.environ.setdefault('CUDA_LAUNCH_BLOCKING', '0')
     os.environ.setdefault('KINETO_LOG_LEVEL', '5')
     os.environ.setdefault('TORCH_NCCL_AVOID_RECORD_STREAMS', '1')
-    os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
+    os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')
 
 _configure_environment()
 
