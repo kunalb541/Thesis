@@ -14,7 +14,7 @@
 #   sbatch train.sbatch
 # =============================================================================
 #SBATCH -p gpu_a100_short
-#SBATCH -N 10
+#SBATCH -N 12
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH -t 00:30:00
@@ -36,8 +36,8 @@ cd ~/Thesis/code
 # CONFIGURATION
 # =============================================================================
 DATA_DIR="$HOME/Thesis/data"
-GENERAL_TRAIN="${DATA_DIR}/train/general_train.h5"
-DISTINCT_TRAIN="${DATA_DIR}/train/distinct_train.h5"
+GENERAL_TRAIN="${DATA_DIR}/raw/general_train.h5"
+DISTINCT_TRAIN="${DATA_DIR}/raw/distinct_train.h5"
 
 OUTPUT_BASE="../results/checkpoints"
 mkdir -p logs "${OUTPUT_BASE}"
@@ -146,7 +146,7 @@ find_latest_experiment() {
 cleanup_tmp() {
     log_info "Cleaning /tmp..."
     srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 bash -c '
-        rm -f /tmp/train_*_'${USER}'.h5 2>/dev/null || true
+        rm -f /tmp/raw_*_'${USER}'.h5 2>/dev/null || true
         echo "Node $(hostname): /tmp cleaned"
     '
 }
@@ -207,7 +207,7 @@ train_model() {
     mkdir -p "${preset_output}"
 
     local exp_file="${OUTPUT_BASE}/.exp_${preset_name}"
-    local local_train="/tmp/train_${preset_name}_${USER}.h5"
+    local local_train="/tmp/raw_${preset_name}_${USER}.h5"
 
     # Copy train data to /tmp on each node
     if [[ -f "${local_train}" ]]; then
