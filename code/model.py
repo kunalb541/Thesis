@@ -298,8 +298,8 @@ class ModelConfig:
     use_flash_attention: bool = True
     
     # Advanced options
-    num_attention_heads: int = 2
-    gru_dropout: float = 0.1
+    num_attention_heads: int = 4 
+    gru_dropout: float = 0.2
     bn_momentum: float = BN_MOMENTUM
     init_scale: float = 1.0
 
