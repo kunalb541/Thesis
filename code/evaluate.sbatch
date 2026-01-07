@@ -41,7 +41,7 @@ DISTINCT_TEST="${DATA_DIR}/test/distinct_test.h5"
 OUTPUT_BASE="../results/checkpoints"
 
 BATCH_SIZE=128
-N_EVOLUTION=5
+N_EVOLUTION=3
 N_EXAMPLES=4
 SAVE_FORMATS="png"
 
