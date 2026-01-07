@@ -111,7 +111,7 @@ def _configure_environment() -> None:
     os.environ.setdefault('NCCL_IB_TIMEOUT', '20')
     os.environ.setdefault('NCCL_IB_DISABLE', '0')
     os.environ.setdefault('NCCL_NET_GDR_LEVEL', '3')
-    os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+    os.environ.setdefault('TORCH_NCCL_ASYNC_ERROR_HANDLING', '1')
     os.environ.setdefault('NCCL_DEBUG', 'INFO')
     os.environ.setdefault('NCCL_P2P_LEVEL', '5')
     os.environ.setdefault('NCCL_MIN_NCHANNELS', '16')
