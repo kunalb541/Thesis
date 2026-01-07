@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Roman Microlensing Classifier - Evaluation Suite v4.1.0
+Roman Microlensing Classifier - Evaluation Suite v4.1.1
 =======================================================
 
 Production-grade evaluation framework for gravitational microlensing event
 classification models. Computes metrics, generates publication-quality
 visualizations, and performs physics-based performance analysis.
+
+VERSION 4.1.1 FIXES:
+--------------------
+    * CRITICAL FIX: Accept both stats key naming conventions:
+      - train.py v4.1.0+: magnification_mean/magnification_std
+      - older versions: flux_mean/flux_std
+      This ensures compatibility with checkpoints from all train.py versions.
 
 VERSION 4.1.0 FIXES:
 --------------------
@@ -54,7 +61,7 @@ HDF5 'flux' key contains MAGNIFICATION (A):
 
 Author: Kunal Bhatia
 Institution: University of Heidelberg
-Version: 4.1.0
+Version: 4.1.1
 Date: January 2025
 """
 from __future__ import annotations
@@ -111,7 +118,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
-__version__: Final[str] = "4.1.0"
+__version__: Final[str] = "4.1.1"
 
 # =============================================================================
 # CONSTANTS
@@ -210,7 +217,7 @@ CI_LOWER_PERCENTILE: Final[float] = 2.5
 CI_UPPER_PERCENTILE: Final[float] = 97.5
 
 # u0 dependency analysis
-U0_BINS: Final[np.ndarray] = np.array([0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0])
+U0_BINS: Final[np.ndarray] = np.arange(0.0, 1.001, 0.01)
 U0_REFERENCE_LINE: Final[float] = 0.3
 
 # Probability threshold for random classifier
@@ -230,17 +237,7 @@ ROMAN_SOURCE_MAG_MIN: Final[float] = 18.0
 ROMAN_SOURCE_MAG_MAX: Final[float] = 24.0
 ROMAN_DEFAULT_BASELINE_MAG: Final[float] = 22.0
 
-# v4.1.0 FIX: Corrected comment - this produces ~45 checkpoints, not ~70
-# v4.0.0 FIX: Reduced from range(100, 6920, 5) which created 1364 checkpoints!
-# Now uses ~45 checkpoints with geometric-like spacing for faster evolution plots
-# For 72-day season with 6912 observations, sample at reasonable intervals
-EVOLUTION_OBS_COUNTS: Final[List[int]] = (
-    list(range(100, 500, 50)) +      # 100-450: every 50 obs (8 points)
-    list(range(500, 2000, 100)) +    # 500-1900: every 100 obs (15 points)
-    list(range(2000, 4000, 200)) +   # 2000-3800: every 200 obs (10 points)
-    list(range(4000, 6000, 300)) +   # 4000-5700: every 300 obs (7 points)
-    list(range(6000, 6913, 200))     # 6000-6912: every 200 obs (5 points)
-)  # Total: ~45 checkpoints
+EVOLUTION_OBS_COUNTS: Final[List[int]] = list(range(100, 6920, 5))
 
 # Font sizes for plots
 FONT_SIZE_TITLE: Final[int] = 12
@@ -796,18 +793,34 @@ def load_normalization_stats(checkpoint_path: Path) -> Dict[str, float]:
         )
 
     stats_dict = checkpoint['stats']
-    required_keys = {'flux_mean', 'flux_std', 'delta_t_mean', 'delta_t_std'}
-    missing_keys = required_keys - set(stats_dict.keys())
-
-    if missing_keys:
-        raise ValueError(f"Stats missing required keys: {missing_keys}")
-
-    stats = {
-        'flux_mean': float(stats_dict['flux_mean']),
-        'flux_std': float(stats_dict['flux_std']),
-        'delta_t_mean': float(stats_dict['delta_t_mean']),
-        'delta_t_std': float(stats_dict['delta_t_std'])
-    }
+    
+    # v4.1.1 FIX: Accept both naming conventions
+    # train.py v4.1.0 uses: magnification_mean/magnification_std
+    # older versions used: flux_mean/flux_std
+    new_keys = {'magnification_mean', 'magnification_std', 'delta_t_mean', 'delta_t_std'}
+    old_keys = {'flux_mean', 'flux_std', 'delta_t_mean', 'delta_t_std'}
+    
+    if new_keys.issubset(stats_dict.keys()):
+        # New naming convention (train.py v4.1.0+)
+        stats = {
+            'flux_mean': float(stats_dict['magnification_mean']),
+            'flux_std': float(stats_dict['magnification_std']),
+            'delta_t_mean': float(stats_dict['delta_t_mean']),
+            'delta_t_std': float(stats_dict['delta_t_std'])
+        }
+    elif old_keys.issubset(stats_dict.keys()):
+        # Old naming convention (backward compatibility)
+        stats = {
+            'flux_mean': float(stats_dict['flux_mean']),
+            'flux_std': float(stats_dict['flux_std']),
+            'delta_t_mean': float(stats_dict['delta_t_mean']),
+            'delta_t_std': float(stats_dict['delta_t_std'])
+        }
+    else:
+        raise ValueError(
+            f"Stats missing required keys. Found: {list(stats_dict.keys())}. "
+            f"Expected either {new_keys} or {old_keys}"
+        )
 
     for key, value in stats.items():
         if not np.isfinite(value):
