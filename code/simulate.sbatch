@@ -49,9 +49,9 @@ mkdir -p "$TRAIN_DIR" "$TEST_DIR" "$LOG_DIR"
 # DATASET CONFIGURATION
 # =============================================================================
 # Training: 100K per class = 300K total per dataset
-N_TRAIN_FLAT=100000
-N_TRAIN_PSPL=100000
-N_TRAIN_BINARY=100000
+N_TRAIN_FLAT=200000
+N_TRAIN_PSPL=200000
+N_TRAIN_BINARY=200000
 
 # Test: 100K per class = 300K total per dataset
 N_TEST_FLAT=100000
