@@ -569,3 +569,7 @@ changed."
 - Zenodo DOI: dropped for this revision by the author (2026-09-12); the GitHub URL stays.
 - arXiv posting once an endorser is found; SSRN preprint (10.2139/ssrn.7295158) stands meanwhile.
 - Convert AASTeX → elsarticle only if the editor asks.
+- Bibliography fixes pending from the 2026-09-20 reference check (`docs/VERIFICATION_2026-09-20.md` §1): article
+  numbers for Wyrzykowski 2015 (12), Kim 2018 (76) and Zhang 2021 (262); DOI 10.1086/306256 for Gaudi 1998; PLAsTiCC
+  published as ApJS 267, 25 (2023); Roman zeropoints path now under `roman_technical_information/`; optionally cite
+  Zang et al. 2021 (AJ 162, 163) for the AnomalyFinder method. Apply at proof stage or the next revision.

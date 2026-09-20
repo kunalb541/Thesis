@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — reference check and code self-check (2026-09-20)
+
+Manual, no agents; record: `docs/VERIFICATION_2026-09-20.md`. All 48 references were read at their published
+record and checked against the sentence each supports: every claim is supported and every bibliographic detail
+matches. Six entries are incomplete or stale (missing article numbers for Wyrzykowski 2015, Kim 2018 and
+Zhang 2021; no DOI for Gaudi 1998; PLAsTiCC now published as ApJS 267, 25; the Roman zeropoints file path moved),
+left as pending fixes. `pipeline/evaluate.py` was read end to end and its headline numbers, split, label
+consistency and intervals reproduced from the frozen artifact. Four documentation statements disagree with the
+code without moving a number (the leakage audit and glossary say recall is never reweighted, but Table 3's recall
+is; a stale docstring in `mix_finetune.py`; "effective events" means a sum of weights in Fig. 9 but Kish n_eff in
+Sec. 8; no length assertion between memmap and label columns). Also records how the defect classes of an external
+review of the author's CAMELS paper map onto this codebase.
+
 ## Unreleased — presentation revision (2026-09-15)
 
 Answers the referee's presentation comment (item 8): the paper was hard to read because nearly every sentence carried
