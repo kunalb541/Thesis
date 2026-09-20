@@ -1,4 +1,4 @@
-<h1 align="center">BinML: Binary ML</h1>
+<h1 align="center">BinML</h1>
 
 <p align="center">
   <b>Multi-band, 6-class triage of progressively revealed microlensing and variable-star light curves.</b><br>
